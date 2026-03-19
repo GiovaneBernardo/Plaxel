@@ -1,1 +1,12 @@
-/target
+# Compiled output
+/target/
+
+# Rust package manager lock file
+Cargo.lock
+
+# Backup files
+**/*.rs.bk
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
