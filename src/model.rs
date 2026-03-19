@@ -47,12 +47,15 @@ pub struct Model {
 }
 
 pub struct Material {
+    #[allow(dead_code)]
     pub name: String,
+    #[allow(dead_code)]
     pub diffuse_texture: texture::Texture,
     pub bind_group: wgpu::BindGroup,
 }
 
 pub struct Mesh {
+    #[allow(dead_code)]
     pub name: String,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,

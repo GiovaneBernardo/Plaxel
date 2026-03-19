@@ -18,8 +18,6 @@ use winit::{
     window::Window,
 };
 
-const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
-
 // This will store the state of our game
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -104,13 +102,6 @@ impl Instance {
     }
 }
 
-const NUM_INSTANCES_PER_ROW: u32 = 10;
-const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-    0.0,
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-);
-
 impl State {
     // We don't need this to be async right now,
     // but we will in the next tutorial
@@ -176,17 +167,21 @@ impl State {
         };
 
         let camera = camera::Camera {
-            // position the camera 1 unit up and 2 units back
-            // +z is out of the screen
+            position: (0.0, 1.0, 2.0).into(),
+            yaw: -90.0,
+            pitch: 0.0,
+            front: (0.0, 0.0, -1.0).into(),
+            up: cgmath::Vector3::unit_y(),
+            right: cgmath::Vector3::unit_x(),
+            world_up: cgmath::Vector3::unit_y(),
             eye: (0.0, 1.0, 2.0).into(),
             // have it look at the origin
             target: (0.0, 0.0, 0.0).into(),
             // which way is "up"
-            up: cgmath::Vector3::unit_y(),
             aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
+            fovy: 65.0,
             znear: 0.1,
-            zfar: 100.0,
+            zfar: 15000.0,
         };
 
         let mut camera_uniform = camera::CameraUniform::new();
@@ -330,7 +325,8 @@ impl State {
 
         let camera_controller = camera::CameraController::new(0.2);
 
-        const SPACE_BETWEEN: f32 = 4.0;
+        const NUM_INSTANCES_PER_ROW: u32 = 10;
+        const SPACE_BETWEEN: f32 = 48.0;
         let instances = (0..NUM_INSTANCES_PER_ROW)
             .flat_map(|z| {
                 (0..NUM_INSTANCES_PER_ROW).map(move |x| {
@@ -367,10 +363,14 @@ impl State {
         let depth_texture =
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
-        let obj_model =
-            resources::load_model("cube_obj", &device, &queue, &texture_bind_group_layout)
-                .await
-                .unwrap();
+        let obj_model = resources::load_model(
+            "Sponza-master/sponza.obj",
+            &device,
+            &queue,
+            &texture_bind_group_layout,
+        )
+        .await
+        .unwrap();
 
         Ok(Self {
             surface,
@@ -402,6 +402,7 @@ impl State {
             self.is_surface_configured = true;
             self.depth_texture =
                 texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+            self.camera.aspect = width as f32 / height as f32;
         }
     }
 
@@ -410,6 +411,12 @@ impl State {
             event_loop.exit();
         } else {
             self.camera_controller.handle_key(code, is_pressed);
+        }
+    }
+
+    fn handle_mouse_click(&mut self, button: MouseButton, is_pressed: bool) {
+        if button == MouseButton::Right {
+            self.camera_controller.handle_mouse_click(is_pressed);
         }
     }
 
@@ -610,7 +617,44 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            WindowEvent::CursorMoved {
+                position: winit::dpi::PhysicalPosition { x, y },
+                ..
+            } => {
+                // state.camera_controller.handle_mouse(x, y);
+            }
+            WindowEvent::MouseInput {
+                device_id,
+                state: key_state,
+                button,
+            } => state.handle_mouse_click(button, key_state.is_pressed()),
             _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let Some(state) = &mut self.state {
+            if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+                if state.camera_controller.is_right_click_pressed {
+                    state.camera_controller.handle_mouse(dx as f32, dy as f32);
+                    state
+                        .window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                        .ok();
+                    state.window.set_cursor_visible(false);
+                } else {
+                    state.window.set_cursor_visible(true);
+                    state
+                        .window
+                        .set_cursor_grab(winit::window::CursorGrabMode::None)
+                        .ok();
+                }
+            }
         }
     }
 }

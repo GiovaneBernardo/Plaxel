@@ -1,9 +1,15 @@
 use winit::keyboard::KeyCode;
 
 pub struct Camera {
+    pub position: cgmath::Point3<f32>,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub front: cgmath::Vector3<f32>,
+    pub up: cgmath::Vector3<f32>,
+    pub right: cgmath::Vector3<f32>,
+    pub world_up: cgmath::Vector3<f32>,
     pub eye: cgmath::Point3<f32>,
     pub target: cgmath::Point3<f32>,
-    pub up: cgmath::Vector3<f32>,
     pub aspect: f32,
     pub fovy: f32,
     pub znear: f32,
@@ -12,12 +18,8 @@ pub struct Camera {
 
 impl Camera {
     pub fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        // 1.
-        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        // 2.
+        let view = cgmath::Matrix4::look_at_rh(self.position, self.position + self.front, self.up);
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-
-        // 3.
         return OPENGL_TO_WGPU_MATRIX * proj * view;
     }
 }
@@ -59,6 +61,11 @@ pub struct CameraController {
     is_backward_pressed: bool,
     is_left_pressed: bool,
     is_right_pressed: bool,
+    is_up_pressed: bool,
+    is_down_pressed: bool,
+    pub is_right_click_pressed: bool,
+    yaw: f32,
+    pitch: f32,
 }
 
 impl CameraController {
@@ -69,6 +76,11 @@ impl CameraController {
             is_backward_pressed: false,
             is_left_pressed: false,
             is_right_pressed: false,
+            is_up_pressed: false,
+            is_down_pressed: false,
+            is_right_click_pressed: false,
+            yaw: 0.0,
+            pitch: 0.0,
         }
     }
 
@@ -90,39 +102,67 @@ impl CameraController {
                 self.is_right_pressed = is_pressed;
                 true
             }
+            KeyCode::KeyC | KeyCode::PageDown => {
+                self.is_down_pressed = is_pressed;
+                true
+            }
+            KeyCode::Space | KeyCode::PageUp => {
+                self.is_up_pressed = is_pressed;
+                true
+            }
             _ => false,
         }
     }
 
+    pub fn handle_mouse_click(&mut self, is_pressed: bool) {
+        self.is_right_click_pressed = is_pressed;
+    }
+
+    pub fn handle_mouse(&mut self, _x: f32, _y: f32) {
+        self.yaw += _x as f32 * 0.1;
+        self.pitch += _y as f32 * 0.1;
+    }
+
     pub fn update_camera(&self, camera: &mut Camera) {
         use cgmath::InnerSpace;
-        let forward = camera.target - camera.eye;
-        let forward_norm = forward.normalize();
-        let forward_mag = forward.magnitude();
 
-        // Prevents glitching when the camera gets too close to the
-        // center of the scene.
-        if self.is_forward_pressed && forward_mag > self.speed {
-            camera.eye += forward_norm * self.speed;
+        if self.is_right_click_pressed {
+            // Update camera direction
+            camera.yaw += self.yaw;
+            camera.pitch += self.pitch;
+            // Limit the pitch to prevent screen flip
+            camera.pitch = camera.pitch.clamp(-89.0, 89.0);
+
+            camera.front.x = self.yaw.to_radians().cos() * self.pitch.to_radians().cos();
+            camera.front.y = -self.pitch.to_radians().sin();
+            camera.front.z = self.yaw.to_radians().sin() * self.pitch.to_radians().cos();
+
+            camera.right = camera.front.cross(camera.world_up).normalize();
+            camera.up = camera.right.cross(camera.front).normalize();
+        }
+
+        // Forward Backward
+        if self.is_forward_pressed {
+            camera.position += camera.front * self.speed;
         }
         if self.is_backward_pressed {
-            camera.eye -= forward_norm * self.speed;
+            camera.position -= camera.front * self.speed;
         }
 
-        let right = forward_norm.cross(camera.up);
-
-        // Redo radius calc in case the forward/backward is pressed.
-        let forward = camera.target - camera.eye;
-        let _forward_mag = forward.magnitude();
-
+        // Right Left
         if self.is_right_pressed {
-            // Rescale the distance between the target and the eye so
-            // that it doesn't change. The eye, therefore, still
-            // lies on the circle made by the target and eye.
-            camera.eye += right.normalize() * self.speed; //camera.target - (forward + right * self.speed).normalize() * forward_mag;
+            camera.position += camera.right * self.speed;
         }
         if self.is_left_pressed {
-            camera.eye -= right.normalize() * self.speed; //camera.target - (forward - right * self.speed).normalize() * forward_mag;
+            camera.position -= camera.right * self.speed;
+        }
+
+        // Up down
+        if self.is_up_pressed {
+            camera.position += camera.up.normalize() * self.speed;
+        }
+        if self.is_down_pressed {
+            camera.position -= camera.up.normalize() * self.speed;
         }
     }
 }
