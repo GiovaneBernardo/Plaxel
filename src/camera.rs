@@ -1,7 +1,4 @@
-use winit::{
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-};
+use winit::keyboard::KeyCode;
 
 pub struct Camera {
     pub eye: cgmath::Point3<f32>,
@@ -116,7 +113,7 @@ impl CameraController {
 
         // Redo radius calc in case the forward/backward is pressed.
         let forward = camera.target - camera.eye;
-        let forward_mag = forward.magnitude();
+        let _forward_mag = forward.magnitude();
 
         if self.is_right_pressed {
             // Rescale the distance between the target and the eye so
