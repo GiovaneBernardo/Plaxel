@@ -364,7 +364,7 @@ impl State {
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
         let obj_model = resources::load_model(
-            "Sponza-master/sponza.obj",
+            "res/Sponza-master/sponza.obj",
             &device,
             &queue,
             &texture_bind_group_layout,
