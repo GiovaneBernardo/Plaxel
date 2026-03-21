@@ -1,8 +1,14 @@
+use rand::Rng;
 use std::sync::Arc;
-mod camera;
-mod model;
-mod resources;
-mod texture;
+
+mod assets;
+mod engine;
+mod renderer;
+
+use engine::camera;
+use engine::ecs;
+use renderer::model;
+use renderer::texture;
 
 use cgmath::prelude::*;
 use model::Vertex;
@@ -18,6 +24,8 @@ use winit::{
     window::Window,
 };
 
+use crate::engine::components::core::TransformComponent;
+
 // This will store the state of our game
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -27,8 +35,6 @@ pub struct State {
     is_surface_configured: bool,
     render_pipeline: wgpu::RenderPipeline,
     window: Arc<Window>,
-    diffuse_bind_group: wgpu::BindGroup,
-    diffuse_texture: texture::Texture,
     camera: camera::Camera,
     camera_uniform: camera::CameraUniform,
     camera_buffer: wgpu::Buffer,
@@ -38,6 +44,7 @@ pub struct State {
     instance_buffer: wgpu::Buffer,
     depth_texture: texture::Texture,
     obj_model: model::Model,
+    scene: ecs::Scene,
 }
 
 #[repr(C)]
@@ -217,10 +224,6 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let diffuse_bytes = include_bytes!("happy-tree.png"); // CHANGED!
-        let diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
-
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -245,21 +248,6 @@ impl State {
                 ],
                 label: Some("texture_bind_group_layout"),
             });
-
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
 
         // Shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -325,7 +313,7 @@ impl State {
 
         let camera_controller = camera::CameraController::new(0.2);
 
-        const NUM_INSTANCES_PER_ROW: u32 = 10;
+        const NUM_INSTANCES_PER_ROW: u32 = 20;
         const SPACE_BETWEEN: f32 = 48.0;
         let instances = (0..NUM_INSTANCES_PER_ROW)
             .flat_map(|z| {
@@ -357,20 +345,48 @@ impl State {
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
         let depth_texture =
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
-        let obj_model = resources::load_model(
-            "res/Sponza-master/sponza.obj",
+        let mut obj_model = assets::resources::load_model(
+            "../res/Sponza-Master/sponza.obj",
             &device,
             &queue,
             &texture_bind_group_layout,
         )
         .await
         .unwrap();
+
+        let mut scene = ecs::Scene::new();
+        let mut rng = rand::thread_rng();
+
+        for y in 0..NUM_INSTANCES_PER_ROW {
+            for x in 0..NUM_INSTANCES_PER_ROW {
+                let mut entity = scene.create_entity();
+                let mut transform_component = TransformComponent {
+                    position: (x as f32 * 32.0, 0.0, y as f32 * 32.0).into(),
+                    rotation: cgmath::Quaternion::from_axis_angle(
+                        cgmath::Vector3::unit_y(),
+                        cgmath::Deg(0.0),
+                    ),
+                    scale: (1.0, 1.0, 1.0).into(),
+                    velocity: (0.0, 0.0, 0.0).into(),
+                };
+
+                transform_component.velocity.x += rng.gen_range(-0.01..0.01);
+                transform_component.velocity.y += rng.gen_range(-0.01..0.01);
+                transform_component.velocity.z += rng.gen_range(-0.01..0.01);
+
+                let mut mesh_renderer = engine::components::renderer::MeshRenderer {
+                    model: obj_model.clone(),
+                };
+                scene.add_transform_component(&entity, transform_component);
+                scene.add_mesh_renderer(&entity, mesh_renderer);
+            }
+        }
 
         Ok(Self {
             surface,
@@ -380,8 +396,6 @@ impl State {
             is_surface_configured: false,
             render_pipeline,
             window,
-            diffuse_bind_group,
-            diffuse_texture,
             camera,
             camera_uniform,
             camera_buffer,
@@ -391,6 +405,7 @@ impl State {
             instance_buffer,
             depth_texture,
             obj_model,
+            scene,
         })
     }
 
@@ -473,12 +488,40 @@ impl State {
                 multiview_mask: None,
             });
 
+            self.scene.update();
+            let mut scene_instances = self.scene.get_instances();
+
+            //            let instances_data = scene_instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+            //let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            //    label: Some("Instance Buffer"),
+            //    contents: bytemuck::cast_slice(&instance_data),
+            //    usage: wgpu::BufferUsages::VERTEX,
+            //});
+
+            // Update data of instances_buffer with scene_instances
+            self.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(
+                    &scene_instances
+                        .iter()
+                        .map(Instance::to_raw)
+                        .collect::<Vec<_>>(),
+                ),
+            );
+
             use model::DrawModel;
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_pipeline(&self.render_pipeline);
+            //render_pass.draw_model_instanced(
+            //    &self.obj_model,
+            //    0..self.instances.len() as u32,
+            //    &self.camera_bind_group,
+            //);
+
             render_pass.draw_model_instanced(
                 &self.obj_model,
-                0..self.instances.len() as u32,
+                0..scene_instances.len() as u32,
                 &self.camera_bind_group,
             );
         }

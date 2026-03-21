@@ -1,6 +1,7 @@
 use anyhow::*;
 use image::GenericImageView;
 
+#[derive(Clone)]
 pub struct Texture {
     #[allow(unused)]
     pub texture: wgpu::Texture,

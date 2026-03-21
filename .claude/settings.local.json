@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mv \"C:/Users/souza/Desktop/Workspace/Rust/plaxel/src/core.rs\" \"C:/Users/souza/Desktop/Workspace/Rust/plaxel/src/engine.rs\")",
+      "Bash(mv \"C:/Users/souza/Desktop/Workspace/Rust/plaxel/src/core\" \"C:/Users/souza/Desktop/Workspace/Rust/plaxel/src/engine\")"
+    ]
+  }
+}

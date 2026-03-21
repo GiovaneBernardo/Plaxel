@@ -41,11 +41,13 @@ impl Vertex for ModelVertex {
     }
 }
 
+#[derive(Clone)]
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
 }
 
+#[derive(Clone)]
 pub struct Material {
     #[allow(dead_code)]
     pub name: String,
@@ -54,6 +56,7 @@ pub struct Material {
     pub bind_group: wgpu::BindGroup,
 }
 
+#[derive(Clone)]
 pub struct Mesh {
     #[allow(dead_code)]
     pub name: String,

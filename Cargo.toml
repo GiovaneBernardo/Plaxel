@@ -20,6 +20,7 @@ pollster = "0.3"
 bytemuck = { version = "1.24", features = [ "derive" ] }
 cgmath = "0.18"
 tobj = { version = "3.2", default-features = false, features = ["async"]}
+rand = "0.8.5"
 
 [dependencies.image]
 version = "0.24"
@@ -47,6 +48,7 @@ web-sys = { version = "0.3.69", features = [
     "Location",
 ]}
 reqwest = { version = "0.11" }
+getrandom = { version = "0.2.15", features = ["js"] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
