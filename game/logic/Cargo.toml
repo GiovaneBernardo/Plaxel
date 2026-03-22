@@ -1,0 +1,13 @@
+[package]
+name = "game-logic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+engine = { path = "../../engine" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

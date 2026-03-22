@@ -8,6 +8,6 @@ pub struct TransformComponent {
 
 #[allow(dead_code)]
 pub struct CameraComponent {
-    camera: crate::engine::camera::Camera,
-    controller: crate::engine::camera::CameraController,
+    camera: crate::core::camera::Camera,
+    controller: crate::core::camera::CameraController,
 }

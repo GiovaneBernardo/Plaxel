@@ -24,10 +24,10 @@ impl Entity {
 }
 
 pub struct Scene {
-    entities: Vec<Entity>,
-    transform_components: Vec<components::core::TransformComponent>,
-    mesh_renderers: Vec<components::renderer::MeshRenderer>,
-    camera_components: Vec<components::core::CameraComponent>,
+    pub entities: Vec<Entity>,
+    pub transform_components: Vec<components::core::TransformComponent>,
+    pub mesh_renderers: Vec<components::renderer::MeshRenderer>,
+    pub camera_components: Vec<components::core::CameraComponent>,
 }
 
 impl Scene {
@@ -63,8 +63,14 @@ impl Scene {
         self.mesh_renderers.push(mesh_renderer);
     }
 
-    pub fn get_instances(&self) -> Vec<Instance> {
-        let mut instances: Vec<Instance> = Vec::new();
+    pub fn update(&mut self) {
+        for transform in &mut self.transform_components {
+            transform.position += transform.velocity;
+        }
+    }
+
+    pub fn get_instances(&self) -> Vec<crate::Instance> {
+        let mut instances: Vec<crate::Instance> = Vec::new();
         for (transform, mesh_renderer) in self
             .transform_components
             .iter()
@@ -72,10 +78,10 @@ impl Scene {
         {
             // Here you would typically set up the rendering pipeline and draw the mesh using the transform.
             // This is a placeholder to indicate where rendering logic would go.
-            instances.push(Instance {
-                position,
-                rotation,
-                scale: 0.01,
+            instances.push(crate::Instance {
+                position: transform.position,
+                rotation: transform.rotation,
+                scale: transform.scale.x,
             });
         }
         instances

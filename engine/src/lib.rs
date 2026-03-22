@@ -2,11 +2,11 @@ use rand::Rng;
 use std::sync::Arc;
 
 mod assets;
-mod engine;
+mod core;
 mod renderer;
 
-use engine::camera;
-use engine::ecs;
+use core::camera;
+use core::ecs;
 use renderer::model;
 use renderer::texture;
 
@@ -16,7 +16,7 @@ use model::Vertex;
 use wasm_bindgen::prelude::*;
 use wgpu::util::DeviceExt;
 
-use winit::{
+pub use winit::{
     application::ApplicationHandler,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
@@ -24,27 +24,27 @@ use winit::{
     window::Window,
 };
 
-use crate::engine::components::core::TransformComponent;
+use crate::core::components::core::TransformComponent;
 
 // This will store the state of our game
 pub struct State {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    is_surface_configured: bool,
-    render_pipeline: wgpu::RenderPipeline,
-    window: Arc<Window>,
-    camera: camera::Camera,
-    camera_uniform: camera::CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    camera_controller: camera::CameraController,
-    instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
-    depth_texture: texture::Texture,
-    obj_model: model::Model,
-    scene: ecs::Scene,
+    pub surface: wgpu::Surface<'static>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub config: wgpu::SurfaceConfiguration,
+    pub is_surface_configured: bool,
+    pub render_pipeline: wgpu::RenderPipeline,
+    pub window: Arc<Window>,
+    pub camera: camera::Camera,
+    pub camera_uniform: camera::CameraUniform,
+    pub camera_buffer: wgpu::Buffer,
+    pub camera_bind_group: wgpu::BindGroup,
+    pub camera_controller: camera::CameraController,
+    pub instances: Vec<Instance>,
+    pub instance_buffer: wgpu::Buffer,
+    pub depth_texture: texture::Texture,
+    pub obj_model: model::Model,
+    pub scene: ecs::Scene,
 }
 
 #[repr(C)]
@@ -372,7 +372,7 @@ impl State {
                         cgmath::Vector3::unit_y(),
                         cgmath::Deg(0.0),
                     ),
-                    scale: (1.0, 1.0, 1.0).into(),
+                    scale: (0.01, 0.01, 0.01).into(),
                     velocity: (0.0, 0.0, 0.0).into(),
                 };
 
@@ -380,7 +380,7 @@ impl State {
                 transform_component.velocity.y += rng.gen_range(-0.01..0.01);
                 transform_component.velocity.z += rng.gen_range(-0.01..0.01);
 
-                let mut mesh_renderer = engine::components::renderer::MeshRenderer {
+                let mut mesh_renderer = core::components::renderer::MeshRenderer {
                     model: obj_model.clone(),
                 };
                 scene.add_transform_component(&entity, transform_component);
@@ -548,6 +548,8 @@ pub struct App {
     #[cfg(target_arch = "wasm32")]
     proxy: Option<winit::event_loop::EventLoopProxy<State>>,
     state: Option<State>,
+    on_update: Option<Box<dyn FnMut(&mut State)>>,
+    on_key: Option<Box<dyn FnMut(KeyCode, bool)>>,
 }
 
 impl App {
@@ -556,9 +558,21 @@ impl App {
         let proxy = Some(event_loop.create_proxy());
         Self {
             state: None,
+            on_update: None,
+            on_key: None,
             #[cfg(target_arch = "wasm32")]
             proxy,
         }
+    }
+
+    pub fn with_update(mut self, f: impl FnMut(&mut State) + 'static) -> Self {
+        self.on_update = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_on_key(mut self, f: impl FnMut(KeyCode, bool) + 'static) -> Self {
+        self.on_key = Some(Box::new(f));
+        self
     }
 }
 
@@ -639,6 +653,9 @@ impl ApplicationHandler<State> for App {
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
                 state.update();
+                if let Some(f) = &mut self.on_update {
+                    f(state);
+                }
                 match state.render() {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
@@ -659,7 +676,12 @@ impl ApplicationHandler<State> for App {
                         ..
                     },
                 ..
-            } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            } => {
+                state.handle_key(event_loop, code, key_state.is_pressed());
+                if let Some(f) = &mut self.on_key {
+                    f(code, key_state.is_pressed());
+                }
+            }
             WindowEvent::CursorMoved {
                 position: winit::dpi::PhysicalPosition { x, y },
                 ..

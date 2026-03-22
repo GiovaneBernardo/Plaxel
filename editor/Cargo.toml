@@ -1,0 +1,13 @@
+[package]
+name = "editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+engine = { path = "../engine" }
+game-logic = { path = "../game/logic" }
+anyhow = "1.0"
+hot-lib-reloader = "0.8.2"
+env_logger = "0.10"
+winit = { version = "0.30", features = ["android-native-activity"] }
+egui = "0.33.3"
