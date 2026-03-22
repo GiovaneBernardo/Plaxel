@@ -1,3 +1,4 @@
+#[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(
     dylib = "game_logic",
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
@@ -14,15 +15,22 @@ fn main() {
         .unwrap();
     let mut app = engine::App::new()
         .with_update(|state| {
+            #[cfg(feature = "hot-reload")]
             game::update(state);
+
+            #[cfg(not(feature = "hot-reload"))]
+            game_logic::update(state);
         })
         .with_on_key(|code, pressed| {
             if code == engine::KeyCode::KeyY && pressed {
-                std::process::Command::new("cargo")
-                    .args(["build", "-p", "game-logic"])
-                    .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-                    .spawn()
-                    .ok();
+                #[cfg(feature = "hot-reload")]
+                {
+                    std::process::Command::new("cargo")
+                        .args(["build", "-p", "game-logic"])
+                        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                        .spawn()
+                        .ok();
+                }
             }
         });
 

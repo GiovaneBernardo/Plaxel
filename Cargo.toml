@@ -1,5 +1,12 @@
 [workspace]
-members = ["engine", "editor", "game/logic", "game/types", "game/runner"]
+members = [
+    "engine",
+    "editor/runner",
+    "editor/logic",
+    "game/logic",
+    "game/types",
+    "game/runner",
+]
 resolver = "2"
 
 [profile.dev]

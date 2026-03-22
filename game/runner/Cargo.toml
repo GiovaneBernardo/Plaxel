@@ -3,10 +3,13 @@ name = "game-runner"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+hot-reload = ["dep:hot-lib-reloader"]
+
 [dependencies]
 engine = { path = "../../engine" }
 game-logic = { path = "../logic" }
 game-types = { path = "../types" }
-hot-lib-reloader = "0.8.2"
+hot-lib-reloader = { version = "0.8.2", optional = true }
 env_logger = "0.10"
 winit = { version = "0.30", features = ["android-native-activity"] }

@@ -45,6 +45,7 @@ pub struct State {
     pub depth_texture: texture::Texture,
     pub obj_model: model::Model,
     pub scene: ecs::Scene,
+    pub events: Vec<WindowEvent>,
 }
 
 #[repr(C)]
@@ -259,7 +260,7 @@ impl State {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
                 bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
-                immediate_size: 0,
+                push_constant_ranges: &[],
             });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -307,8 +308,8 @@ impl State {
                 mask: !0,                         // 3.
                 alpha_to_coverage_enabled: false, // 4.
             },
-            multiview_mask: None, // 5.
-            cache: None,          // 6.
+            multiview: None, // 5.
+            cache: None,     // 6.
         });
 
         let camera_controller = camera::CameraController::new(0.2);
@@ -406,6 +407,7 @@ impl State {
             depth_texture,
             obj_model,
             scene,
+            events: Vec::new(),
         })
     }
 
@@ -435,7 +437,10 @@ impl State {
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(
+        &mut self,
+        on_render: &mut Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>>,
+    ) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
         // We can't render unless the surface is configured
@@ -485,7 +490,6 @@ impl State {
 
                 occlusion_query_set: None,
                 timestamp_writes: None,
-                multiview_mask: None,
             });
 
             self.scene.update();
@@ -526,6 +530,10 @@ impl State {
             );
         }
 
+        if let Some(f) = on_render {
+            f(&self.device, &self.queue, &view, &mut encoder);
+        }
+
         // submit will accept anything that implements IntoIter
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -550,6 +558,7 @@ pub struct App {
     state: Option<State>,
     on_update: Option<Box<dyn FnMut(&mut State)>>,
     on_key: Option<Box<dyn FnMut(KeyCode, bool)>>,
+    on_render: Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>>,
 }
 
 impl App {
@@ -560,6 +569,7 @@ impl App {
             state: None,
             on_update: None,
             on_key: None,
+            on_render: None,
             #[cfg(target_arch = "wasm32")]
             proxy,
         }
@@ -572,6 +582,11 @@ impl App {
 
     pub fn with_on_key(mut self, f: impl FnMut(KeyCode, bool) + 'static) -> Self {
         self.on_key = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_render(mut self, f: impl FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder) + 'static) -> Self {
+        self.on_render = Some(Box::new(f));
         self
     }
 }
@@ -648,6 +663,10 @@ impl ApplicationHandler<State> for App {
             None => return,
         };
 
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            state.events.push(event.clone());
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
@@ -656,7 +675,8 @@ impl ApplicationHandler<State> for App {
                 if let Some(f) = &mut self.on_update {
                     f(state);
                 }
-                match state.render() {
+                state.events.clear();
+                match state.render(&mut self.on_render) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

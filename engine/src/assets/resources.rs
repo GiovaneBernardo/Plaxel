@@ -22,9 +22,13 @@ pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     };
     #[cfg(not(target_arch = "wasm32"))]
     let txt = {
-        let path = std::path::Path::new(env!("OUT_DIR"))
-            .join("res")
-            .join(file_name);
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .expect("exe has no parent directory")
+            .to_path_buf();
+
+        let path = exe_dir.join("res").join(file_name);
+        eprintln!("Loading: {}", path.display());
         std::fs::read_to_string(path)?
     };
 
@@ -37,11 +41,16 @@ pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
         let url = format_url(file_name);
         reqwest::get(url).await?.bytes().await?.to_vec()
     };
+
     #[cfg(not(target_arch = "wasm32"))]
     let data = {
-        let path = std::path::Path::new(env!("OUT_DIR"))
-            .join("res")
-            .join(file_name);
+        // Get the folder where the .exe lives
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .expect("exe has no parent directory")
+            .to_path_buf();
+
+        let path = exe_dir.join("res").join(file_name);
         std::fs::read(path)?
     };
 
