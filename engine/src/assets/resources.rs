@@ -3,7 +3,10 @@ use std::io::{BufReader, Cursor};
 use image::RgbaImage;
 use wgpu::util::DeviceExt;
 
-use crate::renderer::{model, texture};
+use crate::{
+    engine_info,
+    renderer::{model, texture},
+};
 
 #[cfg(target_arch = "wasm32")]
 fn format_url(file_name: &str) -> reqwest::Url {
@@ -77,6 +80,7 @@ pub async fn load_model(
         .and_then(|p| p.to_str())
         .unwrap_or("")
         .to_string();
+    engine_info!("Loading: {}", file_name);
     eprintln!("File Name: {}", file_name);
     eprintln!("Model directory: {}", model_dir);
 

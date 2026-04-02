@@ -4,7 +4,7 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
         .resizable([true, true])
         .default_size([2000.0, 1000.0])
         .show(ctx, |ui| {
-            ui.label("Hello from egui asdadsadasdasdadqweqeqw!");
+            ui.label("Hierarchy");
             if ui.button("Click me").clicked() {}
 
             let mut i = 0;
@@ -12,7 +12,7 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
                 egui::CollapsingHeader::new(i.to_string())
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.add(egui::Label::new("Position (World)"));
+                        ui.add(egui::Label::new("Position"));
                         ui.add(egui::widgets::DragValue::new(&mut transform.position.x));
                         ui.add(egui::widgets::DragValue::new(&mut transform.position.y));
                         ui.add(egui::widgets::DragValue::new(&mut transform.position.z));

@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 engine = { path = "../../engine" }
+game-types = { path = "../types" }
+cgmath = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

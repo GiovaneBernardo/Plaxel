@@ -7,38 +7,34 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [dependencies]
-anyhow = "1.0"
-winit = { version = "0.30", features = ["android-native-activity"] }
-env_logger = "0.10"
-log = "0.4"
-wgpu = "27.0.1"
-pollster = "0.3"
-bytemuck = { version = "1.24", features = ["derive"] }
-cgmath = "0.18"
-tobj = { version = "3.2", default-features = false, features = ["async"] }
-rand = "0.8.5"
-
-[dependencies.image]
-version = "0.24"
-default-features = false
-features = ["png", "jpeg", "tga"]
+anyhow = { workspace = true }
+winit = { workspace = true }
+log = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+cgmath = { workspace = true }
+tobj = { workspace = true }
+rand = { workspace = true }
+image = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ron = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1.6"
-console_log = "1.0"
-wgpu = { version = "27.0.1", features = ["webgl"] }
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4.30"
-web-sys = { version = "0.3.69", features = [
-    "Document",
-    "Window",
-    "Element",
-    "Location",
-] }
-reqwest = { version = "0.11" }
-getrandom = { version = "0.2.15", features = ["js"] }
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
+wgpu = { workspace = true, features = ["webgl"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true }
+reqwest = { workspace = true }
+getrandom = { workspace = true }
 
 [build-dependencies]
-anyhow = "1.0"
+anyhow = { workspace = true }
 fs_extra = "1.2"
 glob = "0.3"

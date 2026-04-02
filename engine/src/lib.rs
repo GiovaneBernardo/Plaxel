@@ -1,14 +1,15 @@
 use rand::Rng;
 use std::sync::Arc;
 
-mod assets;
-mod core;
-mod renderer;
+pub mod assets;
+pub mod core;
+pub mod logging;
+pub mod renderer;
 
-use core::camera;
-use core::ecs;
-use renderer::model;
-use renderer::texture;
+pub use core::camera;
+pub use core::ecs;
+pub use renderer::model;
+pub use renderer::texture;
 
 use cgmath::prelude::*;
 use model::Vertex;
@@ -25,6 +26,7 @@ pub use winit::{
 };
 
 use crate::core::components::core::TransformComponent;
+use crate::renderer::Renderer;
 
 // This will store the state of our game
 pub struct State {
@@ -46,6 +48,7 @@ pub struct State {
     pub obj_model: model::Model,
     pub scene: ecs::Scene,
     pub events: Vec<WindowEvent>,
+    pub renderer: renderer::Renderer,
 }
 
 #[repr(C)]
@@ -268,16 +271,14 @@ impl State {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"), // 1.
+                entry_point: Some("vs_main"),
                 buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                // 3.
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    // 4.
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
@@ -285,31 +286,28 @@ impl State {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // 2.
+                front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
                 polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
                 unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: texture::Texture::DEPTH_FORMAT,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less, // 1.
-                stencil: wgpu::StencilState::default(),     // 2.
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: 1,                         // 2.
-                mask: !0,                         // 3.
-                alpha_to_coverage_enabled: false, // 4.
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
             },
-            multiview: None, // 5.
-            cache: None,     // 6.
+            multiview: None,
+            cache: None,
         });
 
         let camera_controller = camera::CameraController::new(0.2);
@@ -389,6 +387,10 @@ impl State {
             }
         }
 
+        let mut renderer = Renderer::new(window.clone()).await?;
+        renderer.init(&device);
+        renderer.compile(&device, &shader);
+
         Ok(Self {
             surface,
             device,
@@ -408,6 +410,7 @@ impl State {
             obj_model,
             scene,
             events: Vec::new(),
+            renderer,
         })
     }
 
@@ -439,7 +442,16 @@ impl State {
 
     fn render(
         &mut self,
-        on_render: &mut Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>>,
+        on_render: &mut Option<
+            Box<
+                dyn FnMut(
+                    &wgpu::Device,
+                    &wgpu::Queue,
+                    &wgpu::TextureView,
+                    &mut wgpu::CommandEncoder,
+                ),
+            >,
+        >,
     ) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
@@ -448,95 +460,100 @@ impl State {
             return Ok(());
         }
 
-        let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[
-                    // This is what @location(0) in the fragment shader targets
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.1,
-                                g: 0.2,
-                                b: 0.3,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                ],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-
-            self.scene.update();
-            let mut scene_instances = self.scene.get_instances();
-
-            //            let instances_data = scene_instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-            //let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            //    label: Some("Instance Buffer"),
-            //    contents: bytemuck::cast_slice(&instance_data),
-            //    usage: wgpu::BufferUsages::VERTEX,
-            //});
-
-            // Update data of instances_buffer with scene_instances
-            self.queue.write_buffer(
-                &self.instance_buffer,
-                0,
-                bytemuck::cast_slice(
-                    &scene_instances
-                        .iter()
-                        .map(Instance::to_raw)
-                        .collect::<Vec<_>>(),
-                ),
-            );
-
-            use model::DrawModel;
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_pipeline(&self.render_pipeline);
-            //render_pass.draw_model_instanced(
-            //    &self.obj_model,
-            //    0..self.instances.len() as u32,
-            //    &self.camera_bind_group,
-            //);
-
-            render_pass.draw_model_instanced(
-                &self.obj_model,
-                0..scene_instances.len() as u32,
-                &self.camera_bind_group,
-            );
+        if !self.renderer.render_graph.compiled {
+            let device = &self.device;
+            let renderer_api = self.renderer.renderer_api.as_mut();
+            self.renderer.render_graph.compile(device, renderer_api);
         }
+        let surface = &self.surface;
+        self.renderer
+            .render(surface, &self.device, &self.queue)
+            .map_err(|e| {
+                e.downcast::<wgpu::SurfaceError>()
+                    .unwrap_or(wgpu::SurfaceError::Lost)
+            })?;
 
-        if let Some(f) = on_render {
-            f(&self.device, &self.queue, &view, &mut encoder);
-        }
-
-        // submit will accept anything that implements IntoIter
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        //let output = self.surface.get_current_texture()?;
+        //let view = output
+        //    .texture
+        //    .create_view(&wgpu::TextureViewDescriptor::default());
+        //
+        //let mut encoder = self
+        //    .device
+        //    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        //        label: Some("Render Encoder"),
+        //    });
+        //
+        //{
+        //    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        //        label: Some("Render Pass"),
+        //        color_attachments: &[
+        //            // This is what @location(0) in the fragment shader targets
+        //            Some(wgpu::RenderPassColorAttachment {
+        //                view: &view,
+        //                resolve_target: None,
+        //                depth_slice: None,
+        //                ops: wgpu::Operations {
+        //                    load: wgpu::LoadOp::Clear(wgpu::Color {
+        //                        r: 0.1,
+        //                        g: 0.2,
+        //                        b: 0.3,
+        //                        a: 1.0,
+        //                    }),
+        //                    store: wgpu::StoreOp::Store,
+        //                },
+        //            }),
+        //        ],
+        //        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+        //            view: &self.depth_texture.view,
+        //            depth_ops: Some(wgpu::Operations {
+        //                load: wgpu::LoadOp::Clear(1.0),
+        //                store: wgpu::StoreOp::Store,
+        //            }),
+        //            stencil_ops: None,
+        //        }),
+        //
+        //        occlusion_query_set: None,
+        //        timestamp_writes: None,
+        //    });
+        //
+        //    self.scene.update();
+        //    let mut scene_instances = self.scene.get_instances();
+        //
+        //    //            let instances_data = scene_instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        //    //let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        //    //    label: Some("Instance Buffer"),
+        //    //    contents: bytemuck::cast_slice(&instance_data),
+        //    //    usage: wgpu::BufferUsages::VERTEX,
+        //    //});
+        //
+        //    // Update data of instances_buffer with scene_instances
+        //    self.queue.write_buffer(
+        //        &self.instance_buffer,
+        //        0,
+        //        bytemuck::cast_slice(
+        //            &scene_instances
+        //                .iter()
+        //                .map(Instance::to_raw)
+        //                .collect::<Vec<_>>(),
+        //        ),
+        //    );
+        //
+        //    use model::DrawModel;
+        //    render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        //    render_pass.set_pipeline(&self.render_pipeline);
+        //    //render_pass.draw_model_instanced(
+        //    //    &self.obj_model,
+        //    //    0..self.instances.len() as u32,
+        //    //    &self.camera_bind_group,
+        //    //);
+        //
+        //    render_pass.draw_model_instanced(
+        //        &self.obj_model,
+        //        0..scene_instances.len() as u32,
+        //        &self.camera_bind_group,
+        //    );
+        //}
 
         Ok(())
     }
@@ -556,9 +573,12 @@ pub struct App {
     #[cfg(target_arch = "wasm32")]
     proxy: Option<winit::event_loop::EventLoopProxy<State>>,
     state: Option<State>,
+    on_register_system: Option<Box<dyn FnMut(&mut State)>>,
     on_update: Option<Box<dyn FnMut(&mut State)>>,
-    on_key: Option<Box<dyn FnMut(KeyCode, bool)>>,
-    on_render: Option<Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>>,
+    on_key: Option<Box<dyn FnMut(&mut State, KeyCode, bool)>>,
+    on_render: Option<
+        Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>,
+    >,
 }
 
 impl App {
@@ -567,6 +587,7 @@ impl App {
         let proxy = Some(event_loop.create_proxy());
         Self {
             state: None,
+            on_register_system: None,
             on_update: None,
             on_key: None,
             on_render: None,
@@ -575,17 +596,26 @@ impl App {
         }
     }
 
+    pub fn with_register_system(mut self, f: impl FnMut(&mut State) + 'static) -> Self {
+        self.on_register_system = Some(Box::new(f));
+        self
+    }
+
     pub fn with_update(mut self, f: impl FnMut(&mut State) + 'static) -> Self {
         self.on_update = Some(Box::new(f));
         self
     }
 
-    pub fn with_on_key(mut self, f: impl FnMut(KeyCode, bool) + 'static) -> Self {
+    pub fn with_on_key(mut self, f: impl FnMut(&mut State, KeyCode, bool) + 'static) -> Self {
         self.on_key = Some(Box::new(f));
         self
     }
 
-    pub fn with_render(mut self, f: impl FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder) + 'static) -> Self {
+    pub fn with_render(
+        mut self,
+        f: impl FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)
+        + 'static,
+    ) -> Self {
         self.on_render = Some(Box::new(f));
         self
     }
@@ -699,7 +729,7 @@ impl ApplicationHandler<State> for App {
             } => {
                 state.handle_key(event_loop, code, key_state.is_pressed());
                 if let Some(f) = &mut self.on_key {
-                    f(code, key_state.is_pressed());
+                    f(state, code, key_state.is_pressed());
                 }
             }
             WindowEvent::CursorMoved {
@@ -747,7 +777,7 @@ impl ApplicationHandler<State> for App {
 pub fn run() -> anyhow::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        env_logger::init();
+        logging::init();
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -765,7 +795,7 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(start)]
+#[wasm_bindgen]
 pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
     console_error_panic_hook::set_once();
     run().unwrap_throw();

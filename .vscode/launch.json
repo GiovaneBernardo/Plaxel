@@ -11,10 +11,13 @@
             "cargo": {
                 "args": [
                     "run",
-                    "--bin=plaxel"
+                    "--bin=editor-runner"
                 ]
             },
-            "args": []
+            "args": [],
+            "env": {
+                "RUST_BACKTRACE": "1"
+            }
         },
         {
             "name": "Debug unit tests in library 'plaxel'",

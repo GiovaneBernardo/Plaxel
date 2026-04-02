@@ -3,15 +3,29 @@ name = "editor-runner"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+hot-reload = ["dep:hot-lib-reloader"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 engine = { path = "../../engine" }
 game-logic = { path = "../../game/logic" }
 editor-logic = { path = "../logic" }
-anyhow = "1.0"
-hot-lib-reloader = "0.8.2"
-env_logger = "0.10"
-winit = { version = "0.30", features = ["android-native-activity"] }
-egui = "0.33.3"
-egui-wgpu = "0.33.3"
+anyhow = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+hot-lib-reloader = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.33.3"
-wgpu = "27.0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+egui-winit = { version = "0.33.3", default-features = false }
+wasm-bindgen = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

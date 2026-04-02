@@ -3,18 +3,21 @@ name = "editor-logic"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 engine = { path = "../../engine" }
 game-logic = { path = "../../game/logic" }
-anyhow = "1.0"
-hot-lib-reloader = "0.8.2"
-env_logger = "0.10"
-winit = { version = "0.30", features = ["android-native-activity"] }
-egui = "0.33.3"
-egui-wgpu = "0.33.3"
-egui-winit = "0.33.3"
-wgpu = "27.0.1"
-cgmath = "0.18"
+anyhow = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+cgmath = { workspace = true }
 
-[lib]
-crate-type = ["cdylib", "rlib"]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+egui-winit = "0.33.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+egui-winit = { version = "0.33.3", default-features = false }

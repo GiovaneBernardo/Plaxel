@@ -10,6 +10,5 @@ hot-reload = ["dep:hot-lib-reloader"]
 engine = { path = "../../engine" }
 game-logic = { path = "../logic" }
 game-types = { path = "../types" }
-hot-lib-reloader = { version = "0.8.2", optional = true }
-env_logger = "0.10"
-winit = { version = "0.30", features = ["android-native-activity"] }
+hot-lib-reloader = { workspace = true, optional = true }
+winit = { workspace = true }
