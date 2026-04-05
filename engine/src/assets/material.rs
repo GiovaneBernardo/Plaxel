@@ -9,11 +9,22 @@ pub struct Material {
     pub uuid: Uuid,
     //pub handle: Handle,
     pub pipeline_descriptor: PipelineDescriptor,
+    pub pipeline_uuid: Uuid,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PipelineDescriptor {
+    pub uuid: Uuid,
     pub shader: String,
+}
+
+impl PipelineDescriptor {
+    pub fn default(shader: String) -> PipelineDescriptor {
+        PipelineDescriptor {
+            uuid: Uuid::new_v4(),
+            shader,
+        }
+    }
 }
 
 impl Asset for Material {
@@ -31,4 +42,13 @@ impl Material {
     //    let material = ctx.renderer_api.load_material(header);
     //    material
     //}
+
+    pub fn new() -> Self {
+        let pipeline_descriptor = PipelineDescriptor::default("shaders/cube.wgsl".to_string());
+        Self {
+            uuid: Uuid::new_v4(),
+            pipeline_descriptor: pipeline_descriptor.clone(),
+            pipeline_uuid: pipeline_descriptor.uuid,
+        }
+    }
 }

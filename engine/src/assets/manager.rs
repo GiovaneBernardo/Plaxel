@@ -72,6 +72,13 @@ pub struct AssetManager {
 }
 
 impl AssetManager {
+    pub fn new() -> Self {
+        Self {
+            headers: HashMap::new(),
+            assets: HashMap::new(),
+        }
+    }
+
     pub fn scan_folder(&mut self, folder: &Path) -> anyhow::Result<()> {
         for entry in fs::read_dir(folder)? {
             let path = entry?.path();

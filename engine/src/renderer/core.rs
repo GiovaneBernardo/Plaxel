@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fs;
 
 use wgpu::RenderPipeline;
@@ -5,9 +6,13 @@ use wgpu::RenderPipeline;
 use crate::Arc;
 use crate::InstanceRaw;
 use crate::Window;
+use crate::assets;
 use crate::assets::manager::Handle;
+use crate::assets::material::Material;
 pub use crate::core::camera;
+use crate::engine_info;
 use crate::model;
+use crate::model::MeshAsset;
 pub use crate::renderer::backends::*;
 use crate::renderer::model::Vertex;
 use crate::{State, texture};
@@ -41,7 +46,7 @@ pub struct Buffer {
 }
 
 pub struct RenderGraph {
-    pub nodes: Vec<Box<dyn RenderNode>>,
+    pub nodes: Vec<(i8, Box<dyn RenderNode>)>,
     pub compiled: bool,
 }
 
@@ -57,16 +62,16 @@ pub trait RenderNode {
     fn output_textures(&self) -> &[&str];
     fn input_buffers(&self) -> &[&str];
     fn output_buffers(&self) -> &[&str];
-    fn run(&self, api: &mut dyn RendererAPI);
-    fn get_render_pass(&self) -> RenderPassHandle;
-    fn set_render_pass(&self, render_pass_handle: RenderPassHandle);
+    fn run(&mut self, ctx: &mut dyn RenderContext);
     fn should_render_to_swapchain(&self) -> bool;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub struct RenderData {
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
-    pub num_elements: u32,
+    pub mesh: Handle<MeshAsset>,
+    pub material: Material,
+    pub transform_index: u32, // index into a GPU-side transform buffer
+    pub sort_key: u64,        // for draw call sorting/batching
 }
 
 impl Renderer {
@@ -82,20 +87,18 @@ impl Renderer {
         })
     }
 
-    pub fn init(&mut self, device: &wgpu::Device) {
+    pub fn init(&mut self) {
+        self.renderer_api.compile();
         self.render_graph = RenderGraph::default_render_graph();
-        self.render_graph
-            .compile(&device, self.renderer_api.as_mut());
+        self.render_graph.compile(self.renderer_api.as_mut());
     }
 
-    pub fn render(
-        &mut self,
-        surface: &wgpu::Surface,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> anyhow::Result<()> {
-        self.renderer_api
-            .render(surface, device, queue, &self.render_graph)
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.renderer_api.resize(width, height);
+    }
+
+    pub fn render(&mut self) -> anyhow::Result<()> {
+        self.renderer_api.render(&mut self.render_graph)
     }
 
     pub fn compile(
@@ -226,40 +229,57 @@ impl Renderer {
         });
         render_pipeline
     }
+}
 
-    pub fn create_render_data(
-        &mut self,
-        device: &wgpu::Device,
-        positions: Vec<cgmath::Point3<f32>>,
-    ) -> RenderData {
-        let positions_raw: Vec<[f32; 3]> = positions.iter().map(|p| [p.x, p.y, p.z]).collect();
+pub struct GeometryPassNode {
+    render_data: Vec<RenderData>,
+}
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&positions_raw),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+impl RenderNode for GeometryPassNode {
+    fn should_render_to_swapchain(&self) -> bool {
+        true
+    }
 
-        let indices: Vec<u32> = vec![
-            4, 5, 6, 4, 6, 7, // front  (+z)
-            1, 0, 3, 1, 3, 2, // back   (-z)
-            5, 1, 2, 5, 2, 6, // right  (+x)
-            0, 4, 7, 0, 7, 3, // left   (-x)
-            3, 7, 6, 3, 6, 2, // top    (+y)
-            0, 1, 5, 0, 5, 4, // bottom (-y)
-        ];
+    fn input_buffers(&self) -> &[&str] {
+        &[]
+    }
 
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+    fn output_buffers(&self) -> &[&str] {
+        &[]
+    }
 
-        RenderData {
-            vertex_buffer,
-            index_buffer,
-            num_elements: indices.len() as u32,
+    fn input_textures(&self) -> &[&str] {
+        &[]
+    }
+
+    fn output_textures(&self) -> &[&str] {
+        &["swapchain_image"]
+    }
+
+    fn run(&mut self, ctx: &mut dyn RenderContext) {
+        for render_data in &mut self.render_data {
+            engine_info!("{:?}", render_data.material.pipeline_descriptor.uuid);
+            let pipeline = ctx
+                .get_pipeline(render_data.material.pipeline_descriptor.uuid)
+                .unwrap();
+            ctx.bind_pipeline(pipeline);
+            let vertex_buffer = ctx.get_mesh_vertex_buffer(&render_data.mesh);
+            ctx.bind_vertex_buffer(vertex_buffer);
+            let index_buffer = ctx.get_mesh_index_buffer(&render_data.mesh);
+            ctx.bind_index_buffer(index_buffer);
+            let index_count = ctx.get_mesh_index_count(&render_data.mesh);
+            ctx.draw_indexed(index_count, 1);
         }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl GeometryPassNode {
+    pub fn add_render_data(&mut self, new_render_data: RenderData) {
+        self.render_data.push(new_render_data);
     }
 }
 
@@ -270,27 +290,29 @@ impl RenderGraph {
             compiled: false,
         };
 
-        let geometry_pass_node = RenderNode {
-            shader_name: "shaders/cube.wgsl".to_string(),
-            render_pipeline: PipelineHandle(0),
-            buffers: Vec::new(),
+        let geometry_pass_node = GeometryPassNode {
             render_data: Vec::new(),
         };
-        graph.nodes.push(geometry_pass_node);
+        graph.nodes.push((0, Box::new(geometry_pass_node)));
 
         graph
     }
 
-    pub fn compile(&mut self, device: &wgpu::Device, renderer_api: &mut dyn RendererAPI) {
-        for node in &mut self.nodes {
-            renderer_api.compile_render_graph_node(node, device);
+    pub fn compile(&mut self, renderer_api: &mut dyn RendererAPI) {
+        for (_, node) in &mut self.nodes {
+            renderer_api.compile_render_graph_node(node);
         }
         self.compiled = true;
     }
-}
 
-impl RenderNode {
-    pub fn add_render_data(&mut self, render_data: RenderData) {
-        self.render_data.push(render_data);
+    pub fn get_node_mut<T: 'static>(&mut self, index: i8) -> Option<&mut T> {
+        for (node_index, node) in &mut self.nodes {
+            if *node_index == index {
+                return node.as_any_mut().downcast_mut::<T>();
+            }
+        }
+        None
     }
 }
+
+impl dyn RenderNode {}

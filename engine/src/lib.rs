@@ -25,30 +25,22 @@ pub use winit::{
     window::Window,
 };
 
+use crate::assets::manager::AssetManager;
 use crate::core::components::core::TransformComponent;
 use crate::renderer::Renderer;
 
 // This will store the state of our game
 pub struct State {
-    pub surface: wgpu::Surface<'static>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub config: wgpu::SurfaceConfiguration,
-    pub is_surface_configured: bool,
-    pub render_pipeline: wgpu::RenderPipeline,
     pub window: Arc<Window>,
     pub camera: camera::Camera,
     pub camera_uniform: camera::CameraUniform,
-    pub camera_buffer: wgpu::Buffer,
-    pub camera_bind_group: wgpu::BindGroup,
     pub camera_controller: camera::CameraController,
     pub instances: Vec<Instance>,
-    pub instance_buffer: wgpu::Buffer,
-    pub depth_texture: texture::Texture,
-    pub obj_model: model::Model,
     pub scene: ecs::Scene,
     pub events: Vec<WindowEvent>,
     pub renderer: renderer::Renderer,
+    pub asset_manager: AssetManager,
+    pub registered_systems: bool,
 }
 
 #[repr(C)]
@@ -204,6 +196,8 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        engine_info!("Format: {:?}", config.format);
+
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -350,15 +344,6 @@ impl State {
         let depth_texture =
             texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
-        let mut obj_model = assets::resources::load_model(
-            "../res/Sponza-Master/sponza.obj",
-            &device,
-            &queue,
-            &texture_bind_group_layout,
-        )
-        .await
-        .unwrap();
-
         let mut scene = ecs::Scene::new();
         let mut rng = rand::thread_rng();
 
@@ -379,49 +364,37 @@ impl State {
                 transform_component.velocity.y += rng.gen_range(-0.01..0.01);
                 transform_component.velocity.z += rng.gen_range(-0.01..0.01);
 
-                let mut mesh_renderer = core::components::renderer::MeshRenderer {
-                    model: obj_model.clone(),
-                };
+                //let mut mesh_renderer = core::components::renderer::MeshRenderer {
+                //    model: obj_model.clone(),
+                //};
                 scene.add_transform_component(&entity, transform_component);
-                scene.add_mesh_renderer(&entity, mesh_renderer);
+                //scene.add_mesh_renderer(&entity, mesh_renderer);
             }
         }
 
         let mut renderer = Renderer::new(window.clone()).await?;
-        renderer.init(&device);
+        renderer.init();
         renderer.compile(&device, &shader);
 
+        let mut asset_manager = AssetManager::new();
+
         Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            is_surface_configured: false,
-            render_pipeline,
             window,
             camera,
             camera_uniform,
-            camera_buffer,
-            camera_bind_group,
             camera_controller,
             instances,
-            instance_buffer,
-            depth_texture,
-            obj_model,
             scene,
             events: Vec::new(),
             renderer,
+            asset_manager,
+            registered_systems: false,
         })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
-            self.is_surface_configured = true;
-            self.depth_texture =
-                texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+            self.renderer.resize(width, height);
             self.camera.aspect = width as f32 / height as f32;
         }
     }
@@ -455,105 +428,92 @@ impl State {
     ) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
-        // We can't render unless the surface is configured
-        if !self.is_surface_configured {
-            return Ok(());
-        }
-
-        if !self.renderer.render_graph.compiled {
-            let device = &self.device;
-            let renderer_api = self.renderer.renderer_api.as_mut();
-            self.renderer.render_graph.compile(device, renderer_api);
-        }
-        let surface = &self.surface;
-        self.renderer
-            .render(surface, &self.device, &self.queue)
-            .map_err(|e| {
-                e.downcast::<wgpu::SurfaceError>()
-                    .unwrap_or(wgpu::SurfaceError::Lost)
-            })?;
-
-        //let output = self.surface.get_current_texture()?;
-        //let view = output
-        //    .texture
-        //    .create_view(&wgpu::TextureViewDescriptor::default());
+        self.renderer.render().map_err(|e| {
+            e.downcast::<wgpu::SurfaceError>()
+                .unwrap_or(wgpu::SurfaceError::Lost)
+        })?;
         //
-        //let mut encoder = self
-        //    .device
-        //    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        //        label: Some("Render Encoder"),
-        //    });
-        //
-        //{
-        //    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        //        label: Some("Render Pass"),
-        //        color_attachments: &[
-        //            // This is what @location(0) in the fragment shader targets
-        //            Some(wgpu::RenderPassColorAttachment {
-        //                view: &view,
-        //                resolve_target: None,
-        //                depth_slice: None,
-        //                ops: wgpu::Operations {
-        //                    load: wgpu::LoadOp::Clear(wgpu::Color {
-        //                        r: 0.1,
-        //                        g: 0.2,
-        //                        b: 0.3,
-        //                        a: 1.0,
-        //                    }),
-        //                    store: wgpu::StoreOp::Store,
-        //                },
-        //            }),
-        //        ],
-        //        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-        //            view: &self.depth_texture.view,
-        //            depth_ops: Some(wgpu::Operations {
-        //                load: wgpu::LoadOp::Clear(1.0),
-        //                store: wgpu::StoreOp::Store,
-        //            }),
-        //            stencil_ops: None,
-        //        }),
-        //
-        //        occlusion_query_set: None,
-        //        timestamp_writes: None,
-        //    });
-        //
-        //    self.scene.update();
-        //    let mut scene_instances = self.scene.get_instances();
-        //
-        //    //            let instances_data = scene_instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        //    //let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        //    //    label: Some("Instance Buffer"),
-        //    //    contents: bytemuck::cast_slice(&instance_data),
-        //    //    usage: wgpu::BufferUsages::VERTEX,
-        //    //});
-        //
-        //    // Update data of instances_buffer with scene_instances
-        //    self.queue.write_buffer(
-        //        &self.instance_buffer,
-        //        0,
-        //        bytemuck::cast_slice(
-        //            &scene_instances
-        //                .iter()
-        //                .map(Instance::to_raw)
-        //                .collect::<Vec<_>>(),
-        //        ),
-        //    );
-        //
-        //    use model::DrawModel;
-        //    render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        //    render_pass.set_pipeline(&self.render_pipeline);
-        //    //render_pass.draw_model_instanced(
-        //    //    &self.obj_model,
-        //    //    0..self.instances.len() as u32,
-        //    //    &self.camera_bind_group,
-        //    //);
-        //
-        //    render_pass.draw_model_instanced(
-        //        &self.obj_model,
-        //        0..scene_instances.len() as u32,
-        //        &self.camera_bind_group,
-        //    );
-        //}
+        ////let output = self.surface.get_current_texture()?;
+        ////let view = output
+        ////    .texture
+        ////    .create_view(&wgpu::TextureViewDescriptor::default());
+        ////
+        ////let mut encoder = self
+        ////    .device
+        ////    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        ////        label: Some("Render Encoder"),
+        ////    });
+        ////
+        ////{
+        ////    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        ////        label: Some("Render Pass"),
+        ////        color_attachments: &[
+        ////            // This is what @location(0) in the fragment shader targets
+        ////            Some(wgpu::RenderPassColorAttachment {
+        ////                view: &view,
+        ////                resolve_target: None,
+        ////                depth_slice: None,
+        ////                ops: wgpu::Operations {
+        ////                    load: wgpu::LoadOp::Clear(wgpu::Color {
+        ////                        r: 0.1,
+        ////                        g: 0.2,
+        ////                        b: 0.3,
+        ////                        a: 1.0,
+        ////                    }),
+        ////                    store: wgpu::StoreOp::Store,
+        ////                },
+        ////            }),
+        ////        ],
+        ////        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+        ////            view: &self.depth_texture.view,
+        ////            depth_ops: Some(wgpu::Operations {
+        ////                load: wgpu::LoadOp::Clear(1.0),
+        ////                store: wgpu::StoreOp::Store,
+        ////            }),
+        ////            stencil_ops: None,
+        ////        }),
+        ////
+        ////        occlusion_query_set: None,
+        ////        timestamp_writes: None,
+        ////    });
+        ////
+        ////    self.scene.update();
+        ////    let mut scene_instances = self.scene.get_instances();
+        ////
+        ////    //            let instances_data = scene_instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        ////    //let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        ////    //    label: Some("Instance Buffer"),
+        ////    //    contents: bytemuck::cast_slice(&instance_data),
+        ////    //    usage: wgpu::BufferUsages::VERTEX,
+        ////    //});
+        ////
+        ////    // Update data of instances_buffer with scene_instances
+        ////    self.queue.write_buffer(
+        ////        &self.instance_buffer,
+        ////        0,
+        ////        bytemuck::cast_slice(
+        ////            &scene_instances
+        ////                .iter()
+        ////                .map(Instance::to_raw)
+        ////                .collect::<Vec<_>>(),
+        ////        ),
+        ////    );
+        ////
+        ////    use model::DrawModel;
+        ////    render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        ////    render_pass.set_pipeline(&self.render_pipeline);
+        ////    //render_pass.draw_model_instanced(
+        ////    //    &self.obj_model,
+        ////    //    0..self.instances.len() as u32,
+        ////    //    &self.camera_bind_group,
+        ////    //);
+        ////
+        ////    render_pass.draw_model_instanced(
+        ////        &self.obj_model,
+        ////        0..scene_instances.len() as u32,
+        ////        &self.camera_bind_group,
+        ////    );
+        ////}
 
         Ok(())
     }
@@ -561,11 +521,11 @@ impl State {
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_proj(&self.camera);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
+        //self.queue.write_buffer(
+        //    &self.camera_buffer,
+        //    0,
+        //    bytemuck::cast_slice(&[self.camera_uniform]),
+        //);
     }
 }
 
@@ -701,18 +661,20 @@ impl ApplicationHandler<State> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
+                if !state.registered_systems {
+                    if let Some(f) = &mut self.on_register_system {
+                        f(state);
+                    }
+                    state.registered_systems = true;
+                }
+                state.window.request_redraw();
                 state.update();
                 if let Some(f) = &mut self.on_update {
                     f(state);
                 }
                 state.events.clear();
-                match state.render(&mut self.on_render) {
+                match state.renderer.render() {
                     Ok(_) => {}
-                    // Reconfigure the surface if it's lost or outdated
-                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                        let size = state.window.inner_size();
-                        state.resize(size.width, size.height);
-                    }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
                     }
