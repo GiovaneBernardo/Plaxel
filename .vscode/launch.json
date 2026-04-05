@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug executable 'plaxel'",
+            "name": "Debug executable 'plaxel' Editor",
             "type": "lldb",
             "request": "launch",
             "cargo": {
@@ -30,13 +30,13 @@
             }
         },
         {
-            "name": "Debug executable 'plaxel'",
+            "name": "Debug executable 'plaxel' Game",
             "type": "lldb",
             "request": "launch",
             "cargo": {
                 "args": [
                     "run",
-                    "--bin=plaxel"
+                    "--bin=game-runner"
                 ]
             },
             "args": []
