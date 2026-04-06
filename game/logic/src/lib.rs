@@ -1,7 +1,9 @@
 use cgmath;
 use engine::assets;
 use engine::assets::material::Material;
+use engine::engine_info;
 use engine::renderer::GeometryPassNode;
+use engine::renderer::PipelineHandle;
 use engine::renderer::RenderNode;
 use engine::{KeyCode, model::MeshAsset};
 use game_types::planet::Planet;
@@ -10,32 +12,7 @@ pub use game_types::render_graph;
 use std::cmp;
 
 #[unsafe(no_mangle)]
-pub fn register_systems(state: &mut engine::State) {
-    let mut planet = Planet::generate_planet();
-    let mut material = Material::new();
-    state.renderer.renderer_api.create_pipeline(&material);
-
-    planet.load_mesh();
-    if planet.mesh.positions.len() > 0 {
-        let render_data = state
-            .renderer
-            .renderer_api
-            .create_render_data(planet.mesh.positions, material);
-
-        if let Some(node) = state
-            .renderer
-            .render_graph
-            .nodes
-            .first_mut()
-            .unwrap()
-            .1
-            .as_any_mut()
-            .downcast_mut::<GeometryPassNode>()
-        {
-            node.add_render_data(render_data);
-        }
-    }
-}
+pub fn register_systems(state: &mut engine::State) {}
 
 #[unsafe(no_mangle)]
 pub fn render() {
@@ -59,6 +36,45 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
     }
 
     if key_code == KeyCode::KeyT && pressed {}
+
+    if key_code == KeyCode::KeyO && pressed {
+        let mut planet = Planet::generate_planet();
+        let mut material = Material::default();
+
+        let camera_layout = state
+            .renderer
+            .render_graph
+            .get_node_mut::<GeometryPassNode>(0)
+            .and_then(|node| node.camera_bind_group_layout)
+            .expect("GeometryPassNode must be compiled before creating pipelines");
+
+        state
+            .renderer
+            .renderer_api
+            .create_pipeline(&material, &[camera_layout]);
+
+        planet.load_mesh();
+        if planet.mesh.positions.len() > 0 {
+            let render_data = state.renderer.renderer_api.create_render_data(
+                planet.mesh.positions,
+                material,
+                &PipelineHandle(0),
+            );
+
+            if let Some(node) = state
+                .renderer
+                .render_graph
+                .nodes
+                .first_mut()
+                .unwrap()
+                .1
+                .as_any_mut()
+                .downcast_mut::<GeometryPassNode>()
+            {
+                node.add_render_data(render_data);
+            }
+        }
+    }
 }
 
 trait PlanetExt {

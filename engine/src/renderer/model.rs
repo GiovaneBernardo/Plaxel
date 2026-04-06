@@ -1,9 +1,12 @@
 use std::ops::Range;
 
+use wgpu::VertexFormat;
+
 use crate::texture;
 
 pub trait Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static>;
+    fn layout() -> VertexLayout;
 }
 
 #[repr(C)]
@@ -39,6 +42,31 @@ impl Vertex for ModelVertex {
             ],
         }
     }
+
+    fn layout() -> VertexLayout {
+        use std::mem;
+        let mut attributes = Vec::new();
+        attributes.push(VertexAttribute {
+            offset: 0,
+            shader_location: 0,
+            format: AttributeFormat::Float32x3,
+        });
+        attributes.push(VertexAttribute {
+            offset: mem::size_of::<[f32; 3]>() as u64,
+            shader_location: 1,
+            format: AttributeFormat::Float32x3,
+        });
+        attributes.push(VertexAttribute {
+            offset: mem::size_of::<[f32; 5]>() as u64,
+            shader_location: 2,
+            format: AttributeFormat::Float32x3,
+        });
+
+        VertexLayout {
+            stride: mem::size_of::<ModelVertex>() as u64,
+            attributes,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -56,20 +84,20 @@ pub struct Material {
     pub bind_group: wgpu::BindGroup,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VertexLayout {
     pub stride: u64,
     pub attributes: Vec<VertexAttribute>,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VertexAttribute {
     pub offset: u64,
     pub shader_location: u32,
     pub format: AttributeFormat,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AttributeFormat {
     Float32,
     Float32x2,

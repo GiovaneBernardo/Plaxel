@@ -1,7 +1,6 @@
 use std::io::{BufReader, Cursor};
 
 use image::RgbaImage;
-use wgpu::util::DeviceExt;
 
 use crate::{
     engine_info,

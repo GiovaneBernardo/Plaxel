@@ -521,11 +521,9 @@ impl State {
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_proj(&self.camera);
-        //self.queue.write_buffer(
-        //    &self.camera_buffer,
-        //    0,
-        //    bytemuck::cast_slice(&[self.camera_uniform]),
-        //);
+        self.renderer.render_resources.insert(renderer::CameraData {
+            uniform: self.camera_uniform,
+        });
     }
 }
 
