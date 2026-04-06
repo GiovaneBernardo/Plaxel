@@ -6,4 +6,5 @@ pub struct Planet {
 
 pub struct PlanetMesh {
     pub positions: Vec<cgmath::Point3<f32>>,
+    pub indices: Vec<u32>,
 }
