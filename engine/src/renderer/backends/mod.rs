@@ -17,6 +17,9 @@ use crate::texture;
 use uuid::Uuid;
 
 pub trait RendererAPI {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     fn compile(&mut self);
     fn resize(&mut self, width: u32, height: u32);
     fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle;
@@ -53,6 +56,7 @@ pub trait RendererAPI {
     fn create_render_data(
         &mut self,
         positions: Vec<cgmath::Point3<f32>>,
+        indices: Vec<u32>,
         material: Material,
         pipeline_handle: &PipelineHandle,
     ) -> RenderData;
@@ -67,6 +71,10 @@ pub trait RenderContext {
     fn bind_bind_group(&mut self, index: u32, bind_group: BindGroupHandle);
     fn draw(&mut self, vertices: u32, instances: u32);
     fn draw_indexed(&mut self, indices: u32, instances: u32);
+
+    /// Run a closure with the raw wgpu render pass (with 'static lifetime via forget_lifetime).
+    /// This is the escape hatch for nodes that need direct backend access (e.g. egui).
+    fn with_raw_pass(&mut self, _f: &mut dyn FnMut(&mut wgpu::RenderPass<'static>)) {}
 
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle> {
         self.api().get_pipeline(uuid)

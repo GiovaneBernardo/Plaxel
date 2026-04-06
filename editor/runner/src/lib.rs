@@ -1,7 +1,5 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use egui_wgpu::wgpu;
+use editor_logic::egui_node::EguiRenderNode;
+use engine::renderer::GeometryPassNode;
 
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(
@@ -32,57 +30,50 @@ pub fn wasm_main() {
     run_editor().unwrap();
 }
 
+const EGUI_NODE_INDEX: i8 = 10;
+
 pub fn run_editor() -> anyhow::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     engine::logging::init();
-
-    let editor_state: Rc<RefCell<Option<EditorState>>> = Rc::new(RefCell::new(None));
-    let editor_for_update = Rc::clone(&editor_state);
-    let editor_for_render = Rc::clone(&editor_state);
 
     let event_loop = winit::event_loop::EventLoop::with_user_event().build()?;
     let mut app = engine::App::new(
         #[cfg(target_arch = "wasm32")]
         &event_loop,
     )
+    .with_register_system(|state| {
+        // Add egui render node to the graph (runs after geometry at priority 10)
+        let egui_node = EguiRenderNode::new();
+        state
+            .renderer
+            .render_graph
+            .nodes
+            .push((EGUI_NODE_INDEX, Box::new(egui_node)));
+
+        // Recompile the graph so the new node gets compiled
+        state
+            .renderer
+            .render_graph
+            .compile(&mut state.renderer.render_resources, state.renderer.renderer_api.as_mut());
+
+        #[cfg(feature = "hot-reload")]
+        game::register_systems(state);
+        #[cfg(not(feature = "hot-reload"))]
+        game_logic::register_systems(state);
+    })
     .with_update(move |state| {
         #[cfg(feature = "hot-reload")]
         game::update(state);
         #[cfg(not(feature = "hot-reload"))]
         game_logic::update(state);
 
-        let mut opt = editor_for_update.borrow_mut();
-        let es = opt.get_or_insert_with(|| EditorState::new(state));
-        es.process(state);
-    })
-    .with_render(move |device, queue, view, encoder| {
-        let mut guard = editor_for_render.borrow_mut();
-        if let Some(es) = guard.as_mut() {
-            let extra_cmds = es.prepare(device, queue, encoder);
-
-            {
-                let mut rp = encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("egui"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        occlusion_query_set: None,
-                        timestamp_writes: None,
-                    })
-                    .forget_lifetime();
-                es.paint(&mut rp);
+        // Process egui input/UI – take the node out so we can pass &mut State
+        // without conflicting with the render_graph borrow
+        if let Some(mut node_box) = state.renderer.render_graph.take_node(EGUI_NODE_INDEX) {
+            if let Some(egui_node) = node_box.as_any_mut().downcast_mut::<EguiRenderNode>() {
+                egui_node.process(state);
             }
-
-            queue.submit(extra_cmds);
-            es.free_textures();
+            state.renderer.render_graph.return_node(EGUI_NODE_INDEX, node_box);
         }
     })
     .with_on_key(|state, code, pressed| {
@@ -112,115 +103,4 @@ pub fn run_editor() -> anyhow::Result<()> {
     event_loop.run_app(&mut app)?;
 
     Ok(())
-}
-
-pub struct EditorState {
-    egui_ctx: egui::Context,
-    egui_winit: egui_winit::State,
-    egui_renderer: egui_wgpu::Renderer,
-    pub clipped_primitives: Vec<egui::ClippedPrimitive>,
-    pub textures_delta: egui::TexturesDelta,
-    pub screen_descriptor: egui_wgpu::ScreenDescriptor,
-}
-
-impl EditorState {
-    pub fn new(state: &engine::State) -> Self {
-        let egui_ctx = egui::Context::default();
-        let egui_winit = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &*state.window,
-            Some(state.window.scale_factor() as f32),
-            None,
-            None,
-        );
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &state.device,
-            state.config.format,
-            egui_wgpu::RendererOptions {
-                depth_stencil_format: None,
-                msaa_samples: 1,
-                dithering: false,
-                predictable_texture_filtering: true,
-            },
-        );
-        let size = state.window.inner_size();
-        Self {
-            egui_ctx,
-            egui_winit,
-            egui_renderer,
-            clipped_primitives: Vec::new(),
-            textures_delta: egui::TexturesDelta::default(),
-            screen_descriptor: egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [size.width, size.height],
-                pixels_per_point: state.window.scale_factor() as f32,
-            },
-        }
-    }
-
-    pub fn process(&mut self, state: &mut engine::State) {
-        for event in &state.events {
-            let _ = self.egui_winit.on_window_event(&state.window, event);
-        }
-
-        let raw_input = self.egui_winit.take_egui_input(&state.window);
-
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::Window::new("Editor")
-                .resizable([true, true])
-                .show(ctx, |ui| {
-                    ui.label("Hello from egui!");
-                    if ui.button("Click me").clicked() {}
-                });
-
-            #[cfg(feature = "hot-reload")]
-            editor_hot::hierarchy_draw(state, ctx);
-
-            #[cfg(not(feature = "hot-reload"))]
-            editor_logic::hierarchy::hierarchy_draw(state, ctx);
-        });
-
-        self.egui_winit
-            .handle_platform_output(&state.window, full_output.platform_output);
-
-        let size = state.window.inner_size();
-        self.screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [size.width, size.height],
-            pixels_per_point: state.window.scale_factor() as f32,
-        };
-
-        self.clipped_primitives = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-        self.textures_delta = full_output.textures_delta;
-    }
-
-    pub fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> Vec<wgpu::CommandBuffer> {
-        for (id, delta) in &self.textures_delta.set {
-            self.egui_renderer.update_texture(device, queue, *id, delta);
-        }
-        self.egui_renderer.update_buffers(
-            device,
-            queue,
-            encoder,
-            &self.clipped_primitives,
-            &self.screen_descriptor,
-        )
-    }
-
-    pub fn paint(&self, rp: &mut wgpu::RenderPass<'static>) {
-        self.egui_renderer
-            .render(rp, &self.clipped_primitives, &self.screen_descriptor);
-    }
-
-    pub fn free_textures(&mut self) {
-        for id in &self.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
-    }
 }

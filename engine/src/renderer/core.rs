@@ -246,6 +246,9 @@ pub trait RenderNode {
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI);
     fn run(&mut self, ctx: &mut dyn RenderContext);
     fn should_render_to_swapchain(&self) -> bool;
+    fn needs_depth(&self) -> bool {
+        true
+    }
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
@@ -761,6 +764,24 @@ impl RenderGraph {
             }
         }
         None
+    }
+
+    /// Remove a node from the graph, returning it as an owned Box.
+    /// Use `return_node` to put it back after you're done.
+    /// This is useful to avoid borrow conflicts when the node needs
+    /// mutable access to State while being part of State.
+    pub fn take_node(&mut self, index: i8) -> Option<Box<dyn RenderNode>> {
+        if let Some(pos) = self.nodes.iter().position(|(i, _)| *i == index) {
+            Some(self.nodes.remove(pos).1)
+        } else {
+            None
+        }
+    }
+
+    /// Return a previously taken node back into the graph.
+    pub fn return_node(&mut self, index: i8, node: Box<dyn RenderNode>) {
+        self.nodes.push((index, node));
+        self.nodes.sort_by_key(|(i, _)| *i);
     }
 }
 

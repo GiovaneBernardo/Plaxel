@@ -182,7 +182,10 @@ impl From<&BindingType> for wgpu::BindingType {
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
-            BindingType::Texture { dimension, multisampled } => wgpu::BindingType::Texture {
+            BindingType::Texture {
+                dimension,
+                multisampled,
+            } => wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: match dimension {
                     TextureDimension::D2 => wgpu::TextureViewDimension::D2,
@@ -270,9 +273,24 @@ impl<'a> RenderContext for WgpuRenderContext<'a> {
         let bind_group = self.backend.get_bind_group(bind_group_handle).unwrap();
         self.pass.set_bind_group(index, bind_group, &[]);
     }
+
+    fn with_raw_pass(&mut self, f: &mut dyn FnMut(&mut wgpu::RenderPass<'static>)) {
+        // SAFETY: The pass is valid for the duration of this call. The 'static
+        // lifetime is required by egui_wgpu's API (forget_lifetime pattern).
+        // The closure must not store the reference.
+        let pass: &mut wgpu::RenderPass<'static> = unsafe { std::mem::transmute(&mut self.pass) };
+        f(pass);
+    }
 }
 
 impl RendererAPI for WgpuBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn compile(&mut self) {
         self.index_pool = Some(self.create_buffer_pool(1024 * 1024, wgpu::BufferUsages::INDEX));
     }
@@ -497,7 +515,7 @@ impl RendererAPI for WgpuBackend {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: None,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,
                     conservative: false,
@@ -526,19 +544,11 @@ impl RendererAPI for WgpuBackend {
     fn create_render_data(
         &mut self,
         positions: Vec<cgmath::Point3<f32>>,
+        indices: Vec<u32>,
         material: Material,
         pipeline_handle: &PipelineHandle,
     ) -> RenderData {
         let positions_raw: Vec<[f32; 3]> = positions.iter().map(|p| [p.x, p.y, p.z]).collect();
-
-        let indices: Vec<u32> = vec![
-            4, 5, 6, 4, 6, 7, // front  (+z)
-            1, 0, 3, 1, 3, 2, // back   (-z)
-            5, 1, 2, 5, 2, 6, // right  (+x)
-            0, 4, 7, 0, 7, 3, // left   (-x)
-            3, 7, 6, 3, 6, 2, // top    (+y)
-            0, 1, 5, 0, 5, 4, // bottom (-y)
-        ];
 
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&positions_raw).to_vec();
         let index_bytes: Vec<u8> = bytemuck::cast_slice(&indices).to_vec();
@@ -671,9 +681,7 @@ impl RendererAPI for WgpuBackend {
                         self.get_buffer(*handle).unwrap().as_entire_binding()
                     }
                     BindGroupEntry::Texture(handle) => {
-                        wgpu::BindingResource::TextureView(
-                            self.get_texture_view(*handle).unwrap(),
-                        )
+                        wgpu::BindingResource::TextureView(self.get_texture_view(*handle).unwrap())
                     }
                 };
                 wgpu::BindGroupEntry {
@@ -729,6 +737,20 @@ impl WgpuBackend {
         self.gpu_meshes.insert(handle, gpu_mesh);
 
         handle
+    }
+}
+
+impl WgpuBackend {
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config.format
     }
 }
 
@@ -850,6 +872,19 @@ impl WgpuBackend {
         //let pipeline = self.get_render_pipeline(node).unwrap();
         //engine_info!("{:?}", pipeline);
 
+        let depth_stencil_attachment = if node.needs_depth() {
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            })
+        } else {
+            None
+        };
+
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -866,15 +901,7 @@ impl WgpuBackend {
                 },
                 depth_slice: None,
             })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_texture.view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-
+            depth_stencil_attachment,
             occlusion_query_set: None,
             timestamp_writes: None,
         });
