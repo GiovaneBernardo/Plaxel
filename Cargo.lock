@@ -702,6 +702,7 @@ dependencies = [
  "glob",
  "image 0.24.9",
  "log",
+ "offset-allocator",
  "pollster",
  "rand",
  "reqwest",
@@ -962,6 +963,7 @@ dependencies = [
 name = "game-logic"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cgmath",
  "engine",
  "game-types",
@@ -971,6 +973,7 @@ dependencies = [
 name = "game-runner"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "engine",
  "game-logic",
  "game-types",
@@ -982,6 +985,7 @@ dependencies = [
 name = "game-types"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cgmath",
  "engine",
 ]
@@ -1863,6 +1867,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
+name = "nonmax"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
+
+[[package]]
 name = "notify"
 version = "6.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2213,6 +2223,16 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "offset-allocator"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e234d535da3521eb95106f40f0b73483d80bfb3aacf27c40d7e2b72f1a3e00a2"
+dependencies = [
+ "log",
+ "nonmax",
 ]
 
 [[package]]
@@ -3099,7 +3119,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 cgmath = { workspace = true }
 engine = { path = "../../engine" }
+bytemuck = { workspace = true }

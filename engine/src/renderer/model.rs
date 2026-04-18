@@ -1,11 +1,11 @@
 use std::ops::Range;
 
+use uuid::Uuid;
 use wgpu::VertexFormat;
 
 use crate::texture;
 
 pub trait Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static>;
     fn layout() -> VertexLayout;
 }
 
@@ -18,31 +18,6 @@ pub struct ModelVertex {
 }
 
 impl Vertex for ModelVertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<ModelVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-
     fn layout() -> VertexLayout {
         use std::mem;
         let mut attributes = Vec::new();
@@ -64,6 +39,7 @@ impl Vertex for ModelVertex {
 
         VertexLayout {
             stride: mem::size_of::<ModelVertex>() as u64,
+            step_mode: StepMode::Vertex,
             attributes,
         }
     }
@@ -84,9 +60,16 @@ pub struct Material {
     pub bind_group: wgpu::BindGroup,
 }
 
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum StepMode {
+    Vertex,
+    Instance,
+}
+
 #[derive(Debug, Clone, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VertexLayout {
     pub stride: u64,
+    pub step_mode: StepMode,
     pub attributes: Vec<VertexAttribute>,
 }
 
@@ -113,6 +96,7 @@ pub enum AttributeFormat {
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct MeshAsset {
     pub name: String,
+    pub uuid: Uuid,
     pub vertices: Vec<u8>,
     pub indices: Vec<u32>,
     pub vertex_layout: VertexLayout,

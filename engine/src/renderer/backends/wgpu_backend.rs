@@ -11,11 +11,13 @@ use crate::renderer::BindGroupHandle;
 use crate::renderer::BufferDescriptor;
 use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
+pub use crate::renderer::pool::*;
 use crate::renderer::{
     self, BindGroupEntry, BindingType, BufferUsages, ShaderStages, TextureDimension, TextureFormat,
     TextureUsages,
 };
 use crate::texture;
+use offset_allocator::Allocation;
 use wgpu::IndexFormat;
 use wgpu::util::DeviceExt;
 
@@ -200,18 +202,120 @@ impl From<&BindingType> for wgpu::BindingType {
     }
 }
 
-struct BufferPool {
-    handle: BufferHandle,
-    used: u64,
-    capacity: u64,
+use crate::model::{AttributeFormat, StepMode};
+use crate::renderer::{
+    BlendMode, CompareFunction, CullMode, DepthState, FrontFace, MultisampleState, PolygonMode,
+    Topology,
+};
+
+impl From<Topology> for wgpu::PrimitiveTopology {
+    fn from(t: Topology) -> wgpu::PrimitiveTopology {
+        match t {
+            Topology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
+            Topology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+            Topology::LineList => wgpu::PrimitiveTopology::LineList,
+            Topology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+            Topology::PointList => wgpu::PrimitiveTopology::PointList,
+        }
+    }
+}
+
+impl From<FrontFace> for wgpu::FrontFace {
+    fn from(f: FrontFace) -> wgpu::FrontFace {
+        match f {
+            FrontFace::Ccw => wgpu::FrontFace::Ccw,
+            FrontFace::Cw => wgpu::FrontFace::Cw,
+        }
+    }
+}
+
+impl From<CullMode> for Option<wgpu::Face> {
+    fn from(c: CullMode) -> Option<wgpu::Face> {
+        match c {
+            CullMode::None => None,
+            CullMode::Front => Some(wgpu::Face::Front),
+            CullMode::Back => Some(wgpu::Face::Back),
+        }
+    }
+}
+
+impl From<PolygonMode> for wgpu::PolygonMode {
+    fn from(p: PolygonMode) -> wgpu::PolygonMode {
+        match p {
+            PolygonMode::Fill => wgpu::PolygonMode::Fill,
+            PolygonMode::Line => wgpu::PolygonMode::Line,
+            PolygonMode::Point => wgpu::PolygonMode::Point,
+        }
+    }
+}
+
+impl From<CompareFunction> for wgpu::CompareFunction {
+    fn from(c: CompareFunction) -> wgpu::CompareFunction {
+        match c {
+            CompareFunction::Never => wgpu::CompareFunction::Never,
+            CompareFunction::Less => wgpu::CompareFunction::Less,
+            CompareFunction::Equal => wgpu::CompareFunction::Equal,
+            CompareFunction::LessEqual => wgpu::CompareFunction::LessEqual,
+            CompareFunction::Greater => wgpu::CompareFunction::Greater,
+            CompareFunction::NotEqual => wgpu::CompareFunction::NotEqual,
+            CompareFunction::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+            CompareFunction::Always => wgpu::CompareFunction::Always,
+        }
+    }
+}
+
+fn blend_mode_to_wgpu(mode: BlendMode) -> Option<wgpu::BlendState> {
+    match mode {
+        BlendMode::None => None,
+        BlendMode::Replace => Some(wgpu::BlendState::REPLACE),
+        BlendMode::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+        BlendMode::Additive => Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        }),
+    }
+}
+
+impl From<AttributeFormat> for wgpu::VertexFormat {
+    fn from(fmt: AttributeFormat) -> wgpu::VertexFormat {
+        match fmt {
+            AttributeFormat::Float32 => wgpu::VertexFormat::Float32,
+            AttributeFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
+            AttributeFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
+            AttributeFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
+            AttributeFormat::Uint32 => wgpu::VertexFormat::Uint32,
+            AttributeFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
+            AttributeFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
+            AttributeFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+        }
+    }
+}
+
+impl From<StepMode> for wgpu::VertexStepMode {
+    fn from(mode: StepMode) -> wgpu::VertexStepMode {
+        match mode {
+            StepMode::Vertex => wgpu::VertexStepMode::Vertex,
+            StepMode::Instance => wgpu::VertexStepMode::Instance,
+        }
+    }
 }
 
 pub struct GpuMesh {
-    pub vertex_buffer: BufferHandle,
-    pub vertex_byte_offset: u64,
-    pub index_buffer: BufferHandle,
-    pub index_byte_offset: u64,
-    pub index_count: u64,
+    pub pool: VertexPoolId,
+    pub vertex_alloc: Allocation,
+    pub index_page: u32,
+    pub index_alloc: Allocation,
+    pub index_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
 }
 
 pub struct WgpuBackend {
@@ -229,9 +333,9 @@ pub struct WgpuBackend {
     bind_group_layouts: HashMap<BindGroupLayoutHandle, wgpu::BindGroupLayout>,
     textures: HashMap<TextureHandle, wgpu::Texture>,
     texture_views: HashMap<TextureHandle, wgpu::TextureView>,
-    vertex_pools: HashMap<VertexLayout, BufferPool>,
-    index_pool: Option<BufferPool>,
+    pool_manager: PoolManager,
     gpu_meshes: HashMap<Handle<MeshAsset>, GpuMesh>,
+    shaders_hot_reload_data: HashMap<String, Vec<(PipelineDescriptor, PipelineHandle)>>,
 }
 
 pub struct WgpuRenderContext<'a> {
@@ -253,13 +357,23 @@ impl<'a> RenderContext for WgpuRenderContext<'a> {
         self.pass.draw(0..vertices, 0..instances);
     }
 
-    fn draw_indexed(&mut self, indices: u32, instances: u32) {
-        self.pass.draw_indexed(0..indices, 0, 0..instances);
+    fn draw_indexed(
+        &mut self,
+        first_index: u32,
+        index_count: u32,
+        base_vertex: i32,
+        instances: u32,
+    ) {
+        self.pass.draw_indexed(
+            first_index..first_index + index_count,
+            base_vertex,
+            0..instances,
+        );
     }
 
-    fn bind_vertex_buffer(&mut self, buffer: BufferHandle) {
+    fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle) {
         self.pass
-            .set_vertex_buffer(0, self.backend.get_buffer(buffer).unwrap().slice(..));
+            .set_vertex_buffer(slot, self.backend.get_buffer(buffer).unwrap().slice(..));
     }
 
     fn bind_index_buffer(&mut self, buffer: BufferHandle) {
@@ -291,9 +405,7 @@ impl RendererAPI for WgpuBackend {
         self
     }
 
-    fn compile(&mut self) {
-        self.index_pool = Some(self.create_buffer_pool(1024 * 1024, wgpu::BufferUsages::INDEX));
-    }
+    fn compile(&mut self) {}
 
     fn resize(&mut self, width: u32, height: u32) {
         self.surface_config.width = width;
@@ -311,85 +423,6 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn submit(&mut self, graph: &RenderGraph) {}
-
-    fn compile_render_graph_node(&mut self, node: &mut Box<dyn RenderNode>) {
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    pollster::block_on(assets::resources::load_string("shaders/cube.wgsl"))
-                        .unwrap()
-                        .into(),
-                ),
-            });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let vertex_buffer_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            }],
-        };
-
-        let render_pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Render Pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[vertex_buffer_layout],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: texture::Texture::DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview: None,
-                cache: None,
-            });
-
-        self.add_render_pipeline(render_pipeline);
-    }
 
     fn render(&mut self, render_graph: &mut RenderGraph) -> anyhow::Result<()> {
         //match state.render(&mut self.on_render) {
@@ -422,9 +455,8 @@ impl RendererAPI for WgpuBackend {
                 label: Some("Render Encoder"),
             });
 
-        for (_, node) in &mut render_graph.nodes {
-            //node.run(self);
-            self.render_node(node.as_mut(), &mut encoder, &view);
+        for (i, (_, node)) in render_graph.nodes.iter_mut().enumerate() {
+            self.render_node(node.as_mut(), &mut encoder, &view, i == 0);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -432,11 +464,15 @@ impl RendererAPI for WgpuBackend {
         Ok(())
     }
 
+    fn reload_shader(&mut self, shader_path: &str) {
+        //self.create_pipeline(material, bind_group_layouts);
+    }
+
     // Load assets
     fn load_material(&mut self, header: &crate::assets::manager::AssetHeader) -> Material {
         engine_info!("Loading material: {:?}", header);
 
-        let pipeline_descriptor = PipelineDescriptor::default("shaders/cube.wgsl".to_string());
+        let pipeline_descriptor = PipelineDescriptor::new("shaders/cube.wgsl".to_string());
         let pipeline_uuid = pipeline_descriptor.uuid;
         Material::default()
         //Material {
@@ -451,8 +487,6 @@ impl RendererAPI for WgpuBackend {
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
     ) {
-        let handle = PipelineHandle(self.pipelines.len() as u32);
-
         engine_info!("Shader name: {:?}", material.pipeline_descriptor.shader);
         let shader = self
             .device
@@ -482,6 +516,49 @@ impl RendererAPI for WgpuBackend {
 
         engine_info!("Depth Format: {:?}", texture::Texture::DEPTH_FORMAT);
 
+        let desc = &material.pipeline_descriptor;
+
+        // Build vertex buffer layouts from material's layout descriptors
+        let wgpu_attributes: Vec<Vec<wgpu::VertexAttribute>> = desc
+            .vertex_layouts
+            .iter()
+            .map(|layout| {
+                layout
+                    .attributes
+                    .iter()
+                    .map(|attr| wgpu::VertexAttribute {
+                        offset: attr.offset,
+                        shader_location: attr.shader_location,
+                        format: attr.format.into(),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = desc
+            .vertex_layouts
+            .iter()
+            .enumerate()
+            .map(|(i, layout)| wgpu::VertexBufferLayout {
+                array_stride: layout.stride,
+                step_mode: layout.step_mode.into(),
+                attributes: &wgpu_attributes[i],
+            })
+            .collect();
+
+        let strip_index_format = match desc.topology {
+            Topology::TriangleStrip | Topology::LineStrip => Some(wgpu::IndexFormat::Uint32),
+            _ => None,
+        };
+
+        let depth_stencil = desc.depth_state.map(|ds| wgpu::DepthStencilState {
+            format: texture::Texture::DEPTH_FORMAT,
+            depth_write_enabled: ds.write_enabled,
+            depth_compare: ds.compare.into(),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+
         let render_pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -490,45 +567,31 @@ impl RendererAPI for WgpuBackend {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        }],
-                    }],
+                    buffers: &vertex_buffer_layouts,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        format: self.surface_config.format,
+                        blend: blend_mode_to_wgpu(desc.blend_mode),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
+                    topology: desc.topology.into(),
+                    strip_index_format,
+                    front_face: desc.front_face.into(),
+                    cull_mode: desc.cull_mode.into(),
+                    polygon_mode: desc.polygon_mode.into(),
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: texture::Texture::DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
+                depth_stencil,
                 multisample: wgpu::MultisampleState {
-                    count: 1,
+                    count: desc.multisample.count,
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },
@@ -536,35 +599,31 @@ impl RendererAPI for WgpuBackend {
                 cache: None,
             });
 
-        self.pipelines.insert(handle, render_pipeline);
-        self.pipelines_by_uuid
-            .insert(material.pipeline_descriptor.uuid, handle);
+        self.add_render_pipeline(render_pipeline, &material.pipeline_descriptor);
     }
 
     fn create_render_data(
         &mut self,
-        positions: Vec<cgmath::Point3<f32>>,
-        indices: Vec<u32>,
+        vertex_bytes: &Vec<u8>, // How to turn a Vec of vertices into bytes: bytemuck::cast_slice(&positions_raw).to_vec();
+        indices: &Vec<u32>,
         material: Material,
         pipeline_handle: &PipelineHandle,
     ) -> RenderData {
-        let positions_raw: Vec<[f32; 3]> = positions.iter().map(|p| [p.x, p.y, p.z]).collect();
-
-        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&positions_raw).to_vec();
-        let index_bytes: Vec<u8> = bytemuck::cast_slice(&indices).to_vec();
-
         let mesh = MeshAsset {
             name: "Cube".to_string(),
-            vertices: vertex_bytes,
+            uuid: Uuid::new_v4(),
+            vertices: vertex_bytes.clone(),
             indices: bytemuck::cast_slice(&indices).to_vec(),
-            vertex_layout: VertexLayout {
-                stride: std::mem::size_of::<[f32; 3]>() as u64,
-                attributes: Vec::new(),
-            },
+            vertex_layout: material.pipeline_descriptor.vertex_layouts[0].clone(),
+            //vertex_layout: VertexLayout {
+            //    stride: std::mem::size_of::<[f32; 3]>() as u64,
+            //    step_mode: crate::model::StepMode::Vertex,
+            //    attributes: Vec::new(),
+            //},
         };
 
         RenderData {
-            mesh: self.load_mesh_with_data(&mesh, &index_bytes),
+            mesh: self.load_mesh_with_data(&mesh),
             material,
             transform_index: 0,
             sort_key: 0,
@@ -582,22 +641,40 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn get_mesh_vertex_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        self.gpu_meshes.get(mesh).unwrap().vertex_buffer
+        let gm = self.gpu_meshes.get(mesh).unwrap();
+        self.pool_manager.vertex_buffer(gm.pool)
     }
+
     fn get_mesh_index_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        self.gpu_meshes.get(mesh).unwrap().index_buffer
+        let gm = self.gpu_meshes.get(mesh).unwrap();
+        self.pool_manager.index_buffer(gm.index_page)
     }
     fn get_mesh_index_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
-        self.gpu_meshes.get(mesh).unwrap().index_count as u32
+        self.gpu_meshes.get(mesh).unwrap().index_count
+    }
+
+    fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange {
+        let gm = self.gpu_meshes.get(mesh).unwrap();
+        MeshDrawRange {
+            first_index: gm.first_index,
+            index_count: gm.index_count,
+            base_vertex: gm.base_vertex,
+        }
+    }
+
+    fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
+        self.gpu_meshes.get(mesh).unwrap().index_count
+    }
+    fn get_mesh_instance_buffer(&mut self, _mesh: &Handle<MeshAsset>) -> BufferHandle {
+        BufferHandle(0)
     }
 
     fn set_texture(&mut self, texture: &texture::Texture) {
         self.depth_texture = texture.clone();
     }
 
-    fn load_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
-        let index_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.indices).to_vec();
-        self.load_mesh_with_data(mesh, &index_bytes)
+    fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
+        self.load_mesh_with_data(mesh)
     }
 
     fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureHandle {
@@ -702,41 +779,102 @@ impl RendererAPI for WgpuBackend {
 }
 
 impl WgpuBackend {
-    fn load_mesh_with_data(&mut self, mesh: &MeshAsset, index_bytes: &[u8]) -> Handle<MeshAsset> {
+    fn load_mesh_with_data(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
         let handle: Handle<MeshAsset> = Handle {
-            uuid: Uuid::new_v4(),
+            uuid: mesh.uuid,
             asset_type: AssetType::Mesh,
             _marker: std::marker::PhantomData,
         };
 
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: &mesh.vertices,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let vertex_handle = self.add_buffer(vertex_buffer);
+        let stride = mesh.vertex_layout.stride as u32;
+        assert!(stride > 0, "vertex layout stride must be > 0");
+        assert_eq!(
+            mesh.vertices.len() as u32 % stride,
+            0,
+            "vertex bytes not a multiple of stride"
+        );
+        let vertex_count = mesh.vertices.len() as u32 / stride;
+        let index_count = mesh.indices.len() as u32;
 
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: index_bytes,
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        let index_handle = self.add_buffer(index_buffer);
+        let layout_idx = self.pool_manager.get_or_create_layout(&mesh.vertex_layout);
+
+        // Allocate vertices. Split-borrow `device`/`buffers` so the closure
+        // doesn't conflict with the `&mut self.pool_manager` call.
+        let (v_page, v_alloc) = {
+            let device = &self.device;
+            let buffers = &mut self.buffers;
+            let mut make_vb = |cap: u32| -> BufferHandle {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("VertexPoolPage"),
+                    size: cap as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let h = BufferHandle(buffers.len() as u32);
+                buffers.insert(h, buf);
+                h
+            };
+            self.pool_manager
+                .alloc_vertices(layout_idx, vertex_count, stride, &mut make_vb)
+        };
+
+        let (i_page, i_alloc) = {
+            let device = &self.device;
+            let buffers = &mut self.buffers;
+            let mut make_ib = |cap: u32| -> BufferHandle {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("IndexPoolPage"),
+                    size: cap as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let h = BufferHandle(buffers.len() as u32);
+                buffers.insert(h, buf);
+                h
+            };
+            self.pool_manager.alloc_indices(index_count, &mut make_ib)
+        };
+
+        // Byte offsets come from allocator units × element size.
+        let vertex_byte_offset = v_alloc.offset as u64 * stride as u64;
+        let index_byte_offset = i_alloc.offset as u64 * 4;
+
+        let pool_id = VertexPoolId {
+            layout_index: layout_idx,
+            page_index: v_page,
+        };
+        let v_buffer_handle = self.pool_manager.vertex_buffer(pool_id);
+        let i_buffer_handle = self.pool_manager.index_buffer(i_page);
+
+        let vb = self.buffers.get(&v_buffer_handle).unwrap();
+        self.queue
+            .write_buffer(vb, vertex_byte_offset, &mesh.vertices);
+
+        let index_bytes: &[u8] = bytemuck::cast_slice(&mesh.indices);
+        let ib = self.buffers.get(&i_buffer_handle).unwrap();
+        self.queue.write_buffer(ib, index_byte_offset, index_bytes);
 
         let gpu_mesh = GpuMesh {
-            vertex_buffer: vertex_handle,
-            vertex_byte_offset: 0,
-            index_buffer: index_handle,
-            index_byte_offset: 0,
-            index_count: mesh.indices.len() as u64,
+            pool: pool_id,
+            vertex_alloc: v_alloc,
+            index_page: i_page,
+            index_alloc: i_alloc,
+            index_count,
+            first_index: i_alloc.offset,
+            base_vertex: v_alloc.offset as i32,
         };
         self.gpu_meshes.insert(handle, gpu_mesh);
 
         handle
+    }
+
+    pub fn free_mesh(&mut self, handle: Handle<MeshAsset>) {
+        if let Some(mesh) = self.gpu_meshes.remove(&handle) {
+            self.pool_manager
+                .free_vertices(mesh.pool, mesh.vertex_alloc);
+            self.pool_manager
+                .free_indices(mesh.index_page, mesh.index_alloc);
+        }
     }
 }
 
@@ -755,16 +893,6 @@ impl WgpuBackend {
 }
 
 impl WgpuBackend {
-    pub fn get_vertex_pool(&mut self, vertex_layout: &VertexLayout) -> &BufferPool {
-        if self.vertex_pools.contains_key(vertex_layout) {
-            self.vertex_pools.get(vertex_layout).unwrap()
-        } else {
-            let vertex_pool = self.create_buffer_pool(1024 * 1024, wgpu::BufferUsages::VERTEX);
-            self.vertex_pools.insert(vertex_layout.clone(), vertex_pool);
-            self.vertex_pools.get(vertex_layout).unwrap()
-        }
-    }
-
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
@@ -837,30 +965,10 @@ impl WgpuBackend {
             bind_group_layouts: HashMap::new(),
             textures: HashMap::new(),
             texture_views: HashMap::new(),
-            vertex_pools: HashMap::new(),
-            index_pool: None,
+            pool_manager: PoolManager::new(),
             gpu_meshes: HashMap::new(),
+            shaders_hot_reload_data: HashMap::new(),
         })
-    }
-
-    fn create_buffer_pool(
-        &mut self,
-        initial_capacity: u64,
-        usage: wgpu::BufferUsages,
-    ) -> BufferPool {
-        let desc: wgpu::BufferDescriptor = wgpu::BufferDescriptor {
-            label: Some("Buffer Pool"),
-            size: initial_capacity,
-            usage,
-            mapped_at_creation: false,
-        };
-        let wgpu_buffer = self.device.create_buffer(&desc);
-        let handle = self.add_buffer(wgpu_buffer);
-        BufferPool {
-            handle,
-            capacity: initial_capacity,
-            used: 0,
-        }
     }
 
     fn render_node(
@@ -868,15 +976,19 @@ impl WgpuBackend {
         node: &mut dyn RenderNode,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
+        clear: bool,
     ) {
-        //let pipeline = self.get_render_pipeline(node).unwrap();
-        //engine_info!("{:?}", pipeline);
+        let depth_load = if clear {
+            wgpu::LoadOp::Clear(1.0)
+        } else {
+            wgpu::LoadOp::Load
+        };
 
         let depth_stencil_attachment = if node.needs_depth() {
             Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_texture.view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -885,18 +997,24 @@ impl WgpuBackend {
             None
         };
 
+        let color_load = if clear {
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            })
+        } else {
+            wgpu::LoadOp::Load
+        };
+
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.1,
-                        g: 0.2,
-                        b: 0.3,
-                        a: 1.0,
-                    }),
+                    load: color_load,
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -930,9 +1048,19 @@ impl WgpuBackend {
         self.pipelines.get(&pipeline_handle)
     }
 
-    fn add_render_pipeline(&mut self, pipeline: wgpu::RenderPipeline) -> PipelineHandle {
+    fn add_render_pipeline(
+        &mut self,
+        pipeline: wgpu::RenderPipeline,
+        pipeline_descriptor: &PipelineDescriptor,
+    ) -> PipelineHandle {
         let handle = PipelineHandle(self.pipelines.len() as u32);
         self.pipelines.insert(handle, pipeline);
+        self.pipelines_by_uuid
+            .insert(pipeline_descriptor.uuid, handle);
+        self.shaders_hot_reload_data
+            .entry(pipeline_descriptor.shader.clone())
+            .or_insert_with(Vec::new)
+            .push((pipeline_descriptor.clone(), handle));
         handle
     }
 

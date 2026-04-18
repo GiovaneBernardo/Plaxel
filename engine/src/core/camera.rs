@@ -42,6 +42,9 @@ pub struct CameraUniform {
     // We can't use cgmath with bytemuck directly, so we'll have
     // to convert the Matrix4 into a 4x4 f32 array
     pub view_proj: [[f32; 4]; 4],
+    pub position: [f32; 3],
+    // WGSL aligns vec3<f32> to 16 bytes, so we need padding to match the shader layout
+    pub _padding: f32,
 }
 
 impl CameraUniform {
@@ -49,11 +52,14 @@ impl CameraUniform {
         use cgmath::SquareMatrix;
         Self {
             view_proj: cgmath::Matrix4::identity().into(),
+            position: [0.0, 0.0, 0.0],
+            _padding: 0.0,
         }
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera) {
         self.view_proj = camera.build_view_projection_matrix().into();
+        self.position = camera.position.into();
     }
 }
 

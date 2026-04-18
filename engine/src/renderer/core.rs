@@ -10,7 +10,7 @@ use crate::InstanceRaw;
 use crate::Window;
 use crate::assets;
 use crate::assets::manager::Handle;
-use crate::assets::material::Material;
+use crate::assets::material::{Material, PipelineDescriptor};
 pub use crate::core::camera;
 use crate::engine_info;
 use crate::model;
@@ -18,6 +18,7 @@ use crate::model::MeshAsset;
 use crate::model::VertexLayout;
 pub use crate::renderer::backends::*;
 use crate::renderer::model::Vertex;
+pub use crate::renderer::render_nodes::*;
 use crate::renderer::wgpu_backend::WgpuBackend;
 use crate::{State, texture};
 use wgpu;
@@ -35,6 +36,13 @@ pub struct BindGroupHandle(pub u32);
 pub struct BindGroupLayoutHandle(pub u32);
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct RenderPassHandle(pub u32);
+
+#[derive(Debug, Copy, Clone)]
+pub struct MeshDrawRange {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub base_vertex: i32,
+}
 
 pub struct Renderer {
     pub renderer_api: Box<dyn RendererAPI>,
@@ -261,13 +269,62 @@ pub struct RenderData {
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
-    Blend,
-    NoBlend,
+    None,
+    Alpha,
+    Additive,
+    Replace,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CullMode {
     None,
+    Front,
+    Back,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Topology {
+    TriangleList,
+    TriangleStrip,
+    LineList,
+    LineStrip,
+    PointList,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum FrontFace {
+    Ccw,
+    Cw,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum PolygonMode {
+    Fill,
+    Line,
+    Point,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DepthState {
+    pub write_enabled: bool,
+    pub compare: CompareFunction,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MultisampleState {
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -323,28 +380,37 @@ pub enum TextureFormat {
 
 #[derive(Hash, Eq, PartialEq)]
 pub struct PipelineKey {
-    pub shader: String,              // from material
-    pub blend_state: BlendMode,      // from material
-    pub cull_mode: CullMode,         // from material
-    pub vertex_layout: VertexLayout, // from mesh/material
+    pub shader: String,
+    pub blend_mode: BlendMode,
+    pub cull_mode: CullMode,
+    pub topology: Topology,
+    pub front_face: FrontFace,
+    pub polygon_mode: PolygonMode,
+    pub depth_state: Option<DepthState>,
+    pub multisample_count: u32,
+    pub vertex_layouts: Vec<VertexLayout>,
     pub color_format: TextureFormat, // from pass
     pub depth_format: TextureFormat, // from pass
-    pub sample_count: u32,           // from pass
 }
 
 impl PipelineKey {
     pub fn from_material_and_pass(
         material: &Material,
-        render_node: &dyn RenderNode,
+        _render_node: &dyn RenderNode,
     ) -> PipelineKey {
+        let desc = &material.pipeline_descriptor;
         PipelineKey {
-            shader: material.pipeline_descriptor.shader.clone(),
-            blend_state: material.blend_state,
-            cull_mode: material.cull_mode,
-            vertex_layout: material.vertex_layout.clone(),
+            shader: desc.shader.clone(),
+            blend_mode: desc.blend_mode,
+            cull_mode: desc.cull_mode,
+            topology: desc.topology,
+            front_face: desc.front_face,
+            polygon_mode: desc.polygon_mode,
+            depth_state: desc.depth_state,
+            multisample_count: desc.multisample.count,
+            vertex_layouts: desc.vertex_layouts.clone(),
             color_format: TextureFormat::None,
             depth_format: TextureFormat::None,
-            sample_count: 1,
         }
     }
 }
@@ -400,7 +466,7 @@ impl Renderer {
 
     pub fn init(&mut self) {
         self.renderer_api.compile();
-        self.render_graph = RenderGraph::default_render_graph();
+        self.render_graph = RenderGraph::default_render_graph(self.renderer_api.as_mut());
         self.render_graph
             .compile(&mut self.render_resources, self.renderer_api.as_mut());
     }
@@ -419,246 +485,11 @@ impl Renderer {
         self.prepare();
         self.renderer_api.render(&mut self.render_graph)
     }
-
-    pub fn compile(
-        &self,
-        device: &wgpu::Device,
-        shader: &wgpu::ShaderModule,
-    ) -> wgpu::RenderPipeline {
-        let width = 1920;
-        let height = 1080;
-        let camera = camera::Camera {
-            position: (0.0, 1.0, 2.0).into(),
-            yaw: -90.0,
-            pitch: 0.0,
-            front: (0.0, 0.0, -1.0).into(),
-            up: cgmath::Vector3::unit_y(),
-            right: cgmath::Vector3::unit_x(),
-            world_up: cgmath::Vector3::unit_y(),
-            eye: (0.0, 1.0, 2.0).into(),
-            // have it look at the origin
-            target: (0.0, 0.0, 0.0).into(),
-            // which way is "up"
-            aspect: width as f32 / height as f32,
-            fovy: 65.0,
-            znear: 0.1,
-            zfar: 15000.0,
-        };
-
-        let mut camera_uniform = camera::CameraUniform::new();
-        camera_uniform.update_view_proj(&camera);
-
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("camera_bind_group_layout"),
-            });
-
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
-
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        // This should match the filterable field of the
-                        // corresponding Texture entry above.
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vs_main"),
-                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
-        render_pipeline
-    }
-}
-
-pub struct GeometryPassNode {
-    render_data: Vec<RenderData>,
-    camera_buffer: Option<BufferHandle>,
-    camera_bind_group: Option<BindGroupHandle>,
-    pub camera_bind_group_layout: Option<BindGroupLayoutHandle>,
-    pass_inputs_group: Option<BindGroupHandle>,
 }
 
 pub struct CameraData {
     pub uniform: camera::CameraUniform,
 }
-
-impl RenderNode for GeometryPassNode {
-    fn should_render_to_swapchain(&self) -> bool {
-        true
-    }
-
-    fn describe(&self) -> RenderNodeDescriptor {
-        //RenderNodeDescriptor {
-        //    input_textures: &[],
-        //    output_textures: &[],
-        //    input_buffers: &[],
-        //    output_buffers: &[],
-        //}
-
-        RenderNodeDescriptor {
-            input_textures: &[],
-            output_textures: &[OutputTexture::Create(TextureSlot {
-                name: "color",
-                texture_descriptor: TextureDescriptor {
-                    label: "color",
-                    size: TextureSize::FullRes,
-                    format: TextureFormat::Bgra8UnormSrgb,
-                    dimension: TextureDimension::D2,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    mip_levels: 1,
-                    sample_count: 1,
-                },
-            })],
-            input_buffers: &[],
-            output_buffers: &[],
-        }
-    }
-
-    fn compile(&mut self, ctx: &mut NodeCompileContext) {
-        let buffer = ctx.create_buffer(&BufferDescriptor {
-            label: "camera_uniform",
-            size: size_of::<camera::CameraUniform>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
-        let layout = ctx
-            .api
-            .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: "camera_layout".to_string(),
-                entries: vec![BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::Vertex,
-                    entry_type: BindingType::UniformBuffer,
-                }],
-            });
-
-        let bind_group = ctx.api.create_bind_group(&BindGroupDescriptor {
-            label: "camera_bind_group".to_string(),
-            layout,
-            entries: vec![(0, BindGroupEntry::Buffer(buffer))],
-        });
-
-        self.camera_buffer = Some(buffer);
-        self.camera_bind_group = Some(bind_group);
-        self.camera_bind_group_layout = Some(layout);
-    }
-
-    fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI) {
-        if let (Some(buffer), Some(camera_data)) =
-            (self.camera_buffer, resources.get::<CameraData>())
-        {
-            api.write_buffer(buffer, bytemuck::cast_slice(&[camera_data.uniform]));
-        }
-    }
-
-    fn run(&mut self, ctx: &mut dyn RenderContext) {
-        ctx.bind_bind_group(0, self.camera_bind_group.unwrap());
-        //ctx.bind_bind_group(1, self.pass_inputs_group);
-        for render_data in &mut self.render_data {
-            let pipeline = ctx
-                .get_pipeline(render_data.material.pipeline_descriptor.uuid)
-                .unwrap();
-            ctx.bind_pipeline(pipeline);
-            let vertex_buffer = ctx.get_mesh_vertex_buffer(&render_data.mesh);
-            ctx.bind_vertex_buffer(vertex_buffer);
-            let index_buffer = ctx.get_mesh_index_buffer(&render_data.mesh);
-            ctx.bind_index_buffer(index_buffer);
-            let index_count = ctx.get_mesh_index_count(&render_data.mesh);
-            ctx.draw_indexed(index_count, 1);
-        }
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-impl GeometryPassNode {
-    pub fn add_render_data(&mut self, new_render_data: RenderData) {
-        self.render_data.push(new_render_data);
-    }
-}
-
 pub struct GraphResources {
     textures: HashMap<&'static str, TextureHandle>,
     buffers: HashMap<&'static str, BufferHandle>,
@@ -693,7 +524,7 @@ impl GraphResources {
 }
 
 impl RenderGraph {
-    pub fn default_render_graph() -> Self {
+    pub fn default_render_graph(renderer_api: &mut dyn RendererAPI) -> Self {
         let mut graph = RenderGraph {
             nodes: Vec::new(),
             compiled: false,
@@ -707,6 +538,153 @@ impl RenderGraph {
             pass_inputs_group: None,
         };
         graph.nodes.push((0, Box::new(geometry_pass_node)));
+
+        let meshe = MeshAsset {
+            name: "eae".to_string(),
+            uuid: Uuid::new_v4(),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            vertex_layout: VertexLayout {
+                stride: std::mem::size_of::<[f32; 3]>() as u64,
+                step_mode: model::StepMode::Vertex,
+                attributes: Vec::new(),
+            },
+        };
+        let positions = vec![
+            cgmath::Point3::new(-0.5, -0.5, -0.5),
+            cgmath::Point3::new(0.5, -0.5, -0.5),
+            cgmath::Point3::new(0.5, 0.5, -0.5),
+            cgmath::Point3::new(-0.5, 0.5, -0.5),
+            cgmath::Point3::new(-0.5, -0.5, 0.5),
+            cgmath::Point3::new(0.5, -0.5, 0.5),
+            cgmath::Point3::new(0.5, 0.5, 0.5),
+            cgmath::Point3::new(-0.5, 0.5, 0.5),
+        ];
+
+        let indices: Vec<u32> = vec![
+            4, 5, 6, 4, 6, 7, // front  (+z)
+            1, 0, 3, 1, 3, 2, // back   (-z)
+            5, 1, 2, 5, 2, 6, // right  (+x)
+            0, 4, 7, 0, 7, 3, // left   (-x)
+            3, 7, 6, 3, 6, 2, // top    (+y)
+            0, 1, 5, 0, 5, 4, // bottom (-y)
+        ];
+        //meshe.indices = indices;
+
+        let positions_raw: Vec<[f32; 3]> = positions.iter().map(|p| [p.x, p.y, p.z]).collect();
+
+        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&positions_raw).to_vec();
+        //let index_bytes: Vec<u8> = bytemuck::cast_slice(&indices).to_vec();
+
+        let mesh = MeshAsset {
+            name: "Cube".to_string(),
+            uuid: Uuid::new_v4(),
+            vertices: vertex_bytes.clone(),
+            indices: bytemuck::cast_slice(&indices).to_vec(),
+            vertex_layout: VertexLayout {
+                stride: std::mem::size_of::<[f32; 3]>() as u64,
+                step_mode: model::StepMode::Vertex,
+                attributes: Vec::new(),
+            },
+        };
+
+        let cube_mesh = renderer_api.upload_mesh(&mesh);
+        let sphere_mesh = cube_mesh;
+
+        // Wire cube mesh (same vertices, line-list indices for 12 edges)
+        let wire_indices: Vec<u32> = vec![
+            0, 1, 1, 2, 2, 3, 3, 0, // back face edges
+            4, 5, 5, 6, 6, 7, 7, 4, // front face edges
+            0, 4, 1, 5, 2, 6, 3, 7, // connecting edges
+        ];
+        let wire_mesh = MeshAsset {
+            name: "WireCube".to_string(),
+            uuid: Uuid::new_v4(),
+            vertices: vertex_bytes,
+            indices: bytemuck::cast_slice(&wire_indices).to_vec(),
+            vertex_layout: VertexLayout {
+                stride: std::mem::size_of::<[f32; 3]>() as u64,
+                step_mode: model::StepMode::Vertex,
+                attributes: Vec::new(),
+            },
+        };
+        let wire_cube_mesh = renderer_api.upload_mesh(&wire_mesh);
+
+        let vertex_layout = VertexLayout {
+            stride: std::mem::size_of::<[f32; 3]>() as u64,
+            step_mode: model::StepMode::Vertex,
+            attributes: vec![model::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: model::AttributeFormat::Float32x3,
+            }],
+        };
+
+        let instance_layout = VertexLayout {
+            stride: std::mem::size_of::<[[f32; 4]; 5]>() as u64,
+            step_mode: model::StepMode::Instance,
+            attributes: vec![
+                model::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: model::AttributeFormat::Float32x4,
+                },
+                model::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 4]>() as u64,
+                    shader_location: 6,
+                    format: model::AttributeFormat::Float32x4,
+                },
+                model::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 8]>() as u64,
+                    shader_location: 7,
+                    format: model::AttributeFormat::Float32x4,
+                },
+                model::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 12]>() as u64,
+                    shader_location: 8,
+                    format: model::AttributeFormat::Float32x4,
+                },
+                model::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 16]>() as u64,
+                    shader_location: 9,
+                    format: model::AttributeFormat::Float32x4,
+                },
+            ],
+        };
+
+        let mut sphere_material = Material::new("shaders/debug.wgsl".to_string())
+            .with_vertex_layouts(vec![vertex_layout.clone(), instance_layout.clone()]);
+        let cube_material = sphere_material.clone();
+        let wire_cube_material = Material::new("shaders/debug.wgsl".to_string())
+            .with_vertex_layouts(vec![vertex_layout.clone(), instance_layout.clone()])
+            .with_topology(Topology::LineList);
+
+        let debug_pass_node = DebugPassNode {
+            camera_buffer: None,
+            camera_bind_group: None,
+            camera_bind_group_layout: None,
+            pass_inputs_group: None,
+            cubes: Vec::new(),
+            wire_cubes: Vec::new(),
+            sphere_positions: Vec::new(),
+            sphere_mesh,
+            sphere_material,
+            cube_mesh,
+            cube_material,
+            wire_cube_mesh,
+            wire_cube_material,
+            sphere_instance_buffer: None,
+            cube_instance_buffer: None,
+            wire_cube_instance_buffer: None,
+            sphere_instance_capacity: 0,
+            cube_instance_capacity: 0,
+            wire_cube_instance_capacity: 0,
+            sphere_instance_count: 0,
+            cube_instance_count: 0,
+            wire_cube_instance_count: 0,
+        };
+
+        graph.nodes.push((1, Box::new(debug_pass_node)));
 
         graph
     }

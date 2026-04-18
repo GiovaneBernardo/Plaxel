@@ -7,7 +7,8 @@ use crate::assets::manager::{AssetHeader, Handle};
 use crate::assets::material::{Material, PipelineDescriptor};
 use crate::model::MeshAsset;
 use crate::renderer::core::{
-    BufferHandle, PipelineHandle, RenderGraph, RenderNode, RenderPassHandle, TextureHandle,
+    BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode, RenderPassHandle,
+    TextureHandle,
 };
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,
@@ -24,11 +25,11 @@ pub trait RendererAPI {
     fn resize(&mut self, width: u32, height: u32);
     fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle;
     fn submit(&mut self, graph: &RenderGraph);
-    fn compile_render_graph_node(&mut self, node: &mut Box<dyn RenderNode>);
     fn render(&mut self, render_graph: &mut RenderGraph) -> anyhow::Result<()>;
+    fn reload_shader(&mut self, shader_path: &str);
 
     // Load assets
-    fn load_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
+    fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
     fn load_material(&mut self, header: &AssetHeader) -> Material;
     fn create_pipeline(
         &mut self,
@@ -50,13 +51,16 @@ pub trait RendererAPI {
     fn get_mesh_vertex_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
     fn get_mesh_index_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
     fn get_mesh_index_count(&mut self, mesh: &Handle<MeshAsset>) -> u32;
+    fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange;
+    fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32;
+    fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
 
     // Temporary
     fn set_texture(&mut self, texture: &texture::Texture);
     fn create_render_data(
         &mut self,
-        positions: Vec<cgmath::Point3<f32>>,
-        indices: Vec<u32>,
+        vertex_bytes: &Vec<u8>,
+        indices: &Vec<u32>,
         material: Material,
         pipeline_handle: &PipelineHandle,
     ) -> RenderData;
@@ -66,11 +70,17 @@ pub trait RenderContext {
     fn api(&mut self) -> &mut dyn RendererAPI;
 
     fn bind_pipeline(&mut self, pipeline: PipelineHandle);
-    fn bind_vertex_buffer(&mut self, buffer: BufferHandle);
+    fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle);
     fn bind_index_buffer(&mut self, buffer: BufferHandle);
     fn bind_bind_group(&mut self, index: u32, bind_group: BindGroupHandle);
     fn draw(&mut self, vertices: u32, instances: u32);
-    fn draw_indexed(&mut self, indices: u32, instances: u32);
+    fn draw_indexed(
+        &mut self,
+        first_index: u32,
+        index_count: u32,
+        base_vertex: i32,
+        instances: u32,
+    );
 
     /// Run a closure with the raw wgpu render pass (with 'static lifetime via forget_lifetime).
     /// This is the escape hatch for nodes that need direct backend access (e.g. egui).
@@ -87,6 +97,15 @@ pub trait RenderContext {
     }
     fn get_mesh_index_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
         self.api().get_mesh_index_count(mesh)
+    }
+    fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange {
+        self.api().get_mesh_draw_range(mesh)
+    }
+    fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
+        self.api().get_mesh_instance_count(mesh)
+    }
+    fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
+        self.api().get_mesh_instance_buffer(mesh)
     }
 }
 

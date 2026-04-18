@@ -12,3 +12,4 @@ game-logic = { path = "../logic" }
 game-types = { path = "../types" }
 hot-lib-reloader = { workspace = true, optional = true }
 winit = { workspace = true }
+bytemuck = { workspace = true }
