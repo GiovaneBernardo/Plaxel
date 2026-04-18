@@ -1,4 +1,5 @@
-use winit::keyboard::KeyCode;
+use cgmath::{Array, EuclideanSpace};
+use winit::{event::MouseScrollDelta, keyboard::KeyCode};
 
 use crate::engine_info;
 
@@ -71,6 +72,7 @@ pub struct CameraController {
     is_right_pressed: bool,
     is_up_pressed: bool,
     is_down_pressed: bool,
+    is_shift_pressed: bool,
     pub is_right_click_pressed: bool,
     yaw: f32,
     pitch: f32,
@@ -87,6 +89,7 @@ impl CameraController {
             is_up_pressed: false,
             is_down_pressed: false,
             is_right_click_pressed: false,
+            is_shift_pressed: false,
             yaw: 0.0,
             pitch: 0.0,
         }
@@ -118,6 +121,10 @@ impl CameraController {
                 self.is_up_pressed = is_pressed;
                 true
             }
+            KeyCode::ShiftLeft => {
+                self.is_shift_pressed = is_pressed;
+                true
+            }
             _ => false,
         }
     }
@@ -126,51 +133,69 @@ impl CameraController {
         self.is_right_click_pressed = is_pressed;
     }
 
+    pub fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
+        match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                self.speed = (self.speed + y).clamp(0.0, 1024.0 * 1024.0 * 1024.0);
+            }
+            MouseScrollDelta::PixelDelta(pos) => {
+                self.speed = (self.speed + pos.y as f32).clamp(0.0, 1024.0 * 1024.0 * 1024.0);
+            }
+        }
+    }
+
     pub fn handle_mouse(&mut self, _x: f32, _y: f32) {
         self.yaw += _x as f32 * 0.1;
         self.pitch += _y as f32 * 0.1;
     }
 
-    pub fn update_camera(&self, camera: &mut Camera) {
+    pub fn update_camera(&mut self, camera: &mut Camera) {
         use cgmath::InnerSpace;
 
         if self.is_right_click_pressed {
-            // Update camera direction
             camera.yaw += self.yaw;
             camera.pitch += self.pitch;
-            // Limit the pitch to prevent screen flip
-            camera.pitch = camera.pitch.clamp(-89.0, 89.0);
+            camera.pitch = camera.pitch.clamp(-87.0, 87.0);
 
-            camera.front.x = self.yaw.to_radians().cos() * self.pitch.to_radians().cos();
-            camera.front.y = -self.pitch.to_radians().sin();
-            camera.front.z = self.yaw.to_radians().sin() * self.pitch.to_radians().cos();
+            camera.front.x = camera.yaw.to_radians().cos() * camera.pitch.to_radians().cos();
+            camera.front.y = -camera.pitch.to_radians().sin();
+            camera.front.z = camera.yaw.to_radians().sin() * camera.pitch.to_radians().cos();
 
             camera.right = camera.front.cross(camera.world_up).normalize();
             camera.up = camera.right.cross(camera.front).normalize();
         }
 
+        self.yaw = 0.0;
+        self.pitch = 0.0;
+
+        let mut final_speed = self.speed;
+        if self.is_shift_pressed {
+            let distance = camera.position.to_vec().magnitude();
+            final_speed *= distance.sqrt();
+        }
+
         // Forward Backward
         if self.is_forward_pressed {
-            camera.position += camera.front * self.speed;
+            camera.position += camera.front * final_speed;
         }
         if self.is_backward_pressed {
-            camera.position -= camera.front * self.speed;
+            camera.position -= camera.front * final_speed;
         }
 
         // Right Left
         if self.is_right_pressed {
-            camera.position += camera.right * self.speed;
+            camera.position += camera.right * final_speed;
         }
         if self.is_left_pressed {
-            camera.position -= camera.right * self.speed;
+            camera.position -= camera.right * final_speed;
         }
 
         // Up down
         if self.is_up_pressed {
-            camera.position += camera.up.normalize() * self.speed;
+            camera.position += camera.up.normalize() * final_speed;
         }
         if self.is_down_pressed {
-            camera.position -= camera.up.normalize() * self.speed;
+            camera.position -= camera.up.normalize() * final_speed;
         }
     }
 }

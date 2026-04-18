@@ -170,7 +170,7 @@ impl State {
         };
 
         let camera = camera::Camera {
-            position: (0.0, 1.0, 2.0).into(),
+            position: (0.0, 65536.0, 2.0).into(), // TODO: switch position Y back to 1
             yaw: -90.0,
             pitch: 0.0,
             front: (0.0, 0.0, -1.0).into(),
@@ -184,7 +184,7 @@ impl State {
             aspect: config.width as f32 / config.height as f32,
             fovy: 65.0,
             znear: 0.1,
-            zfar: 15000.0,
+            zfar: 15000000.0, // Increased zfar, not sure if it will break something, if needed return to 15km
         };
 
         let mut camera_uniform = camera::CameraUniform::new();
@@ -285,6 +285,10 @@ impl State {
         if button == MouseButton::Right {
             self.camera_controller.handle_mouse_click(is_pressed);
         }
+    }
+
+    fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
+        self.camera_controller.handle_mouse_scroll(delta);
     }
 
     fn update(&mut self) {
@@ -472,6 +476,14 @@ impl ApplicationHandler<State> for App {
                 state: key_state,
                 button,
             } => state.handle_mouse_click(button, key_state.is_pressed()),
+
+            WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase,
+            } => {
+                state.handle_mouse_scroll(delta);
+            }
             _ => {}
         }
     }
