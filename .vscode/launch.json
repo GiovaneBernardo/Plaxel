@@ -1,56 +1,31 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug executable 'plaxel' Editor",
-            "type": "lldb",
+            "name": "Debug Editor (MSVC)",
+            "type": "cppvsdbg",
             "request": "launch",
-            "cargo": {
-                "args": [
-                    "run",
-                    "--bin=editor-runner"
-                ]
-            },
+            "program": "${workspaceFolder}/target/debug/editor-runner.exe",
             "args": [],
-            "env": {
-                "RUST_BACKTRACE": "1"
-            }
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "RUST_BACKTRACE",
+                    "value": "1"
+                }
+            ],
+            "stopAtEntry": false,
+            "preLaunchTask": "cargo build"
         },
         {
-            "name": "Debug unit tests in library 'plaxel'",
-            "type": "lldb",
+            "name": "Debug Game (MSVC)",
+            "type": "cppvsdbg",
             "request": "launch",
-            "cargo": {
-                "args": [
-                    "test"
-                ]
-            }
-        },
-        {
-            "name": "Debug executable 'plaxel' Game",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "run",
-                    "--bin=game-runner"
-                ]
-            },
-            "args": []
-        },
-        {
-            "name": "Debug unit tests in executable 'plaxel'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--bin=plaxel"
-                ]
-            }
+            "program": "${workspaceFolder}/target/debug/game-runner.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "preLaunchTask": "cargo build"
         }
     ]
 }
