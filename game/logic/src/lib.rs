@@ -18,8 +18,49 @@ use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
 use std::cmp;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock, mpsc};
 
-const PLANET_SIZE: usize = 65536 / 8;
+// A chunk finished on a worker thread. Owned Vecs are moved through the
+// channel — no shared references, no locks on the hot path.
+struct ReadyChunk {
+    vertices: Vec<PlanetVertex>,
+    indices: Vec<u32>,
+}
+
+// State shared between the main thread and the worker tasks.
+// Sender<T> is Send but !Sync, so we keep it inside a Mutex that the
+// main thread locks briefly when scheduling or draining.
+struct PlanetWorkerCoord {
+    tx: mpsc::Sender<ReadyChunk>,
+    rx: mpsc::Receiver<ReadyChunk>,
+    solid_material: Option<Material>,
+    scheduled: usize,
+    completed: usize,
+}
+
+static WORKER_COORD: OnceLock<Mutex<PlanetWorkerCoord>> = OnceLock::new();
+
+fn worker_coord() -> &'static Mutex<PlanetWorkerCoord> {
+    WORKER_COORD.get_or_init(|| {
+        let (tx, rx) = mpsc::channel();
+        Mutex::new(PlanetWorkerCoord {
+            tx,
+            rx,
+            solid_material: None,
+            scheduled: 0,
+            completed: 0,
+        })
+    })
+}
+
+// Time budget for per-frame chunk uploads. Workers all start together and
+// finish in waves, so a raw count cap either stutters (big wave = big spike)
+// or under-utilizes the frame. A time budget bounds frame time regardless
+// of how expensive individual chunks turn out to be. 2ms leaves plenty for
+// the rest of a 60 FPS frame.
+const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+
+const PLANET_SIZE: usize = 65536 / 16;
 const CHUNK_SIZE: usize = 32;
 
 static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -68,6 +109,82 @@ pub fn update(state: &mut engine::State) {
     for transform in &mut state.scene.transform_components {
         transform.scale = (0.01, 0.01, 0.01).into(); //(transform.velocity.x * 0.1);
         transform.position -= transform.velocity;
+    }
+
+    drain_planet_chunks(state);
+}
+
+// Pull finished chunks out of the channel and upload them to the GPU until
+// we hit UPLOAD_BUDGET. try_recv() is non-blocking: if workers are still
+// crunching, we return immediately and the game keeps running at full FPS.
+fn drain_planet_chunks(state: &mut engine::State) {
+    let start = std::time::Instant::now();
+    let coord_mutex = worker_coord();
+
+    // Grab the material once under a short lock so we don't relock per-chunk.
+    let material = {
+        let coord = coord_mutex.lock().unwrap();
+        match &coord.solid_material {
+            Some(m) => m.clone(),
+            None => return, // nothing scheduled yet
+        }
+    };
+
+    let mut uploaded = 0usize;
+    loop {
+        if start.elapsed() >= UPLOAD_BUDGET {
+            break;
+        }
+
+        // Pop one chunk under a short lock. The lock is only held for the
+        // try_recv itself — not across the GPU upload below.
+        let chunk = {
+            let coord = coord_mutex.lock().unwrap();
+            match coord.rx.try_recv() {
+                Ok(c) => c,
+                Err(_) => break, // channel empty — done for this frame
+            }
+        };
+
+        if chunk.vertices.is_empty() {
+            continue;
+        }
+
+        // cast_slice returns a &[u8] view — zero-copy. create_render_data
+        // still clones internally, so we pass a thin Vec wrapper around
+        // the same bytes instead of doing an extra .to_vec() here.
+        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
+        let render_data = state.renderer.renderer_api.create_render_data(
+            &vertex_bytes,
+            &chunk.indices,
+            material.clone(),
+            &PipelineHandle(0),
+        );
+        if let Some(node) = state
+            .renderer
+            .render_graph
+            .nodes
+            .first_mut()
+            .unwrap()
+            .1
+            .as_any_mut()
+            .downcast_mut::<GeometryPassNode>()
+        {
+            node.add_render_data(render_data);
+        }
+        uploaded += 1;
+    }
+
+    if uploaded > 0 {
+        let mut coord = coord_mutex.lock().unwrap();
+        coord.completed += uploaded;
+        println!(
+            "planet chunks: {} / {} uploaded ({} this frame, {:?})",
+            coord.completed,
+            coord.scheduled,
+            uploaded,
+            start.elapsed()
+        );
     }
 }
 
@@ -153,60 +270,101 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
     if key_code == KeyCode::KeyT && pressed {}
 
     if key_code == KeyCode::KeyO && pressed {
-        let debug_pass_node: &mut DebugPassNode = state
-            .renderer
-            .render_graph
-            .get_node_mut::<DebugPassNode>(1)
-            .unwrap();
+        schedule_planet_generation(state);
+    }
+}
 
-        debug_pass_node.clear_wire_cubes();
-        debug_pass_node.clear_cubes();
+fn schedule_planet_generation(state: &mut engine::State) {
+    // Clear debug visuals and any previously uploaded chunks.
+    let debug_pass_node: &mut DebugPassNode = state
+        .renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(1)
+        .unwrap();
+    debug_pass_node.clear_wire_cubes();
+    debug_pass_node.clear_cubes();
 
-        if let Some(node) = state
-            .renderer
-            .render_graph
-            .nodes
-            .first_mut()
-            .unwrap()
-            .1
-            .as_any_mut()
-            .downcast_mut::<GeometryPassNode>()
-        {
-            node.clear_render_data();
-        }
+    if let Some(node) = state
+        .renderer
+        .render_graph
+        .nodes
+        .first_mut()
+        .unwrap()
+        .1
+        .as_any_mut()
+        .downcast_mut::<GeometryPassNode>()
+    {
+        node.clear_render_data();
+    }
 
-        let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
-            .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-            .with_cull(CullMode::None);
+    // Materials + pipelines must be created on the main thread (wgpu
+    // shader compilation goes through &mut RendererAPI).
+    let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
+        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
+        .with_cull(CullMode::None);
 
-        let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
-            .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-            .with_topology(engine::renderer::Topology::LineList)
-            .with_cull(CullMode::None);
-        //.with_depth(Some(DepthState {
-        //    write_enabled: false,
-        //    compare: engine::renderer::CompareFunction::Always,
-        //}));
+    let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
+        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
+        .with_topology(engine::renderer::Topology::LineList)
+        .with_cull(CullMode::None);
 
-        let camera_layout = state
-            .renderer
-            .render_graph
-            .get_node_mut::<GeometryPassNode>(0)
-            .and_then(|node| node.camera_bind_group_layout)
-            .expect("GeometryPassNode must be compiled before creating pipelines");
+    let camera_layout = state
+        .renderer
+        .render_graph
+        .get_node_mut::<GeometryPassNode>(0)
+        .and_then(|node| node.camera_bind_group_layout)
+        .expect("GeometryPassNode must be compiled before creating pipelines");
 
-        state
-            .renderer
-            .renderer_api
-            .create_pipeline(&solid_material, &[camera_layout]);
+    state
+        .renderer
+        .renderer_api
+        .create_pipeline(&solid_material, &[camera_layout]);
+    state
+        .renderer
+        .renderer_api
+        .create_pipeline(&line_material, &[camera_layout]);
 
-        state
-            .renderer
-            .renderer_api
-            .create_pipeline(&line_material, &[camera_layout]);
+    // Octree build is cheap (only 8-corner SDF checks per node) — stays on main thread.
+    let size = PLANET_SIZE;
+    let octree = Planet::create_octree(size as u32 / 2);
+    let max_depth = octree_max_depth(&octree, 0);
+    OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
+    OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
 
-        let mut planet = Planet::generate_planet(state);
-        planet.load_meshes(state, &solid_material, &line_material);
+    let mut octree_nodes = Vec::new();
+    Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
+    println!(
+        "planet gen: scheduling {} chunks across rayon workers",
+        octree_nodes.len()
+    );
+
+    // Drain any stale results from a previous run, stash the material so
+    // the main-thread drain knows what to upload with, and reset counters.
+    let tx_template = {
+        let mut coord = worker_coord().lock().unwrap();
+        while coord.rx.try_recv().is_ok() {}
+        coord.solid_material = Some(solid_material);
+        coord.scheduled = octree_nodes.len();
+        coord.completed = 0;
+        coord.tx.clone()
+    };
+
+    // Spawn one rayon task per chunk. The global rayon pool has one worker
+    // per CPU thread — each task is a pure SDF evaluation + dual contouring.
+    for (center, node_size, _depth) in octree_nodes {
+        let tx = tx_template.clone();
+        rayon::spawn(move || {
+            let resolution = node_size / CHUNK_SIZE as f32;
+            let min_corner = Point3::new(
+                center.x - 16.0 * resolution,
+                center.y - 16.0 * resolution,
+                center.z - 16.0 * resolution,
+            );
+            let grid = Planet::generate_grid(34, 34, 34, resolution, center);
+            let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
+            // send() moves the Vecs into the channel — no copy, no alias.
+            let _ = tx.send(ReadyChunk { vertices, indices });
+        });
     }
 }
 

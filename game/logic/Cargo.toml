@@ -13,6 +13,7 @@ game-types = { path = "../types" }
 cgmath = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
+rayon = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
