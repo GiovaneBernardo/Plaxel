@@ -113,4 +113,8 @@ impl GeometryPassNode {
     pub fn add_render_data(&mut self, new_render_data: RenderData) {
         self.render_data.push(new_render_data);
     }
+
+    pub fn clear_render_data(&mut self) {
+        self.render_data.clear();
+    }
 }

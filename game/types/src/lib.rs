@@ -1,3 +1,4 @@
+pub mod octree;
 pub mod planet;
 pub mod player;
 pub mod render_graph;

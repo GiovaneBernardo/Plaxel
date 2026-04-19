@@ -116,7 +116,10 @@ impl RenderNode for DebugPassNode {
                 .iter()
                 .map(|p| {
                     let m = cgmath::Matrix4::from_translation(cgmath::Vector3::new(p.x, p.y, p.z));
-                    InstanceRaw { model: m.into(), color: [0.3, 0.3, 0.3, 1.0] }
+                    InstanceRaw {
+                        model: m.into(),
+                        color: [0.3, 0.3, 0.3, 1.0],
+                    }
                 })
                 .collect();
             self.sphere_instance_count = instances.len() as u32;
@@ -146,7 +149,10 @@ impl RenderNode for DebugPassNode {
                     let p = &cube.position;
                     let m = cgmath::Matrix4::from_translation(cgmath::Vector3::new(p.x, p.y, p.z))
                         * cgmath::Matrix4::from_scale(cube.scale);
-                    InstanceRaw { model: m.into(), color: cube.color }
+                    InstanceRaw {
+                        model: m.into(),
+                        color: cube.color,
+                    }
                 })
                 .collect();
             self.cube_instance_count = instances.len() as u32;
@@ -176,7 +182,10 @@ impl RenderNode for DebugPassNode {
                     let p = &cube.position;
                     let m = cgmath::Matrix4::from_translation(cgmath::Vector3::new(p.x, p.y, p.z))
                         * cgmath::Matrix4::from_scale(cube.scale);
-                    InstanceRaw { model: m.into(), color: cube.color }
+                    InstanceRaw {
+                        model: m.into(),
+                        color: cube.color,
+                    }
                 })
                 .collect();
             self.wire_cube_instance_count = instances.len() as u32;
@@ -281,15 +290,27 @@ impl RenderNode for DebugPassNode {
 
 impl DebugPassNode {
     pub fn add_cube(&mut self, position: cgmath::Point3<f32>, scale: f32, color: [f32; 4]) {
-        self.cubes.push(DebugCube { position, scale, color });
+        self.cubes.push(DebugCube {
+            position,
+            scale,
+            color,
+        });
     }
 
     pub fn add_wire_cube(&mut self, position: cgmath::Point3<f32>, scale: f32, color: [f32; 4]) {
-        self.wire_cubes.push(DebugCube { position, scale, color });
+        self.wire_cubes.push(DebugCube {
+            position,
+            scale,
+            color,
+        });
     }
 
     pub fn clear_wire_cubes(&mut self) {
         self.wire_cubes.clear();
+    }
+
+    pub fn clear_cubes(&mut self) {
+        self.cubes.clear();
     }
 
     pub fn add_sphere(&mut self, position: cgmath::Point3<f32>) {

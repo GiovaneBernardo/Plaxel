@@ -1,9 +1,10 @@
+use crate::octree::{self, OctreeNode};
 use engine::model::*;
 
 pub struct Planet {
     pub id: u64,
     pub name: String,
-    pub mesh: PlanetMesh,
+    pub octree_root: OctreeNode,
 }
 
 pub struct PlanetMesh {

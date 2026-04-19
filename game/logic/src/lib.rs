@@ -1,3 +1,7 @@
+#[cfg(feature = "dynamic_linking")]
+#[allow(unused_imports)]
+use engine_dylib;
+
 use cgmath::{self, Array, EuclideanSpace, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
 use engine::assets;
@@ -8,13 +12,15 @@ use engine::renderer::RenderNode;
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
 use engine::{KeyCode, model::MeshAsset};
+use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
 use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
 use std::cmp;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const PLANET_SIZE: usize = 256;
+const PLANET_SIZE: usize = 65536 / 8;
+const CHUNK_SIZE: usize = 32;
 
 static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
 static OCTREE_MAX_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -37,7 +43,20 @@ fn depth_color(depth: u32) -> [f32; 4] {
 }
 
 #[unsafe(no_mangle)]
-pub fn register_systems(state: &mut engine::State) {}
+pub fn register_systems(state: &mut engine::State) {
+    if vec3(
+        state.camera.position.x,
+        state.camera.position.y,
+        state.camera.position.z,
+    )
+    .magnitude()
+        > PLANET_SIZE as f32
+    {
+        state.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
+        state.camera.yaw = 0.0;
+        state.camera.pitch = -80.0;
+    }
+}
 
 #[unsafe(no_mangle)]
 pub fn render() {
@@ -60,6 +79,21 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
         }
     }
 
+    if key_code == KeyCode::KeyL && pressed {
+        if let Some(node) = state
+            .renderer
+            .render_graph
+            .nodes
+            .first_mut()
+            .unwrap()
+            .1
+            .as_any_mut()
+            .downcast_mut::<GeometryPassNode>()
+        {
+            node.clear_render_data();
+        }
+    }
+
     // Cycle octree debug depth: [ = previous level, ] = next level
     // [ = deeper level, ] = shallower level
     if key_code == KeyCode::BracketLeft && pressed {
@@ -69,6 +103,41 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
         });
         if old.is_ok() {
             rebuild_octree_debug(state);
+        }
+    }
+    if key_code == KeyCode::PageUp && pressed {
+        state.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
+    }
+    if key_code == KeyCode::PageDown && pressed {
+        state.camera.position = cgmath::point3(0.0, 0.0, 0.0);
+    }
+
+    if key_code == KeyCode::KeyJ && pressed {
+        let debug_pass_node: &mut DebugPassNode = state
+            .renderer
+            .render_graph
+            .get_node_mut::<DebugPassNode>(1)
+            .unwrap();
+
+        if debug_pass_node.wire_cubes.len() > 0 {
+            debug_pass_node.clear_wire_cubes();
+            debug_pass_node.clear_cubes();
+            return;
+        }
+        // Visualize octree nodes as debug cubes
+        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2);
+
+        let mut octree_nodes = Vec::new();
+        Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
+        println!("Leaf nodes: {}", octree_nodes.len());
+        for (center, node_size, node_depth) in &octree_nodes {
+            debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
+            //debug_pass_node.add_cube(*center, *node_size, depth_color(*node_depth));
+            debug_pass_node.add_cube(
+                *center + vec3(0.0, node_size / 2.0, 0.0),
+                1.0,
+                depth_color(node_depth + 1),
+            );
         }
     }
 
@@ -84,7 +153,28 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
     if key_code == KeyCode::KeyT && pressed {}
 
     if key_code == KeyCode::KeyO && pressed {
-        let mut planet = Planet::generate_planet();
+        let debug_pass_node: &mut DebugPassNode = state
+            .renderer
+            .render_graph
+            .get_node_mut::<DebugPassNode>(1)
+            .unwrap();
+
+        debug_pass_node.clear_wire_cubes();
+        debug_pass_node.clear_cubes();
+
+        if let Some(node) = state
+            .renderer
+            .render_graph
+            .nodes
+            .first_mut()
+            .unwrap()
+            .1
+            .as_any_mut()
+            .downcast_mut::<GeometryPassNode>()
+        {
+            node.clear_render_data();
+        }
+
         let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
             .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
             .with_cull(CullMode::None);
@@ -115,87 +205,53 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
             .renderer_api
             .create_pipeline(&line_material, &[camera_layout]);
 
-        planet.load_mesh(state);
-        if planet.mesh.positions.len() > 0 {
-            let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&planet.mesh.positions).to_vec();
-            let solid_render_data = state.renderer.renderer_api.create_render_data(
-                &vertex_bytes,
-                &planet.mesh.indices,
-                solid_material,
-                &PipelineHandle(0),
-            );
-
-            let line_render_data = state.renderer.renderer_api.create_render_data(
-                &vertex_bytes,
-                &planet.mesh.indices,
-                line_material,
-                &PipelineHandle(0),
-            );
-
-            if let Some(node) = state
-                .renderer
-                .render_graph
-                .nodes
-                .first_mut()
-                .unwrap()
-                .1
-                .as_any_mut()
-                .downcast_mut::<GeometryPassNode>()
-            {
-                node.add_render_data(solid_render_data);
-                node.add_render_data(line_render_data);
-            }
-        }
+        let mut planet = Planet::generate_planet(state);
+        planet.load_meshes(state, &solid_material, &line_material);
     }
 }
 
 trait PlanetExt {
-    fn generate_planet() -> Self;
-    fn load_mesh(&mut self, state: &mut engine::State);
-    fn generate_grid(x: u32, y: u32, z: u32, size: u32) -> Vec<Vec<Vec<f32>>>;
-    fn dual_contour_grid(grid: &Vec<Vec<Vec<f32>>>) -> (Vec<PlanetVertex>, Vec<u32>);
+    fn generate_planet(state: &mut engine::State) -> Self;
+    fn load_meshes(
+        &mut self,
+        state: &mut engine::State,
+        solid_material: &Material,
+        line_material: &Material,
+    );
+    fn generate_grid(
+        x: u32,
+        y: u32,
+        z: u32,
+        resolution: f32,
+        center: Point3<f32>,
+    ) -> Vec<Vec<Vec<f32>>>;
+    fn dual_contour_grid(
+        grid: &Vec<Vec<Vec<f32>>>,
+        offset: Point3<f32>,
+        resolution: f32,
+    ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(planet_radius: u32) -> OctreeNode;
-    fn collect_leaf_nodes(node: &OctreeNode, out: &mut Vec<&OctreeNode>);
+    fn collect_leaf_nodes(
+        node: &OctreeNode,
+        current_depth: u32,
+        out: &mut Vec<(Point3<f32>, f32, u32)>,
+    );
 }
 
 impl PlanetExt for Planet {
-    fn generate_planet() -> Self {
-        Planet {
-            id: 0,
-            name: String::new(),
-            mesh: PlanetMesh::new(),
-        }
-    }
-
-    fn load_mesh(&mut self, state: &mut engine::State) {
+    fn generate_planet(state: &mut engine::State) -> Self {
         let size: usize = PLANET_SIZE;
-        let grid = Planet::generate_grid(size as u32, size as u32, size as u32, size as u32);
+        //let grid = Planet::generate_grid(size as u32, size as u32, size as u32, size as u32);
         let debug_pass_node: &mut DebugPassNode = state
             .renderer
             .render_graph
             .get_node_mut::<DebugPassNode>(1)
             .unwrap();
 
-        // Only add debug cubes at surface cells (sign change between neighbors)
-        for x in 0..(size - 1) {
-            for y in 0..(size - 1) {
-                for z in 0..(size - 1) {
-                    let d = grid[x][y][z];
-                    let sign_change = (d > 0.0) != (grid[x + 1][y][z] > 0.0)
-                        || (d > 0.0) != (grid[x][y + 1][z] > 0.0)
-                        || (d > 0.0) != (grid[x][y][z + 1] > 0.0);
-                    if sign_change {
-                        let center = (size as f32) / 2.0;
-                        let position = cgmath::Point3::new(
-                            x as f32 - center,
-                            y as f32 - center,
-                            z as f32 - center,
-                        );
-                        //debug_pass_node.add_cube(position, 1.0, [0.3, 0.3, 0.3, 1.0]);
-                    }
-                }
-            }
-        }
+        println!(
+            "Amount of nodes to cover entire planet: {:?}",
+            (PLANET_SIZE / CHUNK_SIZE) * (PLANET_SIZE / CHUNK_SIZE) * (PLANET_SIZE / CHUNK_SIZE)
+        );
 
         // Visualize octree nodes as debug cubes
         let octree = Planet::create_octree(size as u32 / 2);
@@ -203,47 +259,129 @@ impl PlanetExt for Planet {
         OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
         OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
 
-        let mut octree_nodes = Vec::new();
-        collect_octree_nodes_at_depth(&octree, 0, 0, &mut octree_nodes);
-        let color = depth_color(0);
-        for (center, node_size) in &octree_nodes {
-            debug_pass_node.add_wire_cube(*center, *node_size, color);
+        Planet {
+            id: 0,
+            name: String::new(),
+            octree_root: octree,
         }
-
-        let (positions, indices) = Planet::dual_contour_grid(&grid);
-        self.mesh.positions = positions;
-        self.mesh.indices = indices;
     }
 
-    fn generate_grid(x: u32, y: u32, z: u32, size: u32) -> Vec<Vec<Vec<f32>>> {
-        let mut grid: Vec<Vec<Vec<f32>>> = Vec::new();
-        for xi in 0..x {
-            let mut plane = Vec::new();
+    fn load_meshes(
+        &mut self,
+        state: &mut engine::State,
+        solid_material: &Material,
+        line_material: &Material,
+    ) {
+        let debug_pass_node: &mut DebugPassNode = state
+            .renderer
+            .render_graph
+            .get_node_mut::<DebugPassNode>(1)
+            .unwrap();
 
-            for yi in 0..y {
-                let mut row = Vec::new();
+        let mut octree_nodes = Vec::new();
+        Planet::collect_leaf_nodes(&self.octree_root, 0, &mut octree_nodes);
+        println!("Leaf nodes: {}", octree_nodes.len());
 
-                for zi in 0..z {
-                    let center = size as f32 / 2.0;
-                    let position = cgmath::Vector3::new(
-                        xi as f32 - center,
-                        yi as f32 - center,
-                        zi as f32 - center,
-                    );
-                    let sdf = sdf(position);
-                    row.push(sdf);
+        let mut meshes_count = 0;
+
+        for (center, node_size, node_depth) in &octree_nodes {
+            //debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
+            //debug_pass_node.add_cube(*center, *node_size, depth_color(*node_depth));
+            //debug_pass_node.add_cube(
+            //    *center + vec3(0.0, node_size / 2.0, 0.0),
+            //    1.0,
+            //    depth_color(node_depth + 1),
+            //);
+
+            let half = node_size / 2.0 - 1.0;
+            let resolution = node_size / CHUNK_SIZE as f32;
+            let min_corner = Point3::new(
+                center.x - 16.0 * resolution,
+                center.y - 16.0 * resolution,
+                center.z - 16.0 * resolution,
+            );
+            let (positions, indices) = Planet::dual_contour_grid(
+                &Planet::generate_grid(34, 34, 34, resolution, *center),
+                min_corner,
+                resolution,
+            );
+
+            let mesh = PlanetMesh { positions, indices };
+            //if meshes_count > 400 {
+            //    return;
+            //}
+
+            if mesh.positions.len() > 0 {
+                meshes_count += 1;
+                println!("Added meshes: {}", meshes_count);
+                let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.positions).to_vec();
+                let solid_render_data = state.renderer.renderer_api.create_render_data(
+                    &vertex_bytes,
+                    &mesh.indices,
+                    solid_material.clone(),
+                    &PipelineHandle(0),
+                );
+
+                let line_render_data = state.renderer.renderer_api.create_render_data(
+                    &vertex_bytes,
+                    &mesh.indices,
+                    line_material.clone(),
+                    &PipelineHandle(0),
+                );
+
+                if let Some(node) = state
+                    .renderer
+                    .render_graph
+                    .nodes
+                    .first_mut()
+                    .unwrap()
+                    .1
+                    .as_any_mut()
+                    .downcast_mut::<GeometryPassNode>()
+                {
+                    node.add_render_data(solid_render_data);
+                    //node.add_render_data(line_render_data);
                 }
+            }
+        }
+        println!("Added meshes: {}", meshes_count);
+    }
 
+    fn generate_grid(
+        nx: u32,
+        ny: u32,
+        nz: u32,
+        resolution: f32,
+        center: Point3<f32>,
+    ) -> Vec<Vec<Vec<f32>>> {
+        let half = (nx - 1) as f32 * resolution / 2.0;
+        let min = cgmath::Vector3::new(center.x - half, center.y - half, center.z - half);
+
+        let mut grid = Vec::new();
+        for xi in 0..nx {
+            let mut plane = Vec::new();
+            for yi in 0..ny {
+                let mut row = Vec::new();
+                for zi in 0..nz {
+                    let position = cgmath::Vector3::new(
+                        min.x + xi as f32 * resolution,
+                        min.y + yi as f32 * resolution,
+                        min.z + zi as f32 * resolution,
+                    );
+                    row.push(sdf(position));
+                }
                 plane.push(row);
             }
-
             grid.push(plane);
         }
-
         grid
     }
 
-    fn dual_contour_grid(grid: &Vec<Vec<Vec<f32>>>) -> (Vec<PlanetVertex>, Vec<u32>) {
+    fn dual_contour_grid(
+        grid: &Vec<Vec<Vec<f32>>>,
+        offset: Point3<f32>,
+        resolution: f32,
+    ) -> (Vec<PlanetVertex>, Vec<u32>) {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
@@ -277,21 +415,18 @@ impl PlanetExt for Planet {
                         continue;
                     }
 
-                    let center = vec3(
-                        size_x as f32 / 2.0,
-                        size_y as f32 / 2.0,
-                        size_z as f32 / 2.0,
-                    );
-
+                    let bx = x as f32 * resolution + offset.x;
+                    let by = y as f32 * resolution + offset.y;
+                    let bz = z as f32 * resolution + offset.z;
                     let positions = [
-                        vec3(x as f32, y as f32, z as f32) - center,
-                        vec3(x as f32 + 1.0, y as f32, z as f32) - center,
-                        vec3(x as f32, y as f32 + 1.0, z as f32) - center,
-                        vec3(x as f32 + 1.0, y as f32 + 1.0, z as f32) - center,
-                        vec3(x as f32, y as f32, z as f32 + 1.0) - center,
-                        vec3(x as f32 + 1.0, y as f32, z as f32 + 1.0) - center,
-                        vec3(x as f32, y as f32 + 1.0, z as f32 + 1.0) - center,
-                        vec3(x as f32 + 1.0, y as f32 + 1.0, z as f32 + 1.0) - center,
+                        vec3(bx, by, bz),                                        // 000
+                        vec3(bx + resolution, by, bz),                           // 100
+                        vec3(bx, by + resolution, bz),                           // 010
+                        vec3(bx + resolution, by + resolution, bz),              // 110
+                        vec3(bx, by, bz + resolution),                           // 001
+                        vec3(bx + resolution, by, bz + resolution),              // 101
+                        vec3(bx, by + resolution, bz + resolution),              // 011
+                        vec3(bx + resolution, by + resolution, bz + resolution), // 111
                     ];
 
                     fn f(x: f32, y: f32, z: f32) -> f32 {
@@ -473,14 +608,32 @@ impl PlanetExt for Planet {
                 z: -r,
             },
             planet_radius as f32,
-            1.0,
+            CHUNK_SIZE as f32,
             true,
         );
 
         root_node
     }
 
-    fn collect_leaf_nodes(node: &OctreeNode, out: &mut Vec<&OctreeNode>) {}
+    fn collect_leaf_nodes(
+        node: &OctreeNode,
+        current_depth: u32,
+        out: &mut Vec<(Point3<f32>, f32, u32)>,
+    ) {
+        if node.children.iter().count() == 0 {
+            let half = node.size / 2.0;
+            let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
+            if node.has_surface {
+                out.push((center, node.size, current_depth));
+            }
+        } else {
+            if let Some(children) = &node.children {
+                for child in children.iter() {
+                    Planet::collect_leaf_nodes(child, current_depth + 1, out);
+                }
+            }
+        }
+    }
 }
 
 trait PlanetMeshExt {
@@ -507,13 +660,6 @@ impl PlanetMeshExt for PlanetMesh {
 //        self.render_data.push(render_data);
 //    }
 //}
-
-pub struct OctreeNode {
-    min: Vector3<f32>, // corner
-    size: f32,
-    children: Option<[Box<OctreeNode>; 8]>,
-    vertex: Option<u32>,
-}
 
 fn hash3(p: Vector3<f32>) -> f32 {
     // Convert to integers for reliable hashing
@@ -606,6 +752,7 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
     } else {
         vec3(0.0, 1.0, 0.0)
     };
+    //return sphere;
 
     // Mountains
     let noise_freq = 3.0;
@@ -614,6 +761,7 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
     let ridged = 1.0 - (raw * 2.0 - 1.0).abs();
     let mountain = ridged * mountain_height;
     let terrain = sphere - mountain;
+    return terrain;
 
     // Caves: only carve underground, fading in over a shell a few units thick
     // so the outer silhouette is never broken
@@ -632,7 +780,7 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
     }
 }
 
-const THRESHOLD: f32 = 0.1;
+const THRESHOLD: f32 = 0.3;
 
 fn should_subdivide(node: OctreeNode, camera_pos: Vector3<f32>) -> bool {
     let center = node.min + vec3(node.size * 0.5, node.size * 0.5, node.size * 0.5);
@@ -644,16 +792,18 @@ fn should_subdivide(node: OctreeNode, camera_pos: Vector3<f32>) -> bool {
 }
 
 pub fn build_node(min: Vector3<f32>, size: f32, min_size: f32, first: bool) -> OctreeNode {
-    let camera_pos = vec3(0.0, PLANET_SIZE as f32 / 4.0, 0.0);
+    let camera_pos = vec3(0.0, PLANET_SIZE as f32 / 8.0, 0.0);
+    let has_surface = has_surface(min, size);
     if !first {
         let leaf = OctreeNode {
             min,
             size,
             children: None,
             vertex: None,
+            has_surface: false,
         };
 
-        if !has_surface(min, size) {
+        if !has_surface && size < PLANET_SIZE as f32 / 4.0 {
             return leaf;
         }
 
@@ -663,6 +813,7 @@ pub fn build_node(min: Vector3<f32>, size: f32, min_size: f32, first: bool) -> O
                 size,
                 children: None,
                 vertex: None,
+                has_surface,
             };
         }
     }
@@ -725,6 +876,7 @@ pub fn build_node(min: Vector3<f32>, size: f32, min_size: f32, first: bool) -> O
         size,
         children,
         vertex: None,
+        has_surface: has_surface,
     }
 }
 
@@ -762,13 +914,14 @@ fn rebuild_octree_debug(state: &mut engine::State) {
         .unwrap();
 
     debug_pass_node.clear_wire_cubes();
+    debug_pass_node.clear_cubes();
 
     let octree = Planet::create_octree(size as u32 / 2);
     let mut octree_nodes = Vec::new();
     collect_octree_nodes_at_depth(&octree, 0, depth, &mut octree_nodes);
     let color = depth_color(depth);
-    for (center, node_size) in &octree_nodes {
-        debug_pass_node.add_wire_cube(*center, *node_size, color);
+    for (center, node_size, node_depth) in &octree_nodes {
+        debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
     }
 }
 
@@ -776,12 +929,12 @@ fn collect_octree_nodes_at_depth(
     node: &OctreeNode,
     current_depth: u32,
     target_depth: u32,
-    out: &mut Vec<(Point3<f32>, f32)>,
+    out: &mut Vec<(Point3<f32>, f32, u32)>,
 ) {
     if current_depth == target_depth {
         let half = node.size / 2.0;
         let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
-        out.push((center, node.size));
+        out.push((center, node.size, current_depth));
         return;
     }
 
