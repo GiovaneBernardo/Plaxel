@@ -24,8 +24,7 @@
             "program": "${workspaceFolder}/target/debug/game-runner.exe",
             "args": [],
             "cwd": "${workspaceFolder}",
-            "stopAtEntry": false,
-            "preLaunchTask": "cargo build"
+            "stopAtEntry": false
         }
     ]
 }

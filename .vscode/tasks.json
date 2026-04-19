@@ -9,6 +9,12 @@
                 "kind": "build",
                 "isDefault": true
             }
+        },
+        {
+            "label": "cargo build-game",
+            "type": "shell",
+            "command": "cargo build-game",
+            "group": "build"
         }
     ]
 }

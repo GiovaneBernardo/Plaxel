@@ -7,6 +7,11 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
             ui.label("Hierarchy");
             if ui.button("Click me").clicked() {}
 
+            ui.add(egui::Label::new("Position"));
+            ui.add(egui::widgets::DragValue::new(&mut state.camera.position.x));
+            ui.add(egui::widgets::DragValue::new(&mut state.camera.position.y));
+            ui.add(egui::widgets::DragValue::new(&mut state.camera.position.z));
+
             let mut i = 0;
             for transform in &mut state.scene.transform_components {
                 egui::CollapsingHeader::new(i.to_string())

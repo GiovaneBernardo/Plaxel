@@ -3,11 +3,16 @@ name = "game-logic"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+dynamic_linking = ["dep:engine-dylib"]
+
 [dependencies]
 engine = { path = "../../engine" }
+engine-dylib = { path = "../../engine_dylib", optional = true }
 game-types = { path = "../types" }
 cgmath = { workspace = true }
 bytemuck = { workspace = true }
+tracing = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

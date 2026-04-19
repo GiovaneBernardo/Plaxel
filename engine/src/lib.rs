@@ -1,4 +1,10 @@
 use rand::Rng;
+#[cfg(feature = "renderdoc")]
+use renderdoc::RenderDoc;
+#[cfg(feature = "renderdoc")]
+use renderdoc::V141;
+use std::env;
+use std::ptr;
 use std::sync::Arc;
 
 pub mod assets;
@@ -41,6 +47,12 @@ pub struct State {
     pub renderer: renderer::Renderer,
     pub asset_manager: AssetManager,
     pub registered_systems: bool,
+    #[cfg(feature = "renderdoc")]
+    pub renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>>,
+    pub capture_next_frame: bool,
+
+    #[cfg(not(feature = "renderdoc"))]
+    pub renderdoc: (),
 }
 
 #[repr(C)]
@@ -109,6 +121,44 @@ impl State {
     // We don't need this to be async right now,
     // but we will in the next tutorial
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        // TODO: MOVE TO A FRAME CAPTURER FILE
+        // Notes: This expects the feature renderdoc, requires the renderdoc.dll, renderdoc.json and renderdoc.app files are in the executable directory and requires vulkan.
+        // This is very sensible and not well implemented, in case of any issues, disable renderdoc feature
+        #[cfg(feature = "renderdoc")]
+        unsafe {
+            let _ = libloading::Library::new("renderdoc.dll");
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+            if let Some(dir) = exe_dir {
+                let dir_str = dir.to_string_lossy();
+
+                // Enable RenderDoc Vulkan layer
+                env::set_var("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1");
+
+                // Add implicit layer path
+                let existing = env::var("VK_ADD_IMPLICIT_LAYER_PATH").unwrap_or_default();
+
+                let new_path = if existing.is_empty() {
+                    dir_str.to_string()
+                } else {
+                    format!("{};{}", dir_str, existing)
+                };
+
+                env::set_var("VK_ADD_IMPLICIT_LAYER_PATH", new_path);
+            }
+        }
+        #[cfg(feature = "renderdoc")]
+        let mut renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>> =
+            renderdoc::RenderDoc::new().ok();
+
+        #[cfg(feature = "renderdoc")]
+        if let Some(renderdoc) = renderdoc.as_mut() {
+            use renderdoc::OverlayBits;
+            renderdoc.mask_overlay_bits(OverlayBits::empty(), OverlayBits::empty());
+        }
+
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -263,6 +313,11 @@ impl State {
             renderer,
             asset_manager,
             registered_systems: false,
+            #[cfg(feature = "renderdoc")]
+            renderdoc,
+            #[cfg(not(feature = "renderdoc"))]
+            renderdoc: (),
+            capture_next_frame: false,
         })
     }
 
@@ -278,6 +333,14 @@ impl State {
             event_loop.exit();
         } else {
             self.camera_controller.handle_key(code, is_pressed);
+        }
+
+        #[cfg(feature = "renderdoc")]
+        if code == KeyCode::KeyH && is_pressed {
+            if let Some(renderdoc) = self.renderdoc.as_mut() {
+                renderdoc.start_frame_capture(ptr::null(), ptr::null());
+                self.capture_next_frame = true;
+            }
         }
     }
 
@@ -445,7 +508,27 @@ impl ApplicationHandler<State> for App {
                 }
                 state.events.clear();
                 match state.renderer.render() {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        let mut state = self.state.as_mut().unwrap();
+                        #[cfg(feature = "renderdoc")]
+                        if state.capture_next_frame {
+                            if let Some(renderdoc) = state.renderdoc.as_mut() {
+                                let null = std::ptr::null();
+
+                                renderdoc.end_frame_capture(null, null);
+
+                                let num = renderdoc.get_num_captures();
+                                if num > 0 {
+                                    if let Some((path, _)) = renderdoc.get_capture(num - 1) {
+                                        println!("Opening capture: {:?}", path);
+                                        renderdoc.launch_replay_ui(true, path.to_str()).ok();
+                                    }
+                                }
+
+                                state.capture_next_frame = false;
+                            }
+                        }
+                    }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
                     }

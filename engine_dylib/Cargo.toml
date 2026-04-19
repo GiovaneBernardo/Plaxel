@@ -1,0 +1,11 @@
+[package]
+name = "engine-dylib"
+version = "0.1.0"
+edition = "2024"
+description = "Forces the engine crate to be dynamically linked, so downstream crates share one copy across DLL boundaries (e.g. hot-reload)."
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+engine = { path = "../engine" }

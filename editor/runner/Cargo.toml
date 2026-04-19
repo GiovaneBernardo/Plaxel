@@ -10,7 +10,7 @@ hot-reload = ["dep:hot-lib-reloader"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-engine = { path = "../../engine" }
+engine = { path = "../../engine", features = ["renderdoc"] }
 game-logic = { path = "../../game/logic" }
 editor-logic = { path = "../logic" }
 anyhow = { workspace = true }

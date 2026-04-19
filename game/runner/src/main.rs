@@ -1,9 +1,14 @@
+#[cfg(feature = "dynamic_linking")]
+#[allow(unused_imports)]
+use engine_dylib;
+
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(
     dylib = "game_logic",
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
 )]
 mod game {
+    use engine::KeyCode;
     hot_functions_from_file!("game/logic/src/lib.rs");
 }
 
@@ -32,8 +37,28 @@ fn main() {
             if code == engine::KeyCode::KeyY && pressed {
                 #[cfg(feature = "hot-reload")]
                 {
+                    // Build with the same package set + features as the
+                    // launch command so feature unification resolves
+                    // `engine` to the same metadata hash — otherwise the
+                    // new `game_logic.dll` links against a different
+                    // `engine_dylib.dll` than the running exe loaded, and
+                    // `TypeId`s silently diverge. The game-runner relink
+                    // will fail (exe is locked), which is fine — cargo
+                    // still produces the updated game_logic cdylib.
+                    let mut features = String::from("game-runner/hot-reload");
+                    #[cfg(feature = "renderdoc")]
+                    features.push_str(",game-runner/renderdoc");
+
                     std::process::Command::new("cargo")
-                        .args(["build", "-p", "game-logic"])
+                        .args([
+                            "build",
+                            "-p",
+                            "game-runner",
+                            "-p",
+                            "game-logic",
+                            "--features",
+                            &features,
+                        ])
                         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
                         .spawn()
                         .ok();
