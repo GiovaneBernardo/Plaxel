@@ -47,6 +47,7 @@ pub struct State {
     pub renderer: renderer::Renderer,
     pub asset_manager: AssetManager,
     pub registered_systems: bool,
+    pub game_data: Box<dyn std::any::Any>,
     #[cfg(feature = "renderdoc")]
     pub renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>>,
     pub capture_next_frame: bool,
@@ -126,12 +127,12 @@ impl State {
         // This is very sensible and not well implemented, in case of any issues, disable renderdoc feature
         #[cfg(feature = "renderdoc")]
         unsafe {
-            let _ = libloading::Library::new("renderdoc.dll");
+            let dll_loaded = libloading::Library::new("renderdoc.dll").is_ok();
             let exe_dir = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()));
 
-            if let Some(dir) = exe_dir {
+            if dll_loaded && let Some(dir) = exe_dir {
                 let dir_str = dir.to_string_lossy();
 
                 // Enable RenderDoc Vulkan layer
@@ -147,6 +148,10 @@ impl State {
                 };
 
                 env::set_var("VK_ADD_IMPLICIT_LAYER_PATH", new_path);
+            } else {
+                engine_warn!(
+                    "renderdoc.dll not found, ensure renderdoc.dll can be found in the executable directory. Renderdoc is disabled!."
+                );
             }
         }
         #[cfg(feature = "renderdoc")]
@@ -313,6 +318,7 @@ impl State {
             renderer,
             asset_manager,
             registered_systems: false,
+            game_data: Box::new(()),
             #[cfg(feature = "renderdoc")]
             renderdoc,
             #[cfg(not(feature = "renderdoc"))]
@@ -417,6 +423,11 @@ impl App {
 
 impl ApplicationHandler<State> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Run the loop continuously instead of sleeping between OS events —
+        // we want every frame to tick update() so background workers can
+        // make progress even when the player isn't moving.
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
         #[allow(unused_mut)]
         let mut window_attributes = Window::default_attributes();
 

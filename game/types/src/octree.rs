@@ -1,5 +1,6 @@
 use cgmath::Vector3;
 
+#[derive(Clone)]
 pub struct OctreeNode {
     pub min: Vector3<f32>, // corner
     pub size: f32,

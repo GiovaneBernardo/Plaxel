@@ -260,6 +260,7 @@ pub trait RenderNode {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+#[derive(Clone)]
 pub struct RenderData {
     pub mesh: Handle<MeshAsset>,
     pub material: Material,

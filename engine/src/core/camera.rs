@@ -134,14 +134,17 @@ impl CameraController {
     }
 
     pub fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
-        match delta {
-            MouseScrollDelta::LineDelta(x, y) => {
-                self.speed = (self.speed + y).clamp(0.0, 1024.0 * 1024.0 * 1024.0);
-            }
-            MouseScrollDelta::PixelDelta(pos) => {
-                self.speed = (self.speed + pos.y as f32).clamp(0.0, 1024.0 * 1024.0 * 1024.0);
-            }
-        }
+        let mut scroll = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 100.0,
+        };
+
+        scroll = scroll.clamp(-1.0, 1.0);
+
+        let sensitivity: f32 = 0.2;
+        let factor = (1.0f32 + sensitivity).powf(scroll);
+
+        self.speed = (self.speed * factor).clamp(0.001, 1_000_000.0);
     }
 
     pub fn handle_mouse(&mut self, _x: f32, _y: f32) {
@@ -171,7 +174,7 @@ impl CameraController {
         let mut final_speed = self.speed;
         if self.is_shift_pressed {
             let distance = camera.position.to_vec().magnitude();
-            final_speed *= distance.sqrt();
+            final_speed *= distance.sqrt() * 0.1;
         }
 
         // Forward Backward

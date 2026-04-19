@@ -8,21 +8,52 @@ use engine::assets;
 use engine::assets::material::Material;
 use engine::engine_info;
 use engine::model::{ModelVertex, Vertex};
-use engine::renderer::RenderNode;
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
+use engine::renderer::{RenderData, RenderNode};
 use engine::{KeyCode, model::MeshAsset};
 use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
 use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
 use std::cmp;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
+
+struct GameState {
+    previous_leaves: HashMap<NodeKey, OctreeNode>,
+    current_meshes: HashMap<NodeKey, RenderData>,
+    // Keys we've spawned a rayon task for but haven't drained the result of
+    // yet. Prevents re-scheduling the same leaf across frames while its
+    // worker is still crunching.
+    in_flight: HashSet<NodeKey>,
+    solid_material: Material,
+    line_material: Material,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+struct NodeKey {
+    x: i32,
+    y: i32,
+    z: i32,
+    size: i32,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+struct ChunkState {
+    x: i32,
+    y: i32,
+    z: i32,
+    size: i32,
+}
+
+//static mut CHUNK_CACHE: HashMap<NodeKey, ChunkState> = HashMap::new();
 
 // A chunk finished on a worker thread. Owned Vecs are moved through the
 // channel — no shared references, no locks on the hot path.
 struct ReadyChunk {
+    key: NodeKey,
     vertices: Vec<PlanetVertex>,
     indices: Vec<u32>,
 }
@@ -60,7 +91,7 @@ fn worker_coord() -> &'static Mutex<PlanetWorkerCoord> {
 // the rest of a 60 FPS frame.
 const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
 
-const PLANET_SIZE: usize = 65536 / 16;
+const PLANET_SIZE: usize = 65536 / 16; // 16;
 const CHUNK_SIZE: usize = 32;
 
 static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -97,6 +128,41 @@ pub fn register_systems(state: &mut engine::State) {
         state.camera.yaw = 0.0;
         state.camera.pitch = -80.0;
     }
+
+    // Materials + pipelines must be created on the main thread (wgpu
+    // shader compilation goes through &mut RendererAPI).
+    let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
+        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
+        .with_cull(CullMode::None);
+
+    let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
+        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
+        .with_topology(engine::renderer::Topology::LineList)
+        .with_cull(CullMode::None);
+
+    let camera_layout = state
+        .renderer
+        .render_graph
+        .get_node_mut::<GeometryPassNode>(0)
+        .and_then(|node| node.camera_bind_group_layout)
+        .expect("GeometryPassNode must be compiled before creating pipelines");
+
+    state
+        .renderer
+        .renderer_api
+        .create_pipeline(&solid_material, &[camera_layout]);
+    state
+        .renderer
+        .renderer_api
+        .create_pipeline(&line_material, &[camera_layout]);
+
+    state.game_data = Box::new(GameState {
+        previous_leaves: HashMap::new(),
+        current_meshes: HashMap::new(),
+        in_flight: HashSet::new(),
+        solid_material,
+        line_material,
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -111,7 +177,134 @@ pub fn update(state: &mut engine::State) {
         transform.position -= transform.velocity;
     }
 
+    let size = PLANET_SIZE;
+    let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
+    let max_depth = octree_max_depth(&octree, 0);
+    OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
+    OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
+
+    let mut octree_nodes = Vec::new();
+    Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
+
+    let debug_pass_node: &mut DebugPassNode = state
+        .renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(1)
+        .unwrap();
+
+    debug_pass_node.clear_wire_cubes();
+    debug_pass_node.clear_cubes();
+
+    let mut current_leaves: HashMap<NodeKey, OctreeNode> = HashMap::new();
+    for (center, node_size, node_depth) in &octree_nodes {
+        debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
+        //debug_pass_node.add_cube(*center, *node_size, depth_color(*node_depth));
+        debug_pass_node.add_cube(
+            *center + vec3(0.0, node_size / 2.0, 0.0),
+            1.0,
+            depth_color(node_depth + 1),
+        );
+
+        current_leaves.insert(
+            NodeKey {
+                x: center.x as i32,
+                y: center.y as i32,
+                z: center.z as i32,
+                size: *node_size as i32,
+            },
+            OctreeNode {
+                min: vec3(center.x, center.y, center.z),
+                size: *node_size,
+                has_surface: true,
+                children: None,
+                vertex: None,
+            },
+        );
+    }
+
+    // Make sure the worker coord has the material it needs for upload.
+    // Do NOT drain coord.rx here — that would throw away chunks the rayon
+    // workers have already finished but drain_planet_chunks hasn't seen yet.
+    // Scoped so the `game_state` borrow of `state.game_data` ends before
+    // we call `drain_planet_chunks(state)` below.
+    let tx_template = {
+        let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+        let mut coord = worker_coord().lock().unwrap();
+        if coord.solid_material.is_none() {
+            coord.solid_material = Some(game_state.solid_material.clone());
+        }
+        coord.tx.clone()
+    };
+
+    {
+        let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+
+        // Diff: schedule mesh generation for every new leaf.
+        for (key, node) in &current_leaves {
+            // Skip if we already have the mesh, or a worker is still building it.
+            if game_state.current_meshes.contains_key(key)
+                || game_state.in_flight.contains(key)
+            {
+                continue;
+            }
+
+            let tx = tx_template.clone();
+            let node = node.clone();
+            let key = *key;
+            game_state.in_flight.insert(key);
+            worker_coord().lock().unwrap().scheduled += 1;
+
+            rayon::spawn(move || {
+                let half = node.size / 2.0;
+                let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
+                let resolution = node.size / CHUNK_SIZE as f32;
+                let min_corner = Point3::new(
+                    center.x - 16.0 * resolution,
+                    center.y - 16.0 * resolution,
+                    center.z - 16.0 * resolution,
+                );
+                let grid = Planet::generate_grid(34, 34, 34, resolution, center);
+                let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
+                let _ = tx.send(ReadyChunk {
+                    key,
+                    vertices,
+                    indices,
+                });
+            });
+        }
+
+        // Drop meshes for leaves that disappeared (camera moved, LOD changed).
+        game_state
+            .current_meshes
+            .retain(|key, _| current_leaves.contains_key(key));
+
+        // Snapshot this frame's leaves for next frame's diff.
+        game_state.previous_leaves.clear();
+        for (key, node) in &current_leaves {
+            game_state.previous_leaves.insert(*key, node.clone());
+        }
+    }
+
+    // Pull any freshly-generated meshes into current_meshes.
     drain_planet_chunks(state);
+
+    // Rebuild the geometry pass from the authoritative current_meshes map.
+    let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+    if let Some(node) = state
+        .renderer
+        .render_graph
+        .nodes
+        .first_mut()
+        .unwrap()
+        .1
+        .as_any_mut()
+        .downcast_mut::<GeometryPassNode>()
+    {
+        node.clear_render_data();
+        for render_data in game_state.current_meshes.values() {
+            node.add_render_data(render_data.clone());
+        }
+    }
 }
 
 // Pull finished chunks out of the channel and upload them to the GPU until
@@ -146,6 +339,12 @@ fn drain_planet_chunks(state: &mut engine::State) {
             }
         };
 
+        // Whether or not the chunk has geometry, the worker is done with
+        // this key — clear it from in_flight so future frames can re-schedule
+        // if the leaf comes back.
+        let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+        game_state.in_flight.remove(&chunk.key);
+
         if chunk.vertices.is_empty() {
             continue;
         }
@@ -160,18 +359,12 @@ fn drain_planet_chunks(state: &mut engine::State) {
             material.clone(),
             &PipelineHandle(0),
         );
-        if let Some(node) = state
-            .renderer
-            .render_graph
-            .nodes
-            .first_mut()
+        state
+            .game_data
+            .downcast_mut::<GameState>()
             .unwrap()
-            .1
-            .as_any_mut()
-            .downcast_mut::<GeometryPassNode>()
-        {
-            node.add_render_data(render_data);
-        }
+            .current_meshes
+            .insert(chunk.key, render_data);
         uploaded += 1;
     }
 
@@ -242,7 +435,7 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
             return;
         }
         // Visualize octree nodes as debug cubes
-        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2);
+        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &state.camera.position);
 
         let mut octree_nodes = Vec::new();
         Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
@@ -297,36 +490,9 @@ fn schedule_planet_generation(state: &mut engine::State) {
         node.clear_render_data();
     }
 
-    // Materials + pipelines must be created on the main thread (wgpu
-    // shader compilation goes through &mut RendererAPI).
-    let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
-        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-        .with_cull(CullMode::None);
-
-    let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
-        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-        .with_topology(engine::renderer::Topology::LineList)
-        .with_cull(CullMode::None);
-
-    let camera_layout = state
-        .renderer
-        .render_graph
-        .get_node_mut::<GeometryPassNode>(0)
-        .and_then(|node| node.camera_bind_group_layout)
-        .expect("GeometryPassNode must be compiled before creating pipelines");
-
-    state
-        .renderer
-        .renderer_api
-        .create_pipeline(&solid_material, &[camera_layout]);
-    state
-        .renderer
-        .renderer_api
-        .create_pipeline(&line_material, &[camera_layout]);
-
     // Octree build is cheap (only 8-corner SDF checks per node) — stays on main thread.
     let size = PLANET_SIZE;
-    let octree = Planet::create_octree(size as u32 / 2);
+    let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
     let max_depth = octree_max_depth(&octree, 0);
     OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
     OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
@@ -343,7 +509,14 @@ fn schedule_planet_generation(state: &mut engine::State) {
     let tx_template = {
         let mut coord = worker_coord().lock().unwrap();
         while coord.rx.try_recv().is_ok() {}
-        coord.solid_material = Some(solid_material);
+        coord.solid_material = Some(
+            state
+                .game_data
+                .downcast_mut::<GameState>()
+                .unwrap()
+                .solid_material
+                .clone(),
+        );
         coord.scheduled = octree_nodes.len();
         coord.completed = 0;
         coord.tx.clone()
@@ -353,6 +526,12 @@ fn schedule_planet_generation(state: &mut engine::State) {
     // per CPU thread — each task is a pure SDF evaluation + dual contouring.
     for (center, node_size, _depth) in octree_nodes {
         let tx = tx_template.clone();
+        let key = NodeKey {
+            x: center.x as i32,
+            y: center.y as i32,
+            z: center.z as i32,
+            size: node_size as i32,
+        };
         rayon::spawn(move || {
             let resolution = node_size / CHUNK_SIZE as f32;
             let min_corner = Point3::new(
@@ -363,7 +542,11 @@ fn schedule_planet_generation(state: &mut engine::State) {
             let grid = Planet::generate_grid(34, 34, 34, resolution, center);
             let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
             // send() moves the Vecs into the channel — no copy, no alias.
-            let _ = tx.send(ReadyChunk { vertices, indices });
+            let _ = tx.send(ReadyChunk {
+                key,
+                vertices,
+                indices,
+            });
         });
     }
 }
@@ -388,7 +571,7 @@ trait PlanetExt {
         offset: Point3<f32>,
         resolution: f32,
     ) -> (Vec<PlanetVertex>, Vec<u32>);
-    fn create_octree(planet_radius: u32) -> OctreeNode;
+    fn create_octree(planet_radius: u32, camera_position: &cgmath::Point3<f32>) -> OctreeNode;
     fn collect_leaf_nodes(
         node: &OctreeNode,
         current_depth: u32,
@@ -412,7 +595,7 @@ impl PlanetExt for Planet {
         );
 
         // Visualize octree nodes as debug cubes
-        let octree = Planet::create_octree(size as u32 / 2);
+        let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
         let max_depth = octree_max_depth(&octree, 0);
         OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
         OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
@@ -757,7 +940,7 @@ impl PlanetExt for Planet {
         (vertices, indices)
     }
 
-    fn create_octree(planet_radius: u32) -> OctreeNode {
+    fn create_octree(planet_radius: u32, camera_position: &cgmath::Point3<f32>) -> OctreeNode {
         let r = planet_radius as f32 / 2.0;
         let root_node = build_node(
             Vector3 {
@@ -768,6 +951,7 @@ impl PlanetExt for Planet {
             planet_radius as f32,
             CHUNK_SIZE as f32,
             true,
+            camera_position,
         );
 
         root_node
@@ -949,8 +1133,14 @@ fn should_subdivide(node: OctreeNode, camera_pos: Vector3<f32>) -> bool {
     error > THRESHOLD
 }
 
-pub fn build_node(min: Vector3<f32>, size: f32, min_size: f32, first: bool) -> OctreeNode {
-    let camera_pos = vec3(0.0, PLANET_SIZE as f32 / 8.0, 0.0);
+pub fn build_node(
+    min: Vector3<f32>,
+    size: f32,
+    min_size: f32,
+    first: bool,
+    camera_position: &cgmath::Point3<f32>,
+) -> OctreeNode {
+    //let camera_pos = vec3(0.0, PLANET_SIZE as f32 / 8.0, 0.0);
     let has_surface = has_surface(min, size);
     if !first {
         let leaf = OctreeNode {
@@ -965,7 +1155,12 @@ pub fn build_node(min: Vector3<f32>, size: f32, min_size: f32, first: bool) -> O
             return leaf;
         }
 
-        if size <= min_size || !should_subdivide(leaf, camera_pos) {
+        if size <= min_size
+            || !should_subdivide(
+                leaf,
+                vec3(camera_position.x, camera_position.y, camera_position.z),
+            )
+        {
             return OctreeNode {
                 min,
                 size,
@@ -984,48 +1179,56 @@ pub fn build_node(min: Vector3<f32>, size: f32, min_size: f32, first: bool) -> O
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(child_size, 0.0, 0.0),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(0.0, child_size, 0.0),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(child_size, child_size, 0.0),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(0.0, 0.0, child_size),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(child_size, 0.0, child_size),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(0.0, child_size, child_size),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
         Box::new(build_node(
             min + vec3(child_size, child_size, child_size),
             child_size,
             min_size,
             false,
+            camera_position,
         )),
     ]);
 
@@ -1074,7 +1277,7 @@ fn rebuild_octree_debug(state: &mut engine::State) {
     debug_pass_node.clear_wire_cubes();
     debug_pass_node.clear_cubes();
 
-    let octree = Planet::create_octree(size as u32 / 2);
+    let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
     let mut octree_nodes = Vec::new();
     collect_octree_nodes_at_depth(&octree, 0, depth, &mut octree_nodes);
     let color = depth_color(depth);
