@@ -30,6 +30,7 @@ struct GameState {
     in_flight: HashSet<NodeKey>,
     solid_material: Material,
     line_material: Material,
+    update_octree: bool,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
@@ -162,6 +163,7 @@ pub fn register_systems(state: &mut engine::State) {
         in_flight: HashSet::new(),
         solid_material,
         line_material,
+        update_octree: true,
     });
 }
 
@@ -175,6 +177,14 @@ pub fn update(state: &mut engine::State) {
     for transform in &mut state.scene.transform_components {
         transform.scale = (0.01, 0.01, 0.01).into(); //(transform.velocity.x * 0.1);
         transform.position -= transform.velocity;
+    }
+
+    // Early return if update octree is false
+    {
+        let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+        if !game_state.update_octree {
+            return;
+        }
     }
 
     let size = PLANET_SIZE;
@@ -242,9 +252,7 @@ pub fn update(state: &mut engine::State) {
         // Diff: schedule mesh generation for every new leaf.
         for (key, node) in &current_leaves {
             // Skip if we already have the mesh, or a worker is still building it.
-            if game_state.current_meshes.contains_key(key)
-                || game_state.in_flight.contains(key)
-            {
+            if game_state.current_meshes.contains_key(key) || game_state.in_flight.contains(key) {
                 continue;
             }
 
@@ -383,10 +391,50 @@ fn drain_planet_chunks(state: &mut engine::State) {
 
 #[unsafe(no_mangle)]
 pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
+    let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+
     if key_code == KeyCode::KeyU && pressed {
         for i in 0..cmp::min(state.scene.transform_components.len(), 3) {
             state.scene.transform_components[i].position.y += 0.1;
         }
+    }
+
+    if key_code == KeyCode::KeyK && pressed {
+        game_state.update_octree = !game_state.update_octree;
+    }
+
+    if key_code == KeyCode::F9 && pressed {
+        let camera_layout = state
+            .renderer
+            .render_graph
+            .get_node_mut::<GeometryPassNode>(0)
+            .and_then(|node| node.camera_bind_group_layout)
+            .expect("GeometryPassNode must be compiled before creating pipelines");
+
+        game_state.solid_material.pipeline_descriptor.topology =
+            engine::renderer::Topology::LineList;
+
+        state
+            .renderer
+            .renderer_api
+            .update_pipeline(&game_state.solid_material, &[camera_layout]);
+    }
+
+    if key_code == KeyCode::F10 && pressed {
+        let camera_layout = state
+            .renderer
+            .render_graph
+            .get_node_mut::<GeometryPassNode>(0)
+            .and_then(|node| node.camera_bind_group_layout)
+            .expect("GeometryPassNode must be compiled before creating pipelines");
+
+        game_state.solid_material.pipeline_descriptor.topology =
+            engine::renderer::Topology::TriangleList;
+
+        state
+            .renderer
+            .renderer_api
+            .update_pipeline(&game_state.solid_material, &[camera_layout]);
     }
 
     if key_code == KeyCode::KeyL && pressed {
@@ -851,12 +899,38 @@ impl PlanetExt for Planet {
 
                     let index = vertices.len() as u32;
                     let avg_pos: Point3<f32> = Point3::from_vec(avg);
-                    let avg_norm: [f32; 3] =
-                        normal_from_function(Vector3::new(avg_pos.x, avg_pos.y, avg_pos.z));
+
+                    let normal_at = |p: Vector3<f32>| -> [f32; 3] {
+                        let eps = resolution * 0.5; // scale eps to the local grid spacing
+                        let dx = sdf(p + vec3(eps, 0.0, 0.0)) - sdf(p - vec3(eps, 0.0, 0.0));
+                        let dy = sdf(p + vec3(0.0, eps, 0.0)) - sdf(p - vec3(0.0, eps, 0.0));
+                        let dz = sdf(p + vec3(0.0, 0.0, eps)) - sdf(p - vec3(0.0, 0.0, eps));
+                        let n = vec3(dx, dy, dz).normalize();
+                        [n.x, n.y, n.z]
+                    };
+
+                    let avg_norm = normal_at(Vector3::new(avg_pos.x, avg_pos.y, avg_pos.z));
+
+                    let up = vec3(0.0, 1.0, 0.0);
+                    let slope = avg_norm[0] * up.x + avg_norm[1] * up.y + avg_norm[2] * up.z; // dot(normal, up)
+
+                    // Example: grass(0) vs rock(1) based on slope
+                    let (mat_a, mat_b, blend) = if slope > 0.7 {
+                        (0u16, 1u16, 0u8) // flat → pure grass
+                    } else if slope > 0.4 {
+                        let t = (0.7 - slope) / 0.3; // blend grass→rock on slopes
+                        (0u16, 1u16, (t * 255.0) as u8)
+                    } else {
+                        (1u16, 1u16, 0u8) // steep → pure rock
+                    };
+
                     vertices.push(PlanetVertex {
                         position: [avg_pos.x, avg_pos.y, avg_pos.z],
-                        tex_coords: [0.0, 0.0],
                         normal: avg_norm,
+                        mat_a,
+                        mat_b,
+                        blend,
+                        _pad: [0, 0, 0],
                     });
                     cell_vertex[x][y][z] = Some(index);
                 }

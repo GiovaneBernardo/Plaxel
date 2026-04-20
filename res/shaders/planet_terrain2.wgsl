@@ -12,16 +12,19 @@ struct InstanceInput {
     @location(8) model_matrix_3: vec4<f32>,
 };
 
+// Matches PlanetVertex in game/types/src/planet.rs:
+// locations 2 and 3 are packed u32s (mats, blend+pad) — unused here but
+// still declared so the pipeline/shader interface agrees.
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) normal: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) mats: u32,
+    @location(3) blend_packed: u32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) normal: vec3<f32>,
+    @location(0) normal: vec3<f32>,
 };
 
 @vertex
@@ -37,7 +40,6 @@ fn vs_main(
     );
 
     var out: VertexOutput;
-    out.uv = model.uv;
     out.normal = model.normal;
     out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
     return out;
@@ -45,6 +47,6 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = vec4(1.0, 0.0, 0.0, 1.0);//textureSample(t_diffuse, s_diffuse, in.uv);
+    let tex_color = vec4(1.0, 0.0, 0.0, 1.0);
     return vec4<f32>(tex_color.rgb, tex_color.a);
 }

@@ -36,6 +36,13 @@ pub trait RendererAPI {
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
     );
+    fn update_pipeline(
+        &mut self,
+        material: &Material,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) {
+        self.create_pipeline(material, bind_group_layouts);
+    }
     fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureHandle;
     fn create_buffer(&mut self, descriptor: &BufferDescriptor) -> BufferHandle;
     fn create_bind_group(&mut self, descriptor: &BindGroupDescriptor) -> BindGroupHandle;
