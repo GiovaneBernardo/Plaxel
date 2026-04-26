@@ -22,18 +22,26 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 
 struct GameState {
-    previous_leaves: HashMap<NodeKey, OctreeNode>,
+    previous_leaves: HashMap<NodeKey, ChunkInfo>,
     current_meshes: HashMap<NodeKey, RenderData>,
-    // Keys we've spawned a rayon task for but haven't drained the result of
-    // yet. Prevents re-scheduling the same leaf across frames while its
-    // worker is still crunching.
     in_flight: HashSet<NodeKey>,
+    // Keys whose worker finished but produced zero vertices. Remembered so
+    // the scheduler never re-spawns a worker for them on subsequent frames.
+    // Pruned by retain() when the key leaves the current octree, so a fresh
+    // NodeKey (different position or size) always gets a clean attempt.
+    empty_chunks: HashSet<NodeKey>,
     solid_material: Material,
     line_material: Material,
     update_octree: bool,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Clone, Copy)]
+struct ChunkInfo {
+    center: Point3<f32>,
+    size: f32,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 struct NodeKey {
     x: i32,
     y: i32,
@@ -49,19 +57,30 @@ struct ChunkState {
     size: i32,
 }
 
-//static mut CHUNK_CACHE: HashMap<NodeKey, ChunkState> = HashMap::new();
-
-// A chunk finished on a worker thread. Owned Vecs are moved through the
-// channel — no shared references, no locks on the hot path.
 struct ReadyChunk {
     key: NodeKey,
     vertices: Vec<PlanetVertex>,
     indices: Vec<u32>,
 }
 
-// State shared between the main thread and the worker tasks.
-// Sender<T> is Send but !Sync, so we keep it inside a Mutex that the
-// main thread locks briefly when scheduling or draining.
+fn spawn_chunk_worker(center: Point3<f32>, size: f32, key: NodeKey, tx: mpsc::Sender<ReadyChunk>) {
+    rayon::spawn(move || {
+        let resolution = size / CHUNK_SIZE as f32;
+        let min_corner = Point3::new(
+            center.x - 16.0 * resolution,
+            center.y - 16.0 * resolution,
+            center.z - 16.0 * resolution,
+        );
+        let grid = Planet::generate_grid(34, 34, 34, resolution, center);
+        let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
+        let _ = tx.send(ReadyChunk {
+            key,
+            vertices,
+            indices,
+        });
+    });
+}
+
 struct PlanetWorkerCoord {
     tx: mpsc::Sender<ReadyChunk>,
     rx: mpsc::Receiver<ReadyChunk>,
@@ -85,30 +104,25 @@ fn worker_coord() -> &'static Mutex<PlanetWorkerCoord> {
     })
 }
 
-// Time budget for per-frame chunk uploads. Workers all start together and
-// finish in waves, so a raw count cap either stutters (big wave = big spike)
-// or under-utilizes the frame. A time budget bounds frame time regardless
-// of how expensive individual chunks turn out to be. 2ms leaves plenty for
-// the rest of a 60 FPS frame.
 const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
 
-const PLANET_SIZE: usize = 65536 / 16; // 16;
+const PLANET_SIZE: usize = 65536 * 16;
 const CHUNK_SIZE: usize = 32;
 
 static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
 static OCTREE_MAX_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 const DEPTH_COLORS: [[f32; 4]; 10] = [
-    [1.0, 0.2, 0.2, 1.0], // red
-    [0.2, 1.0, 0.2, 1.0], // green
-    [0.2, 0.4, 1.0, 1.0], // blue
-    [1.0, 1.0, 0.2, 1.0], // yellow
-    [1.0, 0.2, 1.0, 1.0], // magenta
-    [0.2, 1.0, 1.0, 1.0], // cyan
-    [1.0, 0.6, 0.2, 1.0], // orange
-    [0.6, 0.2, 1.0, 1.0], // purple
-    [0.2, 1.0, 0.6, 1.0], // teal
-    [1.0, 0.4, 0.6, 1.0], // pink
+    [1.0, 0.2, 0.2, 1.0],
+    [0.2, 1.0, 0.2, 1.0],
+    [0.2, 0.4, 1.0, 1.0],
+    [1.0, 1.0, 0.2, 1.0],
+    [1.0, 0.2, 1.0, 1.0],
+    [0.2, 1.0, 1.0, 1.0],
+    [1.0, 0.6, 0.2, 1.0],
+    [0.6, 0.2, 1.0, 1.0],
+    [0.2, 1.0, 0.6, 1.0],
+    [1.0, 0.4, 0.6, 1.0],
 ];
 
 fn depth_color(depth: u32) -> [f32; 4] {
@@ -130,8 +144,6 @@ pub fn register_systems(state: &mut engine::State) {
         state.camera.pitch = -80.0;
     }
 
-    // Materials + pipelines must be created on the main thread (wgpu
-    // shader compilation goes through &mut RendererAPI).
     let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
         .with_cull(CullMode::None);
@@ -161,6 +173,7 @@ pub fn register_systems(state: &mut engine::State) {
         previous_leaves: HashMap::new(),
         current_meshes: HashMap::new(),
         in_flight: HashSet::new(),
+        empty_chunks: HashSet::new(),
         solid_material,
         line_material,
         update_octree: true,
@@ -168,18 +181,15 @@ pub fn register_systems(state: &mut engine::State) {
 }
 
 #[unsafe(no_mangle)]
-pub fn render() {
-    // libloading: load game_logic.dll, find "render", call it
-}
+pub fn render() {}
 
 #[unsafe(no_mangle)]
 pub fn update(state: &mut engine::State) {
     for transform in &mut state.scene.transform_components {
-        transform.scale = (0.01, 0.01, 0.01).into(); //(transform.velocity.x * 0.1);
+        transform.scale = (0.01, 0.01, 0.01).into();
         transform.position -= transform.velocity;
     }
 
-    // Early return if update octree is false
     {
         let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
         if !game_state.update_octree {
@@ -205,10 +215,9 @@ pub fn update(state: &mut engine::State) {
     debug_pass_node.clear_wire_cubes();
     debug_pass_node.clear_cubes();
 
-    let mut current_leaves: HashMap<NodeKey, OctreeNode> = HashMap::new();
+    let mut current_leaves: HashMap<NodeKey, ChunkInfo> = HashMap::new();
     for (center, node_size, node_depth) in &octree_nodes {
         debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
-        //debug_pass_node.add_cube(*center, *node_size, depth_color(*node_depth));
         debug_pass_node.add_cube(
             *center + vec3(0.0, node_size / 2.0, 0.0),
             1.0,
@@ -222,21 +231,13 @@ pub fn update(state: &mut engine::State) {
                 z: center.z as i32,
                 size: *node_size as i32,
             },
-            OctreeNode {
-                min: vec3(center.x, center.y, center.z),
+            ChunkInfo {
+                center: *center,
                 size: *node_size,
-                has_surface: true,
-                children: None,
-                vertex: None,
             },
         );
     }
 
-    // Make sure the worker coord has the material it needs for upload.
-    // Do NOT drain coord.rx here — that would throw away chunks the rayon
-    // workers have already finished but drain_planet_chunks hasn't seen yet.
-    // Scoped so the `game_state` borrow of `state.game_data` ends before
-    // we call `drain_planet_chunks(state)` below.
     let tx_template = {
         let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
         let mut coord = worker_coord().lock().unwrap();
@@ -246,55 +247,78 @@ pub fn update(state: &mut engine::State) {
         coord.tx.clone()
     };
 
+    // Step 1: prune in_flight keys that are no longer in the current octree.
+    {
+        let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+        game_state
+            .in_flight
+            .retain(|key| current_leaves.contains_key(key));
+    }
+
+    // Step 2: drain finished chunks BEFORE pruning current_meshes so results
+    // that still belong to the current octree survive the retain below.
+    drain_planet_chunks(state);
+
     {
         let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
 
-        // Diff: schedule mesh generation for every new leaf.
-        for (key, node) in &current_leaves {
-            // Skip if we already have the mesh, or a worker is still building it.
-            if game_state.current_meshes.contains_key(key) || game_state.in_flight.contains(key) {
+        // Step 3: prune the empty-chunk cache to the current octree.
+        game_state
+            .empty_chunks
+            .retain(|key| current_leaves.contains_key(key));
+
+        // Defer eviction: keep a stale chunk visible until every current
+        // leaf that spatially overlaps it has been processed (mesh uploaded
+        // or known-empty). Avoids 1-frame holes during LOD subdivide/merge.
+        // Stale chunks with no overlapping leaf (camera panned away) are
+        // evicted immediately because the .all() is vacuously true.
+        let stale_keys: Vec<NodeKey> = game_state
+            .current_meshes
+            .keys()
+            .filter(|k| !current_leaves.contains_key(k))
+            .copied()
+            .collect();
+        for stale_key in stale_keys {
+            let s_half = stale_key.size as f32 * 0.5;
+            let s_cx = stale_key.x as f32;
+            let s_cy = stale_key.y as f32;
+            let s_cz = stale_key.z as f32;
+            let all_covered = current_leaves.iter().all(|(leaf_key, info)| {
+                let max_d = info.size * 0.5 + s_half;
+                let overlaps = (info.center.x - s_cx).abs() < max_d
+                    && (info.center.y - s_cy).abs() < max_d
+                    && (info.center.z - s_cz).abs() < max_d;
+                if !overlaps {
+                    return true;
+                }
+                game_state.current_meshes.contains_key(leaf_key)
+                    || game_state.empty_chunks.contains(leaf_key)
+            });
+            if all_covered {
+                game_state.current_meshes.remove(&stale_key);
+            }
+        }
+
+        // Step 4: schedule workers only for keys that are truly missing.
+        for (key, info) in &current_leaves {
+            if game_state.current_meshes.contains_key(key)
+                || game_state.in_flight.contains(key)
+                || game_state.empty_chunks.contains(key)
+            {
                 continue;
             }
 
-            let tx = tx_template.clone();
-            let node = node.clone();
-            let key = *key;
-            game_state.in_flight.insert(key);
+            game_state.in_flight.insert(*key);
             worker_coord().lock().unwrap().scheduled += 1;
-
-            rayon::spawn(move || {
-                let half = node.size / 2.0;
-                let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
-                let resolution = node.size / CHUNK_SIZE as f32;
-                let min_corner = Point3::new(
-                    center.x - 16.0 * resolution,
-                    center.y - 16.0 * resolution,
-                    center.z - 16.0 * resolution,
-                );
-                let grid = Planet::generate_grid(34, 34, 34, resolution, center);
-                let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
-                let _ = tx.send(ReadyChunk {
-                    key,
-                    vertices,
-                    indices,
-                });
-            });
+            spawn_chunk_worker(info.center, info.size, *key, tx_template.clone());
         }
 
-        // Drop meshes for leaves that disappeared (camera moved, LOD changed).
-        game_state
-            .current_meshes
-            .retain(|key, _| current_leaves.contains_key(key));
-
-        // Snapshot this frame's leaves for next frame's diff.
+        // Snapshot for next frame's diff.
         game_state.previous_leaves.clear();
-        for (key, node) in &current_leaves {
-            game_state.previous_leaves.insert(*key, node.clone());
+        for (key, info) in &current_leaves {
+            game_state.previous_leaves.insert(*key, *info);
         }
     }
-
-    // Pull any freshly-generated meshes into current_meshes.
-    drain_planet_chunks(state);
 
     // Rebuild the geometry pass from the authoritative current_meshes map.
     let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
@@ -313,21 +337,38 @@ pub fn update(state: &mut engine::State) {
             node.add_render_data(render_data.clone());
         }
     }
+
+    state.frame_index += 1;
+
+    let coord = worker_coord().lock().unwrap();
+    println!(
+        "planet chunks: {} / {} uploaded | in_flight: {} | empty: {}",
+        coord.completed,
+        coord.scheduled,
+        state
+            .game_data
+            .downcast_ref::<GameState>()
+            .unwrap()
+            .in_flight
+            .len(),
+        state
+            .game_data
+            .downcast_ref::<GameState>()
+            .unwrap()
+            .empty_chunks
+            .len(),
+    );
 }
 
-// Pull finished chunks out of the channel and upload them to the GPU until
-// we hit UPLOAD_BUDGET. try_recv() is non-blocking: if workers are still
-// crunching, we return immediately and the game keeps running at full FPS.
 fn drain_planet_chunks(state: &mut engine::State) {
     let start = std::time::Instant::now();
     let coord_mutex = worker_coord();
 
-    // Grab the material once under a short lock so we don't relock per-chunk.
     let material = {
         let coord = coord_mutex.lock().unwrap();
         match &coord.solid_material {
             Some(m) => m.clone(),
-            None => return, // nothing scheduled yet
+            None => return,
         }
     };
 
@@ -337,29 +378,24 @@ fn drain_planet_chunks(state: &mut engine::State) {
             break;
         }
 
-        // Pop one chunk under a short lock. The lock is only held for the
-        // try_recv itself — not across the GPU upload below.
         let chunk = {
             let coord = coord_mutex.lock().unwrap();
             match coord.rx.try_recv() {
                 Ok(c) => c,
-                Err(_) => break, // channel empty — done for this frame
+                Err(_) => break,
             }
         };
 
-        // Whether or not the chunk has geometry, the worker is done with
-        // this key — clear it from in_flight so future frames can re-schedule
-        // if the leaf comes back.
         let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
         game_state.in_flight.remove(&chunk.key);
 
         if chunk.vertices.is_empty() {
+            // Remember this key produces no geometry so the scheduler never
+            // re-spawns a worker for it every frame.
+            game_state.empty_chunks.insert(chunk.key); // <-- THE key fix
             continue;
         }
 
-        // cast_slice returns a &[u8] view — zero-copy. create_render_data
-        // still clones internally, so we pass a thin Vec wrapper around
-        // the same bytes instead of doing an extra .to_vec() here.
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
         let render_data = state.renderer.renderer_api.create_render_data(
             &vertex_bytes,
@@ -452,8 +488,6 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
         }
     }
 
-    // Cycle octree debug depth: [ = previous level, ] = next level
-    // [ = deeper level, ] = shallower level
     if key_code == KeyCode::BracketLeft && pressed {
         let max = OCTREE_MAX_DEPTH.load(Ordering::Relaxed);
         let old = OCTREE_DEBUG_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
@@ -463,6 +497,7 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
             rebuild_octree_debug(state);
         }
     }
+
     if key_code == KeyCode::PageUp && pressed {
         state.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
     }
@@ -482,15 +517,13 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
             debug_pass_node.clear_cubes();
             return;
         }
-        // Visualize octree nodes as debug cubes
-        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &state.camera.position);
 
+        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &state.camera.position);
         let mut octree_nodes = Vec::new();
         Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
         println!("Leaf nodes: {}", octree_nodes.len());
         for (center, node_size, node_depth) in &octree_nodes {
             debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
-            //debug_pass_node.add_cube(*center, *node_size, depth_color(*node_depth));
             debug_pass_node.add_cube(
                 *center + vec3(0.0, node_size / 2.0, 0.0),
                 1.0,
@@ -516,7 +549,6 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
 }
 
 fn schedule_planet_generation(state: &mut engine::State) {
-    // Clear debug visuals and any previously uploaded chunks.
     let debug_pass_node: &mut DebugPassNode = state
         .renderer
         .render_graph
@@ -538,7 +570,6 @@ fn schedule_planet_generation(state: &mut engine::State) {
         node.clear_render_data();
     }
 
-    // Octree build is cheap (only 8-corner SDF checks per node) — stays on main thread.
     let size = PLANET_SIZE;
     let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
     let max_depth = octree_max_depth(&octree, 0);
@@ -552,8 +583,6 @@ fn schedule_planet_generation(state: &mut engine::State) {
         octree_nodes.len()
     );
 
-    // Drain any stale results from a previous run, stash the material so
-    // the main-thread drain knows what to upload with, and reset counters.
     let tx_template = {
         let mut coord = worker_coord().lock().unwrap();
         while coord.rx.try_recv().is_ok() {}
@@ -570,32 +599,23 @@ fn schedule_planet_generation(state: &mut engine::State) {
         coord.tx.clone()
     };
 
-    // Spawn one rayon task per chunk. The global rayon pool has one worker
-    // per CPU thread — each task is a pure SDF evaluation + dual contouring.
+    // Full reset — clear all tracking state since we're starting fresh.
+    {
+        let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
+        game_state.in_flight.clear();
+        game_state.empty_chunks.clear();
+        game_state.current_meshes.clear();
+        game_state.previous_leaves.clear();
+    }
+
     for (center, node_size, _depth) in octree_nodes {
-        let tx = tx_template.clone();
         let key = NodeKey {
             x: center.x as i32,
             y: center.y as i32,
             z: center.z as i32,
             size: node_size as i32,
         };
-        rayon::spawn(move || {
-            let resolution = node_size / CHUNK_SIZE as f32;
-            let min_corner = Point3::new(
-                center.x - 16.0 * resolution,
-                center.y - 16.0 * resolution,
-                center.z - 16.0 * resolution,
-            );
-            let grid = Planet::generate_grid(34, 34, 34, resolution, center);
-            let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
-            // send() moves the Vecs into the channel — no copy, no alias.
-            let _ = tx.send(ReadyChunk {
-                key,
-                vertices,
-                indices,
-            });
-        });
+        spawn_chunk_worker(center, node_size, key, tx_template.clone());
     }
 }
 
@@ -630,7 +650,6 @@ trait PlanetExt {
 impl PlanetExt for Planet {
     fn generate_planet(state: &mut engine::State) -> Self {
         let size: usize = PLANET_SIZE;
-        //let grid = Planet::generate_grid(size as u32, size as u32, size as u32, size as u32);
         let debug_pass_node: &mut DebugPassNode = state
             .renderer
             .render_graph
@@ -642,7 +661,6 @@ impl PlanetExt for Planet {
             (PLANET_SIZE / CHUNK_SIZE) * (PLANET_SIZE / CHUNK_SIZE) * (PLANET_SIZE / CHUNK_SIZE)
         );
 
-        // Visualize octree nodes as debug cubes
         let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
         let max_depth = octree_max_depth(&octree, 0);
         OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
@@ -674,15 +692,6 @@ impl PlanetExt for Planet {
         let mut meshes_count = 0;
 
         for (center, node_size, node_depth) in &octree_nodes {
-            //debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
-            //debug_pass_node.add_cube(*center, *node_size, depth_color(*node_depth));
-            //debug_pass_node.add_cube(
-            //    *center + vec3(0.0, node_size / 2.0, 0.0),
-            //    1.0,
-            //    depth_color(node_depth + 1),
-            //);
-
-            let half = node_size / 2.0 - 1.0;
             let resolution = node_size / CHUNK_SIZE as f32;
             let min_corner = Point3::new(
                 center.x - 16.0 * resolution,
@@ -696,9 +705,6 @@ impl PlanetExt for Planet {
             );
 
             let mesh = PlanetMesh { positions, indices };
-            //if meshes_count > 400 {
-            //    return;
-            //}
 
             if mesh.positions.len() > 0 {
                 meshes_count += 1;
@@ -729,7 +735,6 @@ impl PlanetExt for Planet {
                     .downcast_mut::<GeometryPassNode>()
                 {
                     node.add_render_data(solid_render_data);
-                    //node.add_render_data(line_render_data);
                 }
             }
         }
@@ -778,10 +783,7 @@ impl PlanetExt for Planet {
         let size_y = grid[0].len();
         let size_z = grid[0][0].len();
 
-        // Store vertex index per cell
         let mut cell_vertex = vec![vec![vec![None; size_z - 1]; size_y - 1]; size_x - 1];
-
-        // PASS 1: Generate vertices per cell
 
         for x in 0..(size_x - 1) {
             for y in 0..(size_y - 1) {
@@ -808,14 +810,14 @@ impl PlanetExt for Planet {
                     let by = y as f32 * resolution + offset.y;
                     let bz = z as f32 * resolution + offset.z;
                     let positions = [
-                        vec3(bx, by, bz),                                        // 000
-                        vec3(bx + resolution, by, bz),                           // 100
-                        vec3(bx, by + resolution, bz),                           // 010
-                        vec3(bx + resolution, by + resolution, bz),              // 110
-                        vec3(bx, by, bz + resolution),                           // 001
-                        vec3(bx + resolution, by, bz + resolution),              // 101
-                        vec3(bx, by + resolution, bz + resolution),              // 011
-                        vec3(bx + resolution, by + resolution, bz + resolution), // 111
+                        vec3(bx, by, bz),
+                        vec3(bx + resolution, by, bz),
+                        vec3(bx, by + resolution, bz),
+                        vec3(bx + resolution, by + resolution, bz),
+                        vec3(bx, by, bz + resolution),
+                        vec3(bx + resolution, by, bz + resolution),
+                        vec3(bx, by + resolution, bz + resolution),
+                        vec3(bx + resolution, by + resolution, bz + resolution),
                     ];
 
                     fn f(x: f32, y: f32, z: f32) -> f32 {
@@ -835,17 +837,6 @@ impl PlanetExt for Planet {
                         [normal.x, normal.y, normal.z]
                     }
 
-                    let normals = [
-                        normal_from_function(positions[0]),
-                        normal_from_function(positions[1]),
-                        normal_from_function(positions[2]),
-                        normal_from_function(positions[3]),
-                        normal_from_function(positions[4]),
-                        normal_from_function(positions[5]),
-                        normal_from_function(positions[6]),
-                        normal_from_function(positions[7]),
-                    ];
-
                     let edges = [
                         (0, 1),
                         (1, 3),
@@ -862,23 +853,18 @@ impl PlanetExt for Planet {
                     ];
 
                     let mut intersections = Vec::new();
-
                     for (i1, i2) in edges {
                         let d1 = corners[i1];
                         let d2 = corners[i2];
-
                         let denom = d1 - d2;
                         if denom.abs() < 1e-6 {
                             continue;
                         }
-
                         if d1 * d2 < 0.0 {
                             let p1 = positions[i1];
                             let p2 = positions[i2];
-
                             let t = (d1 / denom).clamp(0.0, 1.0);
                             let p = p1 + (p2 - p1) * t;
-
                             intersections.push(p);
                         }
                     }
@@ -901,7 +887,7 @@ impl PlanetExt for Planet {
                     let avg_pos: Point3<f32> = Point3::from_vec(avg);
 
                     let normal_at = |p: Vector3<f32>| -> [f32; 3] {
-                        let eps = resolution * 0.5; // scale eps to the local grid spacing
+                        let eps = resolution * 0.5;
                         let dx = sdf(p + vec3(eps, 0.0, 0.0)) - sdf(p - vec3(eps, 0.0, 0.0));
                         let dy = sdf(p + vec3(0.0, eps, 0.0)) - sdf(p - vec3(0.0, eps, 0.0));
                         let dz = sdf(p + vec3(0.0, 0.0, eps)) - sdf(p - vec3(0.0, 0.0, eps));
@@ -910,18 +896,16 @@ impl PlanetExt for Planet {
                     };
 
                     let avg_norm = normal_at(Vector3::new(avg_pos.x, avg_pos.y, avg_pos.z));
-
                     let up = vec3(0.0, 1.0, 0.0);
-                    let slope = avg_norm[0] * up.x + avg_norm[1] * up.y + avg_norm[2] * up.z; // dot(normal, up)
+                    let slope = avg_norm[0] * up.x + avg_norm[1] * up.y + avg_norm[2] * up.z;
 
-                    // Example: grass(0) vs rock(1) based on slope
                     let (mat_a, mat_b, blend) = if slope > 0.7 {
-                        (0u16, 1u16, 0u8) // flat → pure grass
+                        (0u16, 1u16, 0u8)
                     } else if slope > 0.4 {
-                        let t = (0.7 - slope) / 0.3; // blend grass→rock on slopes
+                        let t = (0.7 - slope) / 0.3;
                         (0u16, 1u16, (t * 255.0) as u8)
                     } else {
-                        (1u16, 1u16, 0u8) // steep → pure rock
+                        (1u16, 1u16, 0u8)
                     };
 
                     vertices.push(PlanetVertex {
@@ -937,24 +921,19 @@ impl PlanetExt for Planet {
             }
         }
 
-        // PASS 2: Build indices (edges)
-
         // X edges
         for x in 0..(size_x - 1) {
             for y in 1..(size_y - 1) {
                 for z in 1..(size_z - 1) {
                     let d1 = grid[x][y][z];
                     let d2 = grid[x + 1][y][z];
-
                     if d1 * d2 >= 0.0 {
                         continue;
                     }
-
                     let v0 = cell_vertex[x][y][z];
                     let v1 = cell_vertex[x][y - 1][z];
                     let v2 = cell_vertex[x][y][z - 1];
                     let v3 = cell_vertex[x][y - 1][z - 1];
-
                     if let (Some(v0), Some(v1), Some(v2), Some(v3)) = (v0, v1, v2, v3) {
                         indices.extend_from_slice(&[v0, v1, v2]);
                         indices.extend_from_slice(&[v2, v1, v3]);
@@ -969,16 +948,13 @@ impl PlanetExt for Planet {
                 for z in 1..(size_z - 1) {
                     let d1 = grid[x][y][z];
                     let d2 = grid[x][y + 1][z];
-
                     if d1 * d2 >= 0.0 {
                         continue;
                     }
-
                     let v0 = cell_vertex[x][y][z];
                     let v1 = cell_vertex[x - 1][y][z];
                     let v2 = cell_vertex[x][y][z - 1];
                     let v3 = cell_vertex[x - 1][y][z - 1];
-
                     if let (Some(v0), Some(v1), Some(v2), Some(v3)) = (v0, v1, v2, v3) {
                         indices.extend_from_slice(&[v0, v1, v2]);
                         indices.extend_from_slice(&[v2, v1, v3]);
@@ -993,16 +969,13 @@ impl PlanetExt for Planet {
                 for z in 0..(size_z - 1) {
                     let d1 = grid[x][y][z];
                     let d2 = grid[x][y][z + 1];
-
                     if d1 * d2 >= 0.0 {
                         continue;
                     }
-
                     let v0 = cell_vertex[x][y][z];
                     let v1 = cell_vertex[x - 1][y][z];
                     let v2 = cell_vertex[x][y - 1][z];
                     let v3 = cell_vertex[x - 1][y - 1][z];
-
                     if let (Some(v0), Some(v1), Some(v2), Some(v3)) = (v0, v1, v2, v3) {
                         indices.extend_from_slice(&[v0, v1, v2]);
                         indices.extend_from_slice(&[v2, v1, v3]);
@@ -1016,7 +989,7 @@ impl PlanetExt for Planet {
 
     fn create_octree(planet_radius: u32, camera_position: &cgmath::Point3<f32>) -> OctreeNode {
         let r = planet_radius as f32 / 2.0;
-        let root_node = build_node(
+        build_node(
             Vector3 {
                 x: -r,
                 y: -r,
@@ -1026,9 +999,7 @@ impl PlanetExt for Planet {
             CHUNK_SIZE as f32,
             true,
             camera_position,
-        );
-
-        root_node
+        )
     }
 
     fn collect_leaf_nodes(
@@ -1065,36 +1036,20 @@ impl PlanetMeshExt for PlanetMesh {
     }
 }
 
-//impl RenderNode for PlanetRendererNode {
-//    fn new() -> Self {
-//        PlanetRendererNode {
-//            render_data: Vec::new(),
-//        }
-//    }
-//
-//    fn add_render_data(&mut self, render_data: RenderData) {
-//        self.render_data.push(render_data);
-//    }
-//}
-
 fn hash3(p: Vector3<f32>) -> f32 {
-    // Convert to integers for reliable hashing
     let ix = (p.x.floor() as i32).wrapping_mul(1619);
     let iy = (p.y.floor() as i32).wrapping_mul(31337);
     let iz = (p.z.floor() as i32).wrapping_mul(6271);
     let n = ix.wrapping_add(iy).wrapping_add(iz);
-    // Avalanche
     let n = n.wrapping_mul(n.wrapping_mul(n).wrapping_mul(60493).wrapping_add(19990303));
-    // Map to [0, 1]
     (n as u32 as f32) / (u32::MAX as f32)
 }
 
 fn smooth_noise(p: Vector3<f32>) -> f32 {
-    // Rust fract() is negative for negative numbers; floor+fract gives wrong cell
     let ix = p.x.floor();
     let iy = p.y.floor();
     let iz = p.z.floor();
-    let fx = p.x - ix; // always in [0, 1)
+    let fx = p.x - ix;
     let fy = p.y - iy;
     let fz = p.z - iz;
 
@@ -1123,7 +1078,6 @@ fn smooth_noise(p: Vector3<f32>) -> f32 {
     y0 + u.z * (y1 - y0)
 }
 
-/// Fractional Brownian Motion — layered octaves of noise
 fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
     let mut value = 0.0f32;
     let mut amplitude = 0.5f32;
@@ -1136,60 +1090,45 @@ fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
     value
 }
 
-// --- Cave SDF ---
-// Returns a negative value inside a cave tunnel.
-// We carve worm-like tunnels by warping a sine-based distance field.
 fn cave_sdf(p: Vector3<f32>) -> f32 {
-    let scale = 0.04; // spatial frequency of tunnels
+    let scale = 0.04;
     let q = p * scale;
-    // Warp the lookup point so tunnels curl
     let warp = vec3(
         fbm(q + vec3(1.7, 9.2, 3.4), 3),
         fbm(q + vec3(8.3, 2.8, 5.1), 3),
         fbm(q + vec3(4.1, 6.7, 1.9), 3),
     ) * 2.0
-        - vec3(1.0, 1.0, 1.0); // remap [0,1] -> [-1,1]
-
+        - vec3(1.0, 1.0, 1.0);
     let warped = q + warp * 0.6;
-    let tunnel_r = fbm(warped, 4); // 0..1
-    // tunnel_r near 0.5 => inside tunnel; map so ~0.5 = 0.0 boundary
-    let cave_dist = (tunnel_r - 0.5).abs() - 0.08; // tube half-thickness
-    cave_dist * (1.0 / scale) // scale back to world units
+    let tunnel_r = fbm(warped, 4);
+    let cave_dist = (tunnel_r - 0.5).abs() - 0.08;
+    cave_dist * (1.0 / scale)
 }
 
 pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
-    let planet_r = PLANET_SIZE as f32 / 8.0; // 32.0
-
+    let planet_r = PLANET_SIZE as f32 / 8.0;
     let dist_from_center = p.magnitude();
     let sphere = dist_from_center - planet_r;
-
     let dir = if dist_from_center > 1e-6 {
         p / dist_from_center
     } else {
         vec3(0.0, 1.0, 0.0)
     };
-    //return sphere;
 
-    // Mountains
-    let noise_freq = 3.0;
-    let mountain_height = planet_r * 0.5;
+    let noise_freq = 15.0;
+    let mountain_height = planet_r * 0.05;
     let raw = fbm(dir * noise_freq, 6);
     let ridged = 1.0 - (raw * 2.0 - 1.0).abs();
     let mountain = ridged * mountain_height;
     let terrain = sphere - mountain;
     return terrain;
 
-    // Caves: only carve underground, fading in over a shell a few units thick
-    // so the outer silhouette is never broken
-    let depth_below_surface = -terrain; // positive when underground
-    let fade_zone = planet_r * 0.1; // 3.2 units deep before caves fully appear
+    let depth_below_surface = -terrain;
+    let fade_zone = planet_r * 0.1;
     let cave_blend = (depth_below_surface / fade_zone).clamp(0.0, 1.0);
-
     if cave_blend > 0.0 {
         let cave = cave_sdf(p);
-        // SDF subtraction: max(terrain, -cave) carves cave volume out of terrain
         let carved = terrain.max(-cave);
-        // Blend smoothly from terrain to carved based on depth
         terrain + (carved - terrain) * cave_blend
     } else {
         terrain
@@ -1198,12 +1137,20 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
 
 const THRESHOLD: f32 = 0.3;
 
+fn is_behind_horizon(
+    node_center: Vector3<f32>,
+    camera_pos: Vector3<f32>,
+    planet_center: Vector3<f32>,
+) -> bool {
+    let to_node = (node_center - planet_center).normalize();
+    let to_camera = (camera_pos - planet_center).normalize();
+    cgmath::dot(to_node, to_camera) < 0.0
+}
+
 fn should_subdivide(node: OctreeNode, camera_pos: Vector3<f32>) -> bool {
     let center = node.min + vec3(node.size * 0.5, node.size * 0.5, node.size * 0.5);
     let dist = (center - camera_pos).magnitude();
-
     let error = node.size / dist;
-
     error > THRESHOLD
 }
 
@@ -1214,8 +1161,13 @@ pub fn build_node(
     first: bool,
     camera_position: &cgmath::Point3<f32>,
 ) -> OctreeNode {
-    //let camera_pos = vec3(0.0, PLANET_SIZE as f32 / 8.0, 0.0);
     let has_surface = has_surface(min, size);
+    let is_behind_horizon = is_behind_horizon(
+        min + vec3(size * 0.5, size * 0.5, size * 0.5),
+        vec3(camera_position.x, camera_position.y, camera_position.z),
+        vec3(0.0, 0.0, 0.0),
+    );
+
     if !first {
         let leaf = OctreeNode {
             min,
@@ -1246,7 +1198,6 @@ pub fn build_node(
     }
 
     let child_size = size / 2.0;
-
     let children = Some([
         Box::new(build_node(
             min + vec3(0.0, 0.0, 0.0),
@@ -1311,20 +1262,18 @@ pub fn build_node(
         size,
         children,
         vertex: None,
-        has_surface: has_surface,
+        has_surface,
     }
 }
 
 fn has_surface(min: Vector3<f32>, size: f32) -> bool {
     let mut has_neg = false;
     let mut has_pos = false;
-
     for dx in [0.0, size] {
         for dy in [0.0, size] {
             for dz in [0.0, size] {
                 let p = min + vec3(dx, dy, dz);
                 let d = sdf(p);
-
                 if d < 0.0 {
                     has_neg = true;
                 }
@@ -1334,7 +1283,6 @@ fn has_surface(min: Vector3<f32>, size: f32) -> bool {
             }
         }
     }
-
     has_neg && has_pos
 }
 
@@ -1354,7 +1302,6 @@ fn rebuild_octree_debug(state: &mut engine::State) {
     let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
     let mut octree_nodes = Vec::new();
     collect_octree_nodes_at_depth(&octree, 0, depth, &mut octree_nodes);
-    let color = depth_color(depth);
     for (center, node_size, node_depth) in &octree_nodes {
         debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
     }
@@ -1372,7 +1319,6 @@ fn collect_octree_nodes_at_depth(
         out.push((center, node.size, current_depth));
         return;
     }
-
     if let Some(children) = &node.children {
         for child in children.iter() {
             collect_octree_nodes_at_depth(child, current_depth + 1, target_depth, out);
