@@ -1011,8 +1011,10 @@ dependencies = [
  "engine",
  "engine-dylib",
  "game-types",
+ "libloading",
  "pollster",
  "rayon",
+ "renderdoc",
  "tracing",
  "wgpu",
 ]

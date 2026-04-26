@@ -16,6 +16,8 @@ tracing = { workspace = true }
 rayon = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
+libloading = { workspace = true }
+renderdoc = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

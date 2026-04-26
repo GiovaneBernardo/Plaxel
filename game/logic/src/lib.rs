@@ -16,10 +16,10 @@ use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
 use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
-use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
+use std::{cmp, env};
 
 struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
@@ -140,8 +140,11 @@ pub fn register_systems(state: &mut engine::State) {
         > PLANET_SIZE as f32
     {
         state.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
-        state.camera.yaw = 0.0;
-        state.camera.pitch = -80.0;
+        // Look down at the planet center, slight forward tilt so +Z isn't degenerate.
+        state.camera.orientation = engine::camera::Camera::look_at(
+            vec3(0.01, -1.0, 0.0).normalize(),
+            vec3(0.0, 0.0, -1.0),
+        );
     }
 
     let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())

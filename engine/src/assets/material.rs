@@ -46,7 +46,7 @@ impl PipelineDescriptor {
             polygon_mode: PolygonMode::Fill,
             depth_state: Some(DepthState {
                 write_enabled: true,
-                compare: CompareFunction::Less,
+                compare: CompareFunction::Greater,
             }),
             multisample: MultisampleState { count: 1 },
         }

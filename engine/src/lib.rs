@@ -226,21 +226,12 @@ impl State {
         };
 
         let camera = camera::Camera {
-            position: (0.0, 65536.0, 2.0).into(), // TODO: switch position Y back to 1
-            yaw: -90.0,
-            pitch: 0.0,
-            front: (0.0, 0.0, -1.0).into(),
-            up: cgmath::Vector3::unit_y(),
-            right: cgmath::Vector3::unit_x(),
-            world_up: cgmath::Vector3::unit_y(),
-            eye: (0.0, 1.0, 2.0).into(),
-            // have it look at the origin
-            target: (0.0, 0.0, 0.0).into(),
-            // which way is "up"
+            position: (0.0, 65536.0, 2.0).into(),
+            orientation: cgmath::Quaternion::from_sv(1.0, cgmath::Vector3::new(0.0, 0.0, 0.0)),
             aspect: config.width as f32 / config.height as f32,
             fovy: 65.0,
             znear: 0.1,
-            zfar: 15000000.0, // Increased zfar, not sure if it will break something, if needed return to 15km
+            zfar: 15000000.0,
         };
 
         let mut camera_uniform = camera::CameraUniform::new();

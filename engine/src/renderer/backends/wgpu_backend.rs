@@ -979,7 +979,8 @@ impl WgpuBackend {
         clear: bool,
     ) {
         let depth_load = if clear {
-            wgpu::LoadOp::Clear(1.0)
+            // Reverse-Z: clear to 0.0 (the "far" value); depth_compare = Greater.
+            wgpu::LoadOp::Clear(0.0)
         } else {
             wgpu::LoadOp::Load
         };

@@ -1,18 +1,11 @@
-use cgmath::{Array, EuclideanSpace};
+use cgmath::{
+    EuclideanSpace, InnerSpace, Matrix3, Quaternion, Rotation, Rotation3, SquareMatrix, Vector3,
+};
 use winit::{event::MouseScrollDelta, keyboard::KeyCode};
-
-use crate::engine_info;
 
 pub struct Camera {
     pub position: cgmath::Point3<f32>,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub front: cgmath::Vector3<f32>,
-    pub up: cgmath::Vector3<f32>,
-    pub right: cgmath::Vector3<f32>,
-    pub world_up: cgmath::Vector3<f32>,
-    pub eye: cgmath::Point3<f32>,
-    pub target: cgmath::Point3<f32>,
+    pub orientation: Quaternion<f32>,
     pub aspect: f32,
     pub fovy: f32,
     pub znear: f32,
@@ -20,28 +13,51 @@ pub struct Camera {
 }
 
 impl Camera {
+    pub fn forward(&self) -> Vector3<f32> {
+        self.orientation * Vector3::new(0.0, 0.0, -1.0)
+    }
+
+    pub fn right(&self) -> Vector3<f32> {
+        self.orientation * Vector3::new(1.0, 0.0, 0.0)
+    }
+
+    pub fn up(&self) -> Vector3<f32> {
+        self.orientation * Vector3::new(0.0, 1.0, 0.0)
+    }
+
+    /// Build an orientation that points the camera's local -Z along `forward`,
+    /// keeping the camera's local +Y as close to `up_hint` as possible.
+    pub fn look_at(forward: Vector3<f32>, up_hint: Vector3<f32>) -> Quaternion<f32> {
+        let f = forward.normalize();
+        let r = f.cross(up_hint).normalize();
+        let u = r.cross(f);
+        // Columns are world axes the local axes map to: local +X -> r, +Y -> u, +Z -> -f.
+        let m = Matrix3::from_cols(r, u, -f);
+        Quaternion::from(m)
+    }
+
     pub fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        let view = cgmath::Matrix4::look_at_rh(self.position, self.position + self.front, self.up);
+        let view = cgmath::Matrix4::from(self.orientation.invert())
+            * cgmath::Matrix4::from_translation(-self.position.to_vec());
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-        return OPENGL_TO_WGPU_MATRIX * proj * view;
+        OPENGL_TO_WGPU_MATRIX * proj * view
     }
 }
 
+// Maps cgmath/OpenGL clip-space depth [-1, 1] to wgpu reverse-Z [1, 0]:
+// near plane -> 1, far plane -> 0. Pairs with depth_compare = Greater and
+// depth clear = 0.0; on Depth32Float this gives much better far-plane precision.
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
-    cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
-    cgmath::Vector4::new(0.0, 1.0, 0.0, 0.0),
-    cgmath::Vector4::new(0.0, 0.0, 0.5, 0.0),
-    cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
+    cgmath::Vector4::new(1.0, 0.0,  0.0, 0.0),
+    cgmath::Vector4::new(0.0, 1.0,  0.0, 0.0),
+    cgmath::Vector4::new(0.0, 0.0, -0.5, 0.0),
+    cgmath::Vector4::new(0.0, 0.0,  0.5, 1.0),
 );
 
-// We need this for Rust to store our data correctly for the shaders
 #[repr(C)]
-// This is so we can store this in a buffer
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
-    // We can't use cgmath with bytemuck directly, so we'll have
-    // to convert the Matrix4 into a 4x4 f32 array
     pub view_proj: [[f32; 4]; 4],
     pub position: [f32; 3],
     // WGSL aligns vec3<f32> to 16 bytes, so we need padding to match the shader layout
@@ -50,7 +66,6 @@ pub struct CameraUniform {
 
 impl CameraUniform {
     pub fn new() -> Self {
-        use cgmath::SquareMatrix;
         Self {
             view_proj: cgmath::Matrix4::identity().into(),
             position: [0.0, 0.0, 0.0],
@@ -73,9 +88,11 @@ pub struct CameraController {
     is_up_pressed: bool,
     is_down_pressed: bool,
     is_shift_pressed: bool,
+    is_roll_left_pressed: bool,
+    is_roll_right_pressed: bool,
     pub is_right_click_pressed: bool,
-    yaw: f32,
-    pitch: f32,
+    yaw_delta: f32,
+    pitch_delta: f32,
 }
 
 impl CameraController {
@@ -90,8 +107,10 @@ impl CameraController {
             is_down_pressed: false,
             is_right_click_pressed: false,
             is_shift_pressed: false,
-            yaw: 0.0,
-            pitch: 0.0,
+            is_roll_left_pressed: false,
+            is_roll_right_pressed: false,
+            yaw_delta: 0.0,
+            pitch_delta: 0.0,
         }
     }
 
@@ -125,6 +144,14 @@ impl CameraController {
                 self.is_shift_pressed = is_pressed;
                 true
             }
+            KeyCode::KeyQ => {
+                self.is_roll_left_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyE => {
+                self.is_roll_right_pressed = is_pressed;
+                true
+            }
             _ => false,
         }
     }
@@ -147,29 +174,46 @@ impl CameraController {
         self.speed = (self.speed * factor).clamp(0.001, 1_000_000.0);
     }
 
-    pub fn handle_mouse(&mut self, _x: f32, _y: f32) {
-        self.yaw += _x as f32 * 0.1;
-        self.pitch += _y as f32 * 0.1;
+    pub fn handle_mouse(&mut self, dx: f32, dy: f32) {
+        self.yaw_delta += dx * 0.1;
+        self.pitch_delta += dy * 0.1;
     }
 
     pub fn update_camera(&mut self, camera: &mut Camera) {
-        use cgmath::InnerSpace;
-
         if self.is_right_click_pressed {
-            camera.yaw += self.yaw;
-            camera.pitch += self.pitch;
-            camera.pitch = camera.pitch.clamp(-87.0, 87.0);
-
-            camera.front.x = camera.yaw.to_radians().cos() * camera.pitch.to_radians().cos();
-            camera.front.y = -camera.pitch.to_radians().sin();
-            camera.front.z = camera.yaw.to_radians().sin() * camera.pitch.to_radians().cos();
-
-            camera.right = camera.front.cross(camera.world_up).normalize();
-            camera.up = camera.right.cross(camera.front).normalize();
+            // Apply rotations in the camera's local frame so behavior is the
+            // same regardless of where on the planet you are. Right-multiplying
+            // by a quaternion built from a local axis (X = right, Y = up)
+            // composes the rotation in the camera's own frame.
+            let yaw = Quaternion::from_axis_angle(
+                Vector3::unit_y(),
+                cgmath::Rad(-self.yaw_delta.to_radians()),
+            );
+            let pitch = Quaternion::from_axis_angle(
+                Vector3::unit_x(),
+                cgmath::Rad(-self.pitch_delta.to_radians()),
+            );
+            camera.orientation = (camera.orientation * yaw * pitch).normalize();
         }
 
-        self.yaw = 0.0;
-        self.pitch = 0.0;
+        self.yaw_delta = 0.0;
+        self.pitch_delta = 0.0;
+
+        // Roll (Q/E): rotate around local forward (-Z).
+        let mut roll_amount = 0.0f32;
+        if self.is_roll_left_pressed {
+            roll_amount -= 1.0;
+        }
+        if self.is_roll_right_pressed {
+            roll_amount += 1.0;
+        }
+        if roll_amount != 0.0 {
+            let roll = Quaternion::from_axis_angle(
+                -Vector3::unit_z(),
+                cgmath::Rad(roll_amount * 0.02),
+            );
+            camera.orientation = (camera.orientation * roll).normalize();
+        }
 
         let mut final_speed = self.speed;
         if self.is_shift_pressed {
@@ -177,28 +221,28 @@ impl CameraController {
             final_speed *= distance.sqrt() * 0.1;
         }
 
-        // Forward Backward
+        let forward = camera.forward();
+        let right = camera.right();
+        let up = camera.up();
+
         if self.is_forward_pressed {
-            camera.position += camera.front * final_speed;
+            camera.position += forward * final_speed;
         }
         if self.is_backward_pressed {
-            camera.position -= camera.front * final_speed;
+            camera.position -= forward * final_speed;
         }
-
-        // Right Left
         if self.is_right_pressed {
-            camera.position += camera.right * final_speed;
+            camera.position += right * final_speed;
         }
         if self.is_left_pressed {
-            camera.position -= camera.right * final_speed;
+            camera.position -= right * final_speed;
         }
-
-        // Up down
         if self.is_up_pressed {
-            camera.position += camera.up.normalize() * final_speed;
+            camera.position += up * final_speed;
         }
         if self.is_down_pressed {
-            camera.position -= camera.up.normalize() * final_speed;
+            camera.position -= up * final_speed;
         }
     }
 }
+
