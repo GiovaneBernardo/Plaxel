@@ -51,6 +51,7 @@ pub struct State {
     #[cfg(feature = "renderdoc")]
     pub renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>>,
     pub capture_next_frame: bool,
+    pub frame_index: u32,
 
     #[cfg(not(feature = "renderdoc"))]
     pub renderdoc: (),
@@ -324,6 +325,7 @@ impl State {
             #[cfg(not(feature = "renderdoc"))]
             renderdoc: (),
             capture_next_frame: false,
+            frame_index: 0,
         })
     }
 

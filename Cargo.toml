@@ -7,6 +7,7 @@ members = [
     "game/logic",
     "game/types",
     "game/runner",
+    "xtask",
 ]
 resolver = "2"
 

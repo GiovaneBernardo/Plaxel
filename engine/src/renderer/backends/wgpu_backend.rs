@@ -1072,7 +1072,7 @@ impl WgpuBackend {
         self.bind_groups.get(&handle)
     }
 
-    fn add_bind_group(&mut self, bind_group: wgpu::BindGroup) -> BindGroupHandle {
+    pub fn add_bind_group(&mut self, bind_group: wgpu::BindGroup) -> BindGroupHandle {
         let handle = BindGroupHandle(self.bind_groups.len() as u32);
         self.bind_groups.insert(handle, bind_group);
         handle
@@ -1088,7 +1088,7 @@ impl WgpuBackend {
         self.textures.get(&handle)
     }
 
-    fn add_texture(&mut self, texture: wgpu::Texture) -> TextureHandle {
+    pub fn add_texture(&mut self, texture: wgpu::Texture) -> TextureHandle {
         let handle = TextureHandle(self.textures.len() as u32);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.textures.insert(handle, texture);
@@ -1100,7 +1100,10 @@ impl WgpuBackend {
         self.texture_views.get(&handle)
     }
 
-    fn add_bind_group_layout(&mut self, layout: wgpu::BindGroupLayout) -> BindGroupLayoutHandle {
+    pub fn add_bind_group_layout(
+        &mut self,
+        layout: wgpu::BindGroupLayout,
+    ) -> BindGroupLayoutHandle {
         let handle = BindGroupLayoutHandle(self.bind_group_layouts.len() as u32);
         self.bind_group_layouts.insert(handle, layout);
         handle
