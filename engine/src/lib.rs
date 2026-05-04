@@ -33,25 +33,22 @@ pub use winit::{
 
 use crate::assets::manager::AssetManager;
 use crate::core::components::core::TransformComponent;
+use crate::ecs::scene::Scene;
 use crate::renderer::Renderer;
 
 // This will store the state of our game
 pub struct State {
     pub window: Arc<Window>,
-    pub camera: camera::Camera,
-    pub camera_uniform: camera::CameraUniform,
-    pub camera_controller: camera::CameraController,
-    pub instances: Vec<Instance>,
-    pub scene: ecs::Scene,
+    pub active_scene_index: Option<u32>,
+    pub scenes: Vec<ecs::scene::Scene>,
     pub events: Vec<WindowEvent>,
     pub renderer: renderer::Renderer,
     pub asset_manager: AssetManager,
-    pub registered_systems: bool,
-    pub game_data: Box<dyn std::any::Any>,
     #[cfg(feature = "renderdoc")]
     pub renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>>,
     pub capture_next_frame: bool,
     pub frame_index: u32,
+    pub registered_systems: bool,
 
     #[cfg(not(feature = "renderdoc"))]
     pub renderdoc: (),
@@ -266,33 +263,9 @@ impl State {
                 })
             })
             .collect::<Vec<_>>();
-        let mut scene = ecs::Scene::new();
-        let mut rng = rand::thread_rng();
 
-        for y in 0..NUM_INSTANCES_PER_ROW {
-            for x in 0..NUM_INSTANCES_PER_ROW {
-                let mut entity = scene.create_entity();
-                let mut transform_component = TransformComponent {
-                    position: (x as f32 * 32.0, 0.0, y as f32 * 32.0).into(),
-                    rotation: cgmath::Quaternion::from_axis_angle(
-                        cgmath::Vector3::unit_y(),
-                        cgmath::Deg(0.0),
-                    ),
-                    scale: (0.01, 0.01, 0.01).into(),
-                    velocity: (0.0, 0.0, 0.0).into(),
-                };
-
-                transform_component.velocity.x += rng.gen_range(-0.01..0.01);
-                transform_component.velocity.y += rng.gen_range(-0.01..0.01);
-                transform_component.velocity.z += rng.gen_range(-0.01..0.01);
-
-                //let mut mesh_renderer = core::components::renderer::MeshRenderer {
-                //    model: obj_model.clone(),
-                //};
-                scene.add_transform_component(&entity, transform_component);
-                //scene.add_mesh_renderer(&entity, mesh_renderer);
-            }
-        }
+        let mut scenes = Vec::new();
+        scenes.insert(0, Scene::new());
 
         let mut renderer = Renderer::new(window.clone()).await?;
         renderer.init();
@@ -301,29 +274,35 @@ impl State {
 
         Ok(Self {
             window,
-            camera,
-            camera_uniform,
-            camera_controller,
-            instances,
-            scene,
             events: Vec::new(),
+            active_scene_index: Some(0),
+            scenes,
             renderer,
             asset_manager,
-            registered_systems: false,
-            game_data: Box::new(()),
             #[cfg(feature = "renderdoc")]
             renderdoc,
             #[cfg(not(feature = "renderdoc"))]
             renderdoc: (),
             capture_next_frame: false,
             frame_index: 0,
+            registered_systems: false,
         })
+    }
+
+    pub fn active_scene(&self) -> Option<&ecs::scene::Scene> {
+        self.active_scene_index
+            .and_then(|i| self.scenes.get(i as usize))
+    }
+
+    pub fn active_scene_mut(&mut self) -> Option<&mut ecs::scene::Scene> {
+        self.active_scene_index
+            .and_then(|i| self.scenes.get_mut(i as usize))
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.renderer.resize(width, height);
-            self.camera.aspect = width as f32 / height as f32;
+            //self.camera.aspect = width as f32 / height as f32;
         }
     }
 
@@ -331,7 +310,7 @@ impl State {
         if code == KeyCode::Escape && is_pressed {
             event_loop.exit();
         } else {
-            self.camera_controller.handle_key(code, is_pressed);
+            //self.camera_controller.handle_key(code, is_pressed);
         }
 
         #[cfg(feature = "renderdoc")]
@@ -345,20 +324,23 @@ impl State {
 
     fn handle_mouse_click(&mut self, button: MouseButton, is_pressed: bool) {
         if button == MouseButton::Right {
-            self.camera_controller.handle_mouse_click(is_pressed);
+            //self.camera_controller.handle_mouse_click(is_pressed);
         }
     }
 
     fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
-        self.camera_controller.handle_mouse_scroll(delta);
+        //self.camera_controller.handle_mouse_scroll(delta);
     }
 
     fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera);
-        self.renderer.render_resources.insert(renderer::CameraData {
-            uniform: self.camera_uniform,
-        });
+        if let Some(scene) = self.active_scene_mut() {
+            scene.update();
+        }
+        //self.camera_controller.update_camera(&mut self.camera);
+        //self.camera_uniform.update_view_proj(&self.camera);
+        //self.renderer.render_resources.insert(renderer::CameraData {
+        //    uniform: self.camera_uniform,
+        //});
     }
 }
 
@@ -583,20 +565,20 @@ impl ApplicationHandler<State> for App {
     ) {
         if let Some(state) = &mut self.state {
             if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-                if state.camera_controller.is_right_click_pressed {
-                    state.camera_controller.handle_mouse(dx as f32, dy as f32);
-                    state
-                        .window
-                        .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                        .ok();
-                    state.window.set_cursor_visible(false);
-                } else {
-                    state.window.set_cursor_visible(true);
-                    state
-                        .window
-                        .set_cursor_grab(winit::window::CursorGrabMode::None)
-                        .ok();
-                }
+                //if state.camera_controller.is_right_click_pressed {
+                //    state.camera_controller.handle_mouse(dx as f32, dy as f32);
+                //    state
+                //        .window
+                //        .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                //        .ok();
+                //    state.window.set_cursor_visible(false);
+                //} else {
+                //    state.window.set_cursor_visible(true);
+                //    state
+                //        .window
+                //        .set_cursor_grab(winit::window::CursorGrabMode::None)
+                //        .ok();
+                //}
             }
         }
     }

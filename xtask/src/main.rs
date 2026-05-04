@@ -43,6 +43,8 @@ fn editor() {
         "editor-runner",
         "-p",
         "game-logic",
+        "-p",
+        "editor-logic",
         "--features",
         &features,
     ]);

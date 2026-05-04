@@ -1,4 +1,4 @@
 #[allow(dead_code)]
-pub struct MeshRenderer {
+pub struct MeshRendererComponent {
     pub model: crate::renderer::model::Model,
 }
