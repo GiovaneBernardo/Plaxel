@@ -351,6 +351,10 @@ pub struct App {
     on_register_system: Option<Box<dyn FnMut(&mut State)>>,
     on_update: Option<Box<dyn FnMut(&mut State)>>,
     on_key: Option<Box<dyn FnMut(&mut State, KeyCode, bool)>>,
+    on_resize: Option<Box<dyn FnMut(&mut State, u32, u32)>>,
+    on_mouse_button: Option<Box<dyn FnMut(&mut State, MouseButton, bool)>>,
+    on_mouse_motion: Option<Box<dyn FnMut(&mut State, f64, f64)>>,
+    on_mouse_scroll: Option<Box<dyn FnMut(&mut State, MouseScrollDelta)>>,
     on_render: Option<
         Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>,
     >,
@@ -365,6 +369,10 @@ impl App {
             on_register_system: None,
             on_update: None,
             on_key: None,
+            on_resize: None,
+            on_mouse_button: None,
+            on_mouse_motion: None,
+            on_mouse_scroll: None,
             on_render: None,
             #[cfg(target_arch = "wasm32")]
             proxy,
@@ -383,6 +391,32 @@ impl App {
 
     pub fn with_on_key(mut self, f: impl FnMut(&mut State, KeyCode, bool) + 'static) -> Self {
         self.on_key = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_on_resize(mut self, f: impl FnMut(&mut State, u32, u32) + 'static) -> Self {
+        self.on_resize = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_on_mouse_button(
+        mut self,
+        f: impl FnMut(&mut State, MouseButton, bool) + 'static,
+    ) -> Self {
+        self.on_mouse_button = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_on_mouse_motion(mut self, f: impl FnMut(&mut State, f64, f64) + 'static) -> Self {
+        self.on_mouse_motion = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_on_mouse_scroll(
+        mut self,
+        f: impl FnMut(&mut State, MouseScrollDelta) + 'static,
+    ) -> Self {
+        self.on_mouse_scroll = Some(Box::new(f));
         self
     }
 
@@ -479,7 +513,12 @@ impl ApplicationHandler<State> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                state.resize(size.width, size.height);
+                if let Some(f) = &mut self.on_resize {
+                    f(state, size.width, size.height);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if !state.registered_systems {
                     if let Some(f) = &mut self.on_register_system {
@@ -544,7 +583,12 @@ impl ApplicationHandler<State> for App {
                 device_id,
                 state: key_state,
                 button,
-            } => state.handle_mouse_click(button, key_state.is_pressed()),
+            } => {
+                state.handle_mouse_click(button, key_state.is_pressed());
+                if let Some(f) = &mut self.on_mouse_button {
+                    f(state, button, key_state.is_pressed());
+                }
+            }
 
             WindowEvent::MouseWheel {
                 device_id,
@@ -552,6 +596,9 @@ impl ApplicationHandler<State> for App {
                 phase,
             } => {
                 state.handle_mouse_scroll(delta);
+                if let Some(f) = &mut self.on_mouse_scroll {
+                    f(state, delta);
+                }
             }
             _ => {}
         }
@@ -565,6 +612,9 @@ impl ApplicationHandler<State> for App {
     ) {
         if let Some(state) = &mut self.state {
             if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+                if let Some(f) = &mut self.on_mouse_motion {
+                    f(state, dx, dy);
+                }
                 //if state.camera_controller.is_right_click_pressed {
                 //    state.camera_controller.handle_mouse(dx as f32, dy as f32);
                 //    state

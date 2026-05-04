@@ -8,7 +8,7 @@ use engine_dylib;
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
 )]
 mod game {
-    use engine::KeyCode;
+    use engine::{KeyCode, MouseButton, MouseScrollDelta};
     hot_functions_from_file!("game/logic/src/lib.rs");
 }
 
@@ -62,6 +62,34 @@ fn main() {
 
             #[cfg(not(feature = "hot-reload"))]
             game_logic::handle_key_press(state, code, pressed);
+        })
+        .with_on_resize(|state, width, height| {
+            #[cfg(feature = "hot-reload")]
+            game::handle_resize(state, width, height);
+
+            #[cfg(not(feature = "hot-reload"))]
+            game_logic::handle_resize(state, width, height);
+        })
+        .with_on_mouse_button(|state, button, pressed| {
+            #[cfg(feature = "hot-reload")]
+            game::handle_mouse_button(state, button, pressed);
+
+            #[cfg(not(feature = "hot-reload"))]
+            game_logic::handle_mouse_button(state, button, pressed);
+        })
+        .with_on_mouse_motion(|state, dx, dy| {
+            #[cfg(feature = "hot-reload")]
+            game::handle_mouse_motion(state, dx, dy);
+
+            #[cfg(not(feature = "hot-reload"))]
+            game_logic::handle_mouse_motion(state, dx, dy);
+        })
+        .with_on_mouse_scroll(|state, delta| {
+            #[cfg(feature = "hot-reload")]
+            game::handle_mouse_scroll(state, delta);
+
+            #[cfg(not(feature = "hot-reload"))]
+            game_logic::handle_mouse_scroll(state, delta);
         });
 
     event_loop.run_app(&mut app).unwrap();

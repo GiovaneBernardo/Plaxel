@@ -1,5 +1,6 @@
 use engine::core::components::core::TransformComponent;
 use engine::ecs::query::Query;
+use engine::ecs::world::World;
 #[cfg(feature = "dynamic_linking")]
 #[allow(unused_imports)]
 use engine_dylib;
@@ -12,7 +13,8 @@ use engine::engine_info;
 use engine::model::{ModelVertex, Vertex};
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
-use engine::renderer::{RenderData, RenderNode};
+use engine::renderer::{CameraData, RenderData, RenderNode};
+use engine::renderer::Topology;
 use engine::{KeyCode, model::MeshAsset};
 use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
@@ -20,7 +22,7 @@ use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{Mutex, mpsc};
 use std::{cmp, env};
 
 struct GameState {
@@ -35,6 +37,15 @@ struct GameState {
     solid_material: Material,
     line_material: Material,
     update_octree: bool,
+    debug_nodes: Vec<(Point3<f32>, f32, u32)>,
+    debug_depth: u32,
+    max_depth: u32,
+}
+
+struct GameCamera {
+    camera: engine::camera::Camera,
+    controller: engine::camera::CameraController,
+    uniform: engine::camera::CameraUniform,
 }
 
 #[derive(Clone, Copy)]
@@ -85,25 +96,9 @@ fn spawn_chunk_worker(center: Point3<f32>, size: f32, key: NodeKey, tx: mpsc::Se
 
 struct PlanetWorkerCoord {
     tx: mpsc::Sender<ReadyChunk>,
-    rx: mpsc::Receiver<ReadyChunk>,
-    solid_material: Option<Material>,
+    rx: Mutex<mpsc::Receiver<ReadyChunk>>,
     scheduled: usize,
     completed: usize,
-}
-
-static WORKER_COORD: OnceLock<Mutex<PlanetWorkerCoord>> = OnceLock::new();
-
-fn worker_coord() -> &'static Mutex<PlanetWorkerCoord> {
-    WORKER_COORD.get_or_init(|| {
-        let (tx, rx) = mpsc::channel();
-        Mutex::new(PlanetWorkerCoord {
-            tx,
-            rx,
-            solid_material: None,
-            scheduled: 0,
-            completed: 0,
-        })
-    })
 }
 
 const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
@@ -133,71 +128,88 @@ fn depth_color(depth: u32) -> [f32; 4] {
 
 #[unsafe(no_mangle)]
 pub fn register_systems(state: &mut engine::State) {
+    let size = state.window.inner_size();
+    let aspect = size.width as f32 / size.height.max(1) as f32;
+
+    let mut camera = engine::camera::Camera {
+        position: (0.0, PLANET_SIZE as f32, 2.0).into(),
+        orientation: engine::camera::Camera::look_at(
+            vec3(0.01, -1.0, 0.0).normalize(),
+            vec3(0.0, 0.0, -1.0),
+        ),
+        aspect,
+        fovy: 65.0,
+        znear: 0.1,
+        zfar: 15_000_000.0,
+    };
+    if camera.position.to_vec().magnitude() > PLANET_SIZE as f32 {
+        camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
+    }
+
+    let mut uniform = engine::camera::CameraUniform::new();
+    uniform.update_view_proj(&camera);
+    state
+        .renderer
+        .render_resources
+        .insert(CameraData { uniform });
+
+    let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
+        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
+        .with_cull(CullMode::None);
+
+    let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
+        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
+        .with_topology(Topology::LineList)
+        .with_cull(CullMode::None);
+
+    let camera_layout = state
+        .renderer
+        .render_graph
+        .get_node_mut::<GeometryPassNode>(0)
+        .and_then(|node| node.camera_bind_group_layout)
+        .expect("GeometryPassNode must be compiled before creating planet pipelines");
+
+    state
+        .renderer
+        .renderer_api
+        .create_pipeline(&solid_material, &[camera_layout]);
+    state
+        .renderer
+        .renderer_api
+        .create_pipeline(&line_material, &[camera_layout]);
+
+    let (tx, rx) = mpsc::channel();
     let scene = state.active_scene_mut().unwrap();
+    let world = scene.world_mut();
 
-    scene.update_schedule_mut().add_system(|world, commands| {
-        let mut query = Query::<(&mut TransformComponent,)>::new(world);
-
-        query.for_each(|entity, (transform,)| {
-            transform.position.y += 0.001;
-
-            if transform.position.y > 100.0 {
-                commands.push(move |world| {
-                    world.despawn(entity);
-                });
-            }
-        });
+    world.insert_resource(GameCamera {
+        camera,
+        controller: engine::camera::CameraController::new(0.2),
+        uniform,
     });
-    // if vec3(
-    //     state.camera.position.x,
-    //     state.camera.position.y,
-    //     state.camera.position.z,
-    // )
-    // .magnitude()
-    //     > PLANET_SIZE as f32
-    // {
-    //     state.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
-    //     // Look down at the planet center, slight forward tilt so +Z isn't degenerate.
-    //     state.camera.orientation = engine::camera::Camera::look_at(
-    //         vec3(0.01, -1.0, 0.0).normalize(),
-    //         vec3(0.0, 0.0, -1.0),
-    //     );
-    // }
 
-    // let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
-    //     .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-    //     .with_cull(CullMode::None);
+    world.insert_resource(GameState {
+        previous_leaves: HashMap::new(),
+        current_meshes: HashMap::new(),
+        in_flight: HashSet::new(),
+        empty_chunks: HashSet::new(),
+        solid_material,
+        line_material,
+        update_octree: true,
+        debug_nodes: Vec::new(),
+        debug_depth: 0,
+        max_depth: 0,
+    });
 
-    // let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
-    //     .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-    //     .with_topology(engine::renderer::Topology::LineList)
-    //     .with_cull(CullMode::None);
+    world.insert_resource(PlanetWorkerCoord {
+        tx,
+        rx: Mutex::new(rx),
+        scheduled: 0,
+        completed: 0,
+    });
 
-    // let camera_layout = state
-    //     .renderer
-    //     .render_graph
-    //     .get_node_mut::<GeometryPassNode>(0)
-    //     .and_then(|node| node.camera_bind_group_layout)
-    //     .expect("GeometryPassNode must be compiled before creating pipelines");
-
-    // state
-    //     .renderer
-    //     .renderer_api
-    //     .create_pipeline(&solid_material, &[camera_layout]);
-    // state
-    //     .renderer
-    //     .renderer_api
-    //     .create_pipeline(&line_material, &[camera_layout]);
-
-    // state.game_data = Box::new(GameState {
-    //     previous_leaves: HashMap::new(),
-    //     current_meshes: HashMap::new(),
-    //     in_flight: HashSet::new(),
-    //     empty_chunks: HashSet::new(),
-    //     solid_material,
-    //     line_material,
-    //     update_octree: true,
-    // });
+    scene.update_schedule_mut().add_system(camera_update_system);
+    scene.update_schedule_mut().add_system(planet_lod_system);
 }
 
 #[unsafe(no_mangle)]
@@ -205,367 +217,349 @@ pub fn render() {}
 
 #[unsafe(no_mangle)]
 pub fn update(state: &mut engine::State) {
-    // for transform in &mut state.scene.transform_components {
-    //     transform.scale = (0.01, 0.01, 0.01).into();
-    //     transform.position -= transform.velocity;
-    // }
+    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+        return;
+    };
 
-    // {
-    //     let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    //     if !game_state.update_octree {
-    //         return;
-    //     }
-    // }
+    let (renderer, scenes) = (&mut state.renderer, &mut state.scenes);
+    let Some(scene) = scenes.get_mut(scene_index) else {
+        return;
+    };
 
-    // let size = PLANET_SIZE;
-    // let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
-    // let max_depth = octree_max_depth(&octree, 0);
-    // OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
-    // OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
-
-    // let mut octree_nodes = Vec::new();
-    // Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
-
-    // let debug_pass_node: &mut DebugPassNode = state
-    //     .renderer
-    //     .render_graph
-    //     .get_node_mut::<DebugPassNode>(1)
-    //     .unwrap();
-
-    // debug_pass_node.clear_wire_cubes();
-    // debug_pass_node.clear_cubes();
-
-    // let mut current_leaves: HashMap<NodeKey, ChunkInfo> = HashMap::new();
-    // for (center, node_size, node_depth) in &octree_nodes {
-    //     debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
-    //     debug_pass_node.add_cube(
-    //         *center + vec3(0.0, node_size / 2.0, 0.0),
-    //         1.0,
-    //         depth_color(node_depth + 1),
-    //     );
-
-    //     current_leaves.insert(
-    //         NodeKey {
-    //             x: center.x as i32,
-    //             y: center.y as i32,
-    //             z: center.z as i32,
-    //             size: *node_size as i32,
-    //         },
-    //         ChunkInfo {
-    //             center: *center,
-    //             size: *node_size,
-    //         },
-    //     );
-    // }
-
-    // let tx_template = {
-    //     let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    //     let mut coord = worker_coord().lock().unwrap();
-    //     if coord.solid_material.is_none() {
-    //         coord.solid_material = Some(game_state.solid_material.clone());
-    //     }
-    //     coord.tx.clone()
-    // };
-
-    // // Step 1: prune in_flight keys that are no longer in the current octree.
-    // {
-    //     let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    //     game_state
-    //         .in_flight
-    //         .retain(|key| current_leaves.contains_key(key));
-    // }
-
-    // // Step 2: drain finished chunks BEFORE pruning current_meshes so results
-    // // that still belong to the current octree survive the retain below.
-    // drain_planet_chunks(state);
-
-    // {
-    //     let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-
-    //     // Step 3: prune the empty-chunk cache to the current octree.
-    //     game_state
-    //         .empty_chunks
-    //         .retain(|key| current_leaves.contains_key(key));
-
-    //     // Defer eviction: keep a stale chunk visible until every current
-    //     // leaf that spatially overlaps it has been processed (mesh uploaded
-    //     // or known-empty). Avoids 1-frame holes during LOD subdivide/merge.
-    //     // Stale chunks with no overlapping leaf (camera panned away) are
-    //     // evicted immediately because the .all() is vacuously true.
-    //     let stale_keys: Vec<NodeKey> = game_state
-    //         .current_meshes
-    //         .keys()
-    //         .filter(|k| !current_leaves.contains_key(k))
-    //         .copied()
-    //         .collect();
-    //     for stale_key in stale_keys {
-    //         let s_half = stale_key.size as f32 * 0.5;
-    //         let s_cx = stale_key.x as f32;
-    //         let s_cy = stale_key.y as f32;
-    //         let s_cz = stale_key.z as f32;
-    //         let all_covered = current_leaves.iter().all(|(leaf_key, info)| {
-    //             let max_d = info.size * 0.5 + s_half;
-    //             let overlaps = (info.center.x - s_cx).abs() < max_d
-    //                 && (info.center.y - s_cy).abs() < max_d
-    //                 && (info.center.z - s_cz).abs() < max_d;
-    //             if !overlaps {
-    //                 return true;
-    //             }
-    //             game_state.current_meshes.contains_key(leaf_key)
-    //                 || game_state.empty_chunks.contains(leaf_key)
-    //         });
-    //         if all_covered {
-    //             game_state.current_meshes.remove(&stale_key);
-    //         }
-    //     }
-
-    //     // Step 4: schedule workers only for keys that are truly missing.
-    //     for (key, info) in &current_leaves {
-    //         if game_state.current_meshes.contains_key(key)
-    //             || game_state.in_flight.contains(key)
-    //             || game_state.empty_chunks.contains(key)
-    //         {
-    //             continue;
-    //         }
-
-    //         game_state.in_flight.insert(*key);
-    //         worker_coord().lock().unwrap().scheduled += 1;
-    //         spawn_chunk_worker(info.center, info.size, *key, tx_template.clone());
-    //     }
-
-    //     // Snapshot for next frame's diff.
-    //     game_state.previous_leaves.clear();
-    //     for (key, info) in &current_leaves {
-    //         game_state.previous_leaves.insert(*key, *info);
-    //     }
-    // }
-
-    // // Rebuild the geometry pass from the authoritative current_meshes map.
-    // let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    // if let Some(node) = state
-    //     .renderer
-    //     .render_graph
-    //     .nodes
-    //     .first_mut()
-    //     .unwrap()
-    //     .1
-    //     .as_any_mut()
-    //     .downcast_mut::<GeometryPassNode>()
-    // {
-    //     node.clear_render_data();
-    //     for render_data in game_state.current_meshes.values() {
-    //         node.add_render_data(render_data.clone());
-    //     }
-    // }
-
-    // state.frame_index += 1;
-
-    // let coord = worker_coord().lock().unwrap();
-    // println!(
-    //     "planet chunks: {} / {} uploaded | in_flight: {} | empty: {}",
-    //     coord.completed,
-    //     coord.scheduled,
-    //     state
-    //         .game_data
-    //         .downcast_ref::<GameState>()
-    //         .unwrap()
-    //         .in_flight
-    //         .len(),
-    //     state
-    //         .game_data
-    //         .downcast_ref::<GameState>()
-    //         .unwrap()
-    //         .empty_chunks
-    //         .len(),
-    // );
+    sync_camera_to_renderer(renderer, scene.world());
+    drain_planet_chunks(renderer, scene.world_mut());
+    sync_planet_debug(renderer, scene.world());
+    sync_planet_geometry(renderer, scene.world());
+    state.frame_index += 1;
 }
 
-fn drain_planet_chunks(state: &mut engine::State) {
-    // let start = std::time::Instant::now();
-    // let coord_mutex = worker_coord();
+fn camera_update_system(world: &mut World, _commands: &mut engine::ecs::commands::Commands) {
+    let Some(mut camera) = world.get_resource_mut::<GameCamera>() else {
+        return;
+    };
 
-    // let material = {
-    //     let coord = coord_mutex.lock().unwrap();
-    //     match &coord.solid_material {
-    //         Some(m) => m.clone(),
-    //         None => return,
-    //     }
-    // };
+    let mut controller = std::mem::replace(
+        &mut camera.controller,
+        engine::camera::CameraController::new(0.2),
+    );
+    controller.update_camera(&mut camera.camera);
+    camera.controller = controller;
+    let camera_copy = engine::camera::Camera {
+        position: camera.camera.position,
+        orientation: camera.camera.orientation,
+        aspect: camera.camera.aspect,
+        fovy: camera.camera.fovy,
+        znear: camera.camera.znear,
+        zfar: camera.camera.zfar,
+    };
+    camera.uniform.update_view_proj(&camera_copy);
+}
 
-    // let mut uploaded = 0usize;
-    // loop {
-    //     if start.elapsed() >= UPLOAD_BUDGET {
-    //         break;
-    //     }
+fn planet_lod_system(world: &mut World, _commands: &mut engine::ecs::commands::Commands) {
+    let camera_pos = {
+        let Some(camera) = world.get_resource::<GameCamera>() else {
+            return;
+        };
+        camera.camera.position
+    };
 
-    //     let chunk = {
-    //         let coord = coord_mutex.lock().unwrap();
-    //         match coord.rx.try_recv() {
-    //             Ok(c) => c,
-    //             Err(_) => break,
-    //         }
-    //     };
+    let tx = {
+        let Some(workers) = world.get_resource::<PlanetWorkerCoord>() else {
+            return;
+        };
+        workers.tx.clone()
+    };
 
-    //     let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    //     game_state.in_flight.remove(&chunk.key);
+    let Some(mut game_state) = world.get_resource_mut::<GameState>() else {
+        return;
+    };
 
-    //     if chunk.vertices.is_empty() {
-    //         // Remember this key produces no geometry so the scheduler never
-    //         // re-spawns a worker for it every frame.
-    //         game_state.empty_chunks.insert(chunk.key); // <-- THE key fix
-    //         continue;
-    //     }
+    if !game_state.update_octree {
+        return;
+    }
 
-    //     let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
-    //     let render_data = state.renderer.renderer_api.create_render_data(
-    //         &vertex_bytes,
-    //         &chunk.indices,
-    //         material.clone(),
-    //         &PipelineHandle(0),
-    //     );
-    //     state
-    //         .game_data
-    //         .downcast_mut::<GameState>()
-    //         .unwrap()
-    //         .current_meshes
-    //         .insert(chunk.key, render_data);
-    //     uploaded += 1;
-    // }
+    let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
+    game_state.max_depth = octree_max_depth(&octree, 0);
 
-    // if uploaded > 0 {
-    //     let mut coord = coord_mutex.lock().unwrap();
-    //     coord.completed += uploaded;
-    //     println!(
-    //         "planet chunks: {} / {} uploaded ({} this frame, {:?})",
-    //         coord.completed,
-    //         coord.scheduled,
-    //         uploaded,
-    //         start.elapsed()
-    //     );
-    // }
+    let mut octree_nodes = Vec::new();
+    Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
+    game_state.debug_nodes = octree_nodes.clone();
+
+    let mut current_leaves: HashMap<NodeKey, ChunkInfo> = HashMap::new();
+    for (center, node_size, _) in &octree_nodes {
+        current_leaves.insert(
+            NodeKey {
+                x: center.x as i32,
+                y: center.y as i32,
+                z: center.z as i32,
+                size: *node_size as i32,
+            },
+            ChunkInfo {
+                center: *center,
+                size: *node_size,
+            },
+        );
+    }
+
+    game_state
+        .in_flight
+        .retain(|key| current_leaves.contains_key(key));
+    game_state
+        .empty_chunks
+        .retain(|key| current_leaves.contains_key(key));
+
+    let stale_keys: Vec<NodeKey> = game_state
+        .current_meshes
+        .keys()
+        .filter(|key| !current_leaves.contains_key(key))
+        .copied()
+        .collect();
+
+    for stale_key in stale_keys {
+        let stale_half = stale_key.size as f32 * 0.5;
+        let stale_center = Point3::new(stale_key.x as f32, stale_key.y as f32, stale_key.z as f32);
+        let all_covered = current_leaves.iter().all(|(leaf_key, info)| {
+            let max_distance = info.size * 0.5 + stale_half;
+            let overlaps = (info.center.x - stale_center.x).abs() < max_distance
+                && (info.center.y - stale_center.y).abs() < max_distance
+                && (info.center.z - stale_center.z).abs() < max_distance;
+
+            !overlaps
+                || game_state.current_meshes.contains_key(leaf_key)
+                || game_state.empty_chunks.contains(leaf_key)
+        });
+
+        if all_covered {
+            game_state.current_meshes.remove(&stale_key);
+        }
+    }
+
+    let mut scheduled = 0usize;
+    for (key, info) in &current_leaves {
+        if game_state.current_meshes.contains_key(key)
+            || game_state.in_flight.contains(key)
+            || game_state.empty_chunks.contains(key)
+        {
+            continue;
+        }
+
+        game_state.in_flight.insert(*key);
+        spawn_chunk_worker(info.center, info.size, *key, tx.clone());
+        scheduled += 1;
+    }
+
+    game_state.previous_leaves.clear();
+    for (key, info) in &current_leaves {
+        game_state.previous_leaves.insert(*key, *info);
+    }
+
+    drop(game_state);
+    if scheduled > 0 {
+        if let Some(mut workers) = world.get_resource_mut::<PlanetWorkerCoord>() {
+            workers.scheduled += scheduled;
+        }
+    }
+}
+
+fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &World) {
+    let Some(camera) = world.get_resource::<GameCamera>() else {
+        return;
+    };
+
+    renderer
+        .render_resources
+        .insert(CameraData { uniform: camera.uniform });
+}
+
+fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut World) {
+    let start = std::time::Instant::now();
+    let Some(mut game_state) = world.get_resource_mut::<GameState>() else {
+        return;
+    };
+    let Some(mut workers) = world.get_resource_mut::<PlanetWorkerCoord>() else {
+        return;
+    };
+
+    let mut uploaded = 0usize;
+    loop {
+        if start.elapsed() >= UPLOAD_BUDGET {
+            break;
+        }
+
+        let chunk = {
+            let rx = workers.rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(chunk) => chunk,
+                Err(_) => break,
+            }
+        };
+
+        game_state.in_flight.remove(&chunk.key);
+
+        if chunk.vertices.is_empty() {
+            game_state.empty_chunks.insert(chunk.key);
+            continue;
+        }
+
+        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
+        let render_data = renderer.renderer_api.create_render_data(
+            &vertex_bytes,
+            &chunk.indices,
+            game_state.solid_material.clone(),
+            &PipelineHandle(0),
+        );
+        game_state.current_meshes.insert(chunk.key, render_data);
+        uploaded += 1;
+    }
+
+    workers.completed += uploaded;
+}
+
+fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
+    let Some(game_state) = world.get_resource::<GameState>() else {
+        return;
+    };
+    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(1) else {
+        return;
+    };
+
+    debug_pass_node.clear_wire_cubes();
+    debug_pass_node.clear_cubes();
+
+    for (center, size, depth) in &game_state.debug_nodes {
+        debug_pass_node.add_wire_cube(*center, *size, depth_color(*depth));
+        debug_pass_node.add_cube(
+            *center + vec3(0.0, size / 2.0, 0.0),
+            1.0,
+            depth_color(depth + 1),
+        );
+    }
+}
+
+fn sync_planet_geometry(renderer: &mut engine::renderer::Renderer, world: &World) {
+    let Some(game_state) = world.get_resource::<GameState>() else {
+        return;
+    };
+    let Some(geometry_node) = renderer.render_graph.get_node_mut::<GeometryPassNode>(0) else {
+        return;
+    };
+
+    geometry_node.clear_render_data();
+    for render_data in game_state.current_meshes.values() {
+        geometry_node.add_render_data(render_data.clone());
+    }
 }
 
 #[unsafe(no_mangle)]
 pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
-    //let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    //
-    //if key_code == KeyCode::KeyU && pressed {
-    //    for i in 0..cmp::min(state.scene.transform_components.len(), 3) {
-    //        state.scene.transform_components[i].position.y += 0.1;
-    //    }
-    //}
-    //
-    //if key_code == KeyCode::KeyK && pressed {
-    //    game_state.update_octree = !game_state.update_octree;
-    //}
-    //
-    //if key_code == KeyCode::F9 && pressed {
-    //    let camera_layout = state
-    //        .renderer
-    //        .render_graph
-    //        .get_node_mut::<GeometryPassNode>(0)
-    //        .and_then(|node| node.camera_bind_group_layout)
-    //        .expect("GeometryPassNode must be compiled before creating pipelines");
-    //
-    //    game_state.solid_material.pipeline_descriptor.topology =
-    //        engine::renderer::Topology::LineList;
-    //
-    //    state
-    //        .renderer
-    //        .renderer_api
-    //        .update_pipeline(&game_state.solid_material, &[camera_layout]);
-    //}
-    //
-    //if key_code == KeyCode::F10 && pressed {
-    //    let camera_layout = state
-    //        .renderer
-    //        .render_graph
-    //        .get_node_mut::<GeometryPassNode>(0)
-    //        .and_then(|node| node.camera_bind_group_layout)
-    //        .expect("GeometryPassNode must be compiled before creating pipelines");
-    //
-    //    game_state.solid_material.pipeline_descriptor.topology =
-    //        engine::renderer::Topology::TriangleList;
-    //
-    //    state
-    //        .renderer
-    //        .renderer_api
-    //        .update_pipeline(&game_state.solid_material, &[camera_layout]);
-    //}
-    //
-    //if key_code == KeyCode::KeyL && pressed {
-    //    if let Some(node) = state
-    //        .renderer
-    //        .render_graph
-    //        .nodes
-    //        .first_mut()
-    //        .unwrap()
-    //        .1
-    //        .as_any_mut()
-    //        .downcast_mut::<GeometryPassNode>()
-    //    {
-    //        node.clear_render_data();
-    //    }
-    //}
-    //
-    //if key_code == KeyCode::BracketLeft && pressed {
-    //    let max = OCTREE_MAX_DEPTH.load(Ordering::Relaxed);
-    //    let old = OCTREE_DEBUG_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
-    //        if d < max { Some(d + 1) } else { None }
-    //    });
-    //    if old.is_ok() {
-    //        rebuild_octree_debug(state);
-    //    }
-    //}
-    //
-    //if key_code == KeyCode::PageUp && pressed {
-    //    state.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
-    //}
-    //if key_code == KeyCode::PageDown && pressed {
-    //    state.camera.position = cgmath::point3(0.0, 0.0, 0.0);
-    //}
-    //
-    //if key_code == KeyCode::KeyJ && pressed {
-    //    let debug_pass_node: &mut DebugPassNode = state
-    //        .renderer
-    //        .render_graph
-    //        .get_node_mut::<DebugPassNode>(1)
-    //        .unwrap();
-    //
-    //    if debug_pass_node.wire_cubes.len() > 0 {
-    //        debug_pass_node.clear_wire_cubes();
-    //        debug_pass_node.clear_cubes();
-    //        return;
-    //    }
-    //
-    //    let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &state.camera.position);
-    //    let mut octree_nodes = Vec::new();
-    //    Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
-    //    println!("Leaf nodes: {}", octree_nodes.len());
-    //    for (center, node_size, node_depth) in &octree_nodes {
-    //        debug_pass_node.add_wire_cube(*center, *node_size, depth_color(*node_depth));
-    //        debug_pass_node.add_cube(
-    //            *center + vec3(0.0, node_size / 2.0, 0.0),
-    //            1.0,
-    //            depth_color(node_depth + 1),
-    //        );
-    //    }
-    //}
-    //
-    //if key_code == KeyCode::BracketRight && pressed {
-    //    let old = OCTREE_DEBUG_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
-    //        if d > 0 { Some(d - 1) } else { None }
-    //    });
-    //    if old.is_ok() {
-    //        rebuild_octree_debug(state);
-    //    }
-    //}
-    //
-    //if key_code == KeyCode::KeyT && pressed {}
-    //
-    //if key_code == KeyCode::KeyO && pressed {
-    //    schedule_planet_generation(state);
-    //}
+    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+        return;
+    };
+    let Some(scene) = state.scenes.get_mut(scene_index) else {
+        return;
+    };
+    let world = scene.world_mut();
+
+    if let Some(mut camera) = world.get_resource_mut::<GameCamera>() {
+        camera.controller.handle_key(key_code, pressed);
+
+        if pressed && key_code == KeyCode::PageUp {
+            camera.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
+        }
+        if pressed && key_code == KeyCode::PageDown {
+            camera.camera.position = cgmath::point3(0.0, 0.0, 0.0);
+        }
+    }
+
+    if let Some(mut game_state) = world.get_resource_mut::<GameState>() {
+        if pressed && key_code == KeyCode::KeyK {
+            game_state.update_octree = !game_state.update_octree;
+        }
+
+        if pressed && key_code == KeyCode::KeyL {
+            game_state.current_meshes.clear();
+            game_state.in_flight.clear();
+            game_state.empty_chunks.clear();
+        }
+
+        if pressed && key_code == KeyCode::BracketLeft {
+            game_state.debug_depth = (game_state.debug_depth + 1).min(game_state.max_depth);
+        }
+        if pressed && key_code == KeyCode::BracketRight {
+            game_state.debug_depth = game_state.debug_depth.saturating_sub(1);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub fn handle_mouse_button(state: &mut engine::State, button: engine::MouseButton, pressed: bool) {
+    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+        return;
+    };
+    let Some(scene) = state.scenes.get_mut(scene_index) else {
+        return;
+    };
+
+    if button == engine::MouseButton::Right {
+        if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
+            camera.controller.handle_mouse_click(pressed);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub fn handle_mouse_motion(state: &mut engine::State, dx: f64, dy: f64) {
+    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+        return;
+    };
+    let Some(scene) = state.scenes.get_mut(scene_index) else {
+        return;
+    };
+
+    if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
+        camera.controller.handle_mouse(dx as f32, dy as f32);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub fn handle_mouse_scroll(state: &mut engine::State, delta: engine::MouseScrollDelta) {
+    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+        return;
+    };
+    let Some(scene) = state.scenes.get_mut(scene_index) else {
+        return;
+    };
+
+    if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
+        camera.controller.handle_mouse_scroll(delta);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub fn handle_resize(state: &mut engine::State, width: u32, height: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+        return;
+    };
+    let Some(scene) = state.scenes.get_mut(scene_index) else {
+        return;
+    };
+
+    if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
+        camera.camera.aspect = width as f32 / height as f32;
+        let camera_copy = engine::camera::Camera {
+            position: camera.camera.position,
+            orientation: camera.camera.orientation,
+            aspect: camera.camera.aspect,
+            fovy: camera.camera.fovy,
+            znear: camera.camera.znear,
+            zfar: camera.camera.zfar,
+        };
+        camera.uniform.update_view_proj(&camera_copy);
+    }
 }
 
 fn schedule_planet_generation(state: &mut engine::State) {
