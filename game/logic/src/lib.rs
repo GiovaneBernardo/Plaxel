@@ -11,10 +11,10 @@ use engine::assets;
 use engine::assets::material::Material;
 use engine::engine_info;
 use engine::model::{ModelVertex, Vertex};
+use engine::renderer::Topology;
+use engine::renderer::{CameraData, RenderData, RenderNode};
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
-use engine::renderer::{CameraData, RenderData, RenderNode};
-use engine::renderer::Topology;
 use engine::{KeyCode, model::MeshAsset};
 use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
@@ -27,6 +27,7 @@ use std::{cmp, env};
 
 struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
+    current_leaves: HashMap<NodeKey, ChunkInfo>,
     current_meshes: HashMap<NodeKey, RenderData>,
     in_flight: HashSet<NodeKey>,
     // Keys whose worker finished but produced zero vertices. Remembered so
@@ -40,6 +41,10 @@ struct GameState {
     debug_nodes: Vec<(Point3<f32>, f32, u32)>,
     debug_depth: u32,
     max_depth: u32,
+    octree_job_in_flight: bool,
+    last_requested_camera_pos: Point3<f32>,
+    octree_tx: mpsc::Sender<OctreeBuildResult>,
+    octree_rx: Mutex<mpsc::Receiver<OctreeBuildResult>>,
 }
 
 struct GameCamera {
@@ -74,6 +79,26 @@ struct ReadyChunk {
     key: NodeKey,
     vertices: Vec<PlanetVertex>,
     indices: Vec<u32>,
+}
+
+struct OctreeBuildResult {
+    camera_pos: Point3<f32>,
+    max_depth: u32,
+    leaves: Vec<(Point3<f32>, f32, u32)>,
+}
+
+fn spawn_octree_worker(camera_pos: Point3<f32>, tx: mpsc::Sender<OctreeBuildResult>) {
+    rayon::spawn(move || {
+        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
+        let max_depth = octree_max_depth(&octree, 0);
+        let mut leaves = Vec::new();
+        Planet::collect_leaf_nodes(&octree, 0, &mut leaves);
+        let _ = tx.send(OctreeBuildResult {
+            camera_pos,
+            max_depth,
+            leaves,
+        });
+    });
 }
 
 fn spawn_chunk_worker(center: Point3<f32>, size: f32, key: NodeKey, tx: mpsc::Sender<ReadyChunk>) {
@@ -148,6 +173,7 @@ pub fn register_systems(state: &mut engine::State) {
 
     let mut uniform = engine::camera::CameraUniform::new();
     uniform.update_view_proj(&camera);
+    let initial_camera_pos = camera.position;
     state
         .renderer
         .render_resources
@@ -178,7 +204,8 @@ pub fn register_systems(state: &mut engine::State) {
         .renderer_api
         .create_pipeline(&line_material, &[camera_layout]);
 
-    let (tx, rx) = mpsc::channel();
+    let (chunk_tx, chunk_rx) = mpsc::channel();
+    let (octree_tx, octree_rx) = mpsc::channel();
     let scene = state.active_scene_mut().unwrap();
     let world = scene.world_mut();
 
@@ -190,6 +217,7 @@ pub fn register_systems(state: &mut engine::State) {
 
     world.insert_resource(GameState {
         previous_leaves: HashMap::new(),
+        current_leaves: HashMap::new(),
         current_meshes: HashMap::new(),
         in_flight: HashSet::new(),
         empty_chunks: HashSet::new(),
@@ -199,11 +227,15 @@ pub fn register_systems(state: &mut engine::State) {
         debug_nodes: Vec::new(),
         debug_depth: 0,
         max_depth: 0,
+        octree_job_in_flight: false,
+        last_requested_camera_pos: initial_camera_pos,
+        octree_tx,
+        octree_rx: Mutex::new(octree_rx),
     });
 
     world.insert_resource(PlanetWorkerCoord {
-        tx,
-        rx: Mutex::new(rx),
+        tx: chunk_tx,
+        rx: Mutex::new(chunk_rx),
         scheduled: 0,
         completed: 0,
     });
@@ -255,6 +287,16 @@ fn camera_update_system(world: &mut World, _commands: &mut engine::ecs::commands
     camera.uniform.update_view_proj(&camera_copy);
 }
 
+fn should_request_octree_rebuild(game_state: &GameState, camera_pos: Point3<f32>) -> bool {
+    if game_state.current_leaves.is_empty() {
+        return true;
+    }
+
+    let distance = (camera_pos - game_state.last_requested_camera_pos).magnitude();
+    let threshold = CHUNK_SIZE as f32 * 8.0;
+    distance >= threshold
+}
+
 fn planet_lod_system(world: &mut World, _commands: &mut engine::ecs::commands::Commands) {
     let camera_pos = {
         let Some(camera) = world.get_resource::<GameCamera>() else {
@@ -278,27 +320,47 @@ fn planet_lod_system(world: &mut World, _commands: &mut engine::ecs::commands::C
         return;
     }
 
-    let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
-    game_state.max_depth = octree_max_depth(&octree, 0);
+    let mut latest_octree = None;
+    {
+        let rx = game_state.octree_rx.lock().unwrap();
+        while let Ok(result) = rx.try_recv() {
+            latest_octree = Some(result);
+        }
+    }
 
-    let mut octree_nodes = Vec::new();
-    Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
-    game_state.debug_nodes = octree_nodes.clone();
+    if let Some(result) = latest_octree {
+        let mut current_leaves = HashMap::new();
+        for (center, node_size, _) in &result.leaves {
+            current_leaves.insert(
+                NodeKey {
+                    x: center.x as i32,
+                    y: center.y as i32,
+                    z: center.z as i32,
+                    size: *node_size as i32,
+                },
+                ChunkInfo {
+                    center: *center,
+                    size: *node_size,
+                },
+            );
+        }
 
-    let mut current_leaves: HashMap<NodeKey, ChunkInfo> = HashMap::new();
-    for (center, node_size, _) in &octree_nodes {
-        current_leaves.insert(
-            NodeKey {
-                x: center.x as i32,
-                y: center.y as i32,
-                z: center.z as i32,
-                size: *node_size as i32,
-            },
-            ChunkInfo {
-                center: *center,
-                size: *node_size,
-            },
-        );
+        game_state.octree_job_in_flight = false;
+        game_state.last_requested_camera_pos = result.camera_pos;
+        game_state.max_depth = result.max_depth;
+        game_state.debug_nodes = result.leaves;
+        game_state.current_leaves = current_leaves;
+    }
+
+    if !game_state.octree_job_in_flight && should_request_octree_rebuild(&game_state, camera_pos) {
+        game_state.octree_job_in_flight = true;
+        game_state.last_requested_camera_pos = camera_pos;
+        spawn_octree_worker(camera_pos, game_state.octree_tx.clone());
+    }
+
+    let current_leaves = game_state.current_leaves.clone();
+    if current_leaves.is_empty() {
+        return;
     }
 
     game_state
@@ -366,9 +428,9 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
         return;
     };
 
-    renderer
-        .render_resources
-        .insert(CameraData { uniform: camera.uniform });
+    renderer.render_resources.insert(CameraData {
+        uniform: camera.uniform,
+    });
 }
 
 fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut World) {
@@ -477,9 +539,13 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
         }
 
         if pressed && key_code == KeyCode::KeyL {
+            game_state.previous_leaves.clear();
+            game_state.current_leaves.clear();
             game_state.current_meshes.clear();
             game_state.in_flight.clear();
             game_state.empty_chunks.clear();
+            game_state.debug_nodes.clear();
+            game_state.octree_job_in_flight = false;
         }
 
         if pressed && key_code == KeyCode::BracketLeft {
