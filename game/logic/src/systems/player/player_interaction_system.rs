@@ -1,3 +1,5 @@
+use rand::Rng;
+
 use cgmath::Vector3;
 use engine::core::input::{InputState, KeyCode};
 use engine::ecs::commands::Commands;
@@ -71,10 +73,16 @@ pub fn player_interaction_system(world: &mut World, commands: &mut Commands) {
                 println!("Pressionando T :D ");
             }
             if input_map.just_pressed(&input, Action::Interact) {
+                let mut rng = rand::thread_rng();
+
                 commands.spawn_physical_sphere(PhysicalSphereParams {
                     mass: 50.0,
-                    position: cgmath::vec3(0.0, 0.0, 0.0),
-                    radius: 1.0,
+                    position: cgmath::vec3(
+                        rng.gen_range(-5.0..5.0),
+                        rng.gen_range(0.5..5.0),
+                        rng.gen_range(-5.0..5.0),
+                    ),
+                    radius: 0.5,
                 });
             }
 

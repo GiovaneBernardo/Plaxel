@@ -590,7 +590,49 @@ impl RenderGraph {
         };
 
         let cube_mesh = renderer_api.upload_mesh(&mesh);
-        let sphere_mesh = cube_mesh;
+
+        let sphere_latitudes = 12u32;
+        let sphere_longitudes = 24u32;
+        let mut sphere_positions: Vec<[f32; 3]> = Vec::new();
+        let mut sphere_indices: Vec<u32> = Vec::new();
+
+        for lat in 0..=sphere_latitudes {
+            let theta = std::f32::consts::PI * lat as f32 / sphere_latitudes as f32;
+            let y = theta.cos() * 0.5;
+            let ring_radius = theta.sin() * 0.5;
+
+            for lon in 0..=sphere_longitudes {
+                let phi = std::f32::consts::TAU * lon as f32 / sphere_longitudes as f32;
+                sphere_positions.push([ring_radius * phi.cos(), y, ring_radius * phi.sin()]);
+            }
+        }
+
+        for lat in 0..sphere_latitudes {
+            for lon in 0..sphere_longitudes {
+                let row = sphere_longitudes + 1;
+                let i0 = lat * row + lon;
+                let i1 = i0 + 1;
+                let i2 = i0 + row;
+                let i3 = i2 + 1;
+
+                sphere_indices.extend_from_slice(&[i0, i2, i1]);
+                sphere_indices.extend_from_slice(&[i1, i2, i3]);
+            }
+        }
+
+        let sphere_vertex_bytes: Vec<u8> = bytemuck::cast_slice(&sphere_positions).to_vec();
+        let sphere_asset = MeshAsset {
+            name: "DebugSphere".to_string(),
+            uuid: Uuid::new_v4(),
+            vertices: sphere_vertex_bytes,
+            indices: bytemuck::cast_slice(&sphere_indices).to_vec(),
+            vertex_layout: VertexLayout {
+                stride: std::mem::size_of::<[f32; 3]>() as u64,
+                step_mode: model::StepMode::Vertex,
+                attributes: Vec::new(),
+            },
+        };
+        let sphere_mesh = renderer_api.upload_mesh(&sphere_asset);
 
         // Wire cube mesh (same vertices, line-list indices for 12 edges)
         let wire_indices: Vec<u32> = vec![

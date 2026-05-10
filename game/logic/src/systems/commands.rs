@@ -49,9 +49,9 @@ impl GameCommandsExt for Commands {
                 return;
             };
 
-            physics.add_cuboid_collider(100.0, -0.5, 100.0);
+            physics.add_cuboid_collider(100.0, 0.1, 100.0);
 
-            let ball_rigid_body_handle = physics.add_rigid_body_dynamic(&vec3(0.0, 10.0, 0.0));
+            let ball_rigid_body_handle = physics.add_rigid_body_dynamic(&params.position);
             physics.add_sphere_collider(params.radius, Some(ball_rigid_body_handle));
         });
     }

@@ -313,6 +313,10 @@ impl DebugPassNode {
         self.cubes.clear();
     }
 
+    pub fn clear_spheres(&mut self) {
+        self.sphere_positions.clear();
+    }
+
     pub fn add_sphere(&mut self, position: cgmath::Point3<f32>) {
         self.sphere_positions.push(position);
     }

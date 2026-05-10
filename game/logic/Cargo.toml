@@ -18,6 +18,7 @@ wgpu = { workspace = true }
 pollster = { workspace = true }
 libloading = { workspace = true }
 renderdoc = { workspace = true }
+rand = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

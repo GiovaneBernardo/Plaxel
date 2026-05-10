@@ -10,6 +10,7 @@ use cgmath::{self, Array, EuclideanSpace, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
 use engine::assets;
 use engine::assets::material::Material;
+use engine::core::physics::physics::Physics;
 use engine::engine_info;
 use engine::model::MeshAsset;
 use engine::model::{ModelVertex, Vertex};
@@ -275,6 +276,7 @@ pub fn update(state: &mut engine::State) {
     sync_camera_to_renderer(renderer, scene.world());
     drain_planet_chunks(renderer, scene.world_mut());
     sync_planet_debug(renderer, scene.world());
+    sync_physics_debug(renderer, scene.world());
     sync_planet_geometry(renderer, scene.world());
     state.frame_index += 1;
 }
@@ -509,6 +511,21 @@ fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
             1.0,
             depth_color(depth + 1),
         );
+    }
+}
+
+fn sync_physics_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
+    let Some(physics) = world.get_resource::<Physics>() else {
+        return;
+    };
+    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(1) else {
+        return;
+    };
+
+    debug_pass_node.clear_spheres();
+    for (_, body) in physics.rigid_body_set.iter() {
+        let position = body.translation();
+        debug_pass_node.add_sphere(Point3::new(position.x, position.y, position.z));
     }
 }
 
