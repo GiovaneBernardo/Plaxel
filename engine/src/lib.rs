@@ -1,14 +1,8 @@
-use rand::Rng;
-#[cfg(feature = "renderdoc")]
-use renderdoc::RenderDoc;
-#[cfg(feature = "renderdoc")]
-use renderdoc::V141;
-use std::env;
-use std::ptr;
 use std::sync::Arc;
 
 pub mod assets;
 pub mod core;
+pub mod frame_capturer;
 pub mod logging;
 pub mod renderer;
 
@@ -27,13 +21,19 @@ pub use winit::{
     application::ApplicationHandler,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::PhysicalKey,
     window::Window,
 };
 
 use crate::assets::manager::AssetManager;
 use crate::core::components::core::TransformComponent;
+use crate::core::ecs::world::World;
+use crate::core::input::InputState;
+use crate::core::input::KeyCode;
+use crate::core::physics::physics::Physics;
+use crate::core::time::Time;
 use crate::ecs::scene::Scene;
+use crate::frame_capturer::FrameCapturer;
 use crate::renderer::Renderer;
 
 // This will store the state of our game
@@ -44,14 +44,10 @@ pub struct State {
     pub events: Vec<WindowEvent>,
     pub renderer: renderer::Renderer,
     pub asset_manager: AssetManager,
-    #[cfg(feature = "renderdoc")]
-    pub renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>>,
-    pub capture_next_frame: bool,
+    pub frame_capturer: FrameCapturer,
     pub frame_index: u32,
     pub registered_systems: bool,
-
-    #[cfg(not(feature = "renderdoc"))]
-    pub renderdoc: (),
+    pub input: InputState,
 }
 
 #[repr(C)]
@@ -117,115 +113,12 @@ impl Instance {
 }
 
 impl State {
-    // We don't need this to be async right now,
-    // but we will in the next tutorial
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        // TODO: MOVE TO A FRAME CAPTURER FILE
-        // Notes: This expects the feature renderdoc, requires the renderdoc.dll, renderdoc.json and renderdoc.app files are in the executable directory and requires vulkan.
-        // This is very sensible and not well implemented, in case of any issues, disable renderdoc feature
-        #[cfg(feature = "renderdoc")]
-        unsafe {
-            let dll_loaded = libloading::Library::new("renderdoc.dll").is_ok();
-            let exe_dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-            if dll_loaded && let Some(dir) = exe_dir {
-                let dir_str = dir.to_string_lossy();
-
-                // Enable RenderDoc Vulkan layer
-                env::set_var("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1");
-
-                // Add implicit layer path
-                let existing = env::var("VK_ADD_IMPLICIT_LAYER_PATH").unwrap_or_default();
-
-                let new_path = if existing.is_empty() {
-                    dir_str.to_string()
-                } else {
-                    format!("{};{}", dir_str, existing)
-                };
-
-                env::set_var("VK_ADD_IMPLICIT_LAYER_PATH", new_path);
-            } else {
-                engine_warn!(
-                    "renderdoc.dll not found, ensure renderdoc.dll can be found in the executable directory. Renderdoc is disabled!."
-                );
-            }
-        }
-        #[cfg(feature = "renderdoc")]
-        let mut renderdoc: Option<renderdoc::RenderDoc<renderdoc::V141>> =
-            renderdoc::RenderDoc::new().ok();
-
-        #[cfg(feature = "renderdoc")]
-        if let Some(renderdoc) = renderdoc.as_mut() {
-            use renderdoc::OverlayBits;
-            renderdoc.mask_overlay_bits(OverlayBits::empty(), OverlayBits::empty());
-        }
-
         let size = window.inner_size();
-
-        // The instance is a handle to our GPU
-        // BackendBit::PRIMARY => Vulkan + Metal + DX12 + Browser WebGPU
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            #[cfg(not(target_arch = "wasm32"))]
-            backends: wgpu::Backends::PRIMARY,
-            #[cfg(target_arch = "wasm32")]
-            backends: wgpu::Backends::BROWSER_WEBGPU,
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                // WebGL doesn't support all of wgpu's features, so if
-                // we're building for the web we'll have to disable some.
-                required_limits: if cfg!(target_arch = "wasm32") {
-                    wgpu::Limits::default()
-                } else {
-                    wgpu::Limits::default()
-                },
-                memory_hints: Default::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        // Shader code in this tutorial assumes an sRGB surface texture. Using a different
-        // one will result in all the colors coming out darker. If you want to support non
-        // sRGB surfaces, you'll need to account for that when drawing to the frame.
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
         let camera = camera::Camera {
             position: (0.0, 65536.0, 2.0).into(),
             orientation: cgmath::Quaternion::from_sv(1.0, cgmath::Vector3::new(0.0, 0.0, 0.0)),
-            aspect: config.width as f32 / config.height as f32,
+            aspect: size.width as f32 / size.height as f32,
             fovy: 65.0,
             znear: 0.1,
             zfar: 15000000.0,
@@ -234,38 +127,8 @@ impl State {
         let mut camera_uniform = camera::CameraUniform::new();
         camera_uniform.update_view_proj(&camera);
 
-        let camera_controller = camera::CameraController::new(0.2);
-
-        const NUM_INSTANCES_PER_ROW: u32 = 20;
-        const SPACE_BETWEEN: f32 = 48.0;
-        let instances = (0..NUM_INSTANCES_PER_ROW)
-            .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-
-                    let position = cgmath::Vector3 { x, y: 0.0, z };
-
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                    };
-
-                    Instance {
-                        position,
-                        rotation,
-                        scale: 0.01,
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-
         let mut scenes = Vec::new();
-        scenes.insert(0, Scene::new());
+        scenes.insert(0, Self::create_main_game_scene());
 
         let mut renderer = Renderer::new(window.clone()).await?;
         renderer.init();
@@ -279,13 +142,10 @@ impl State {
             scenes,
             renderer,
             asset_manager,
-            #[cfg(feature = "renderdoc")]
-            renderdoc,
-            #[cfg(not(feature = "renderdoc"))]
-            renderdoc: (),
-            capture_next_frame: false,
+            frame_capturer: FrameCapturer::new(),
             frame_index: 0,
             registered_systems: false,
+            input: InputState::new(),
         })
     }
 
@@ -313,12 +173,18 @@ impl State {
             //self.camera_controller.handle_key(code, is_pressed);
         }
 
-        #[cfg(feature = "renderdoc")]
         if code == KeyCode::KeyH && is_pressed {
-            if let Some(renderdoc) = self.renderdoc.as_mut() {
-                renderdoc.start_frame_capture(ptr::null(), ptr::null());
-                self.capture_next_frame = true;
-            }
+            self.frame_capturer.request_capture();
+        }
+
+        let world = self.active_scene_mut().unwrap().world_mut();
+        let mut input = world.get_resource_mut::<InputState>().unwrap();
+        if is_pressed {
+            input.pressed.insert(code);
+            input.just_pressed.insert(code);
+        } else {
+            input.pressed.remove(&code);
+            input.just_released.insert(code);
         }
     }
 
@@ -336,11 +202,47 @@ impl State {
         if let Some(scene) = self.active_scene_mut() {
             scene.update();
         }
+
+        let world = self.active_scene_mut().unwrap().world_mut();
+        let Some(mut physics) = world.get_resource_mut::<Physics>() else {
+            return;
+        };
+        physics.step();
         //self.camera_controller.update_camera(&mut self.camera);
         //self.camera_uniform.update_view_proj(&self.camera);
         //self.renderer.render_resources.insert(renderer::CameraData {
         //    uniform: self.camera_uniform,
         //});
+    }
+
+    fn update_after_render(&mut self) {
+        let world = self.active_scene_mut().unwrap().world_mut();
+        Self::clear_input_system(world);
+    }
+
+    fn clear_input_system(world: &mut World) {
+        let Some(mut input) = world.get_resource_mut::<InputState>() else {
+            return;
+        };
+
+        input.just_pressed.clear();
+        input.just_released.clear();
+        input.mouse_delta = (0.0, 0.0);
+        input.scroll = 0.0;
+    }
+
+    fn insert_engine_resources(world: &mut World) {
+        world.insert_resource(Time::new());
+        world.insert_resource(InputState::new());
+        world.insert_resource(Physics::new());
+    }
+
+    pub fn create_main_game_scene() -> Scene {
+        let mut scene = Scene::new();
+
+        Self::insert_engine_resources(scene.world_mut());
+
+        scene
     }
 }
 
@@ -532,32 +434,17 @@ impl ApplicationHandler<State> for App {
                     f(state);
                 }
                 state.events.clear();
+                let mut state = self.state.as_mut().unwrap();
                 match state.renderer.render() {
                     Ok(_) => {
-                        let mut state = self.state.as_mut().unwrap();
-                        #[cfg(feature = "renderdoc")]
-                        if state.capture_next_frame {
-                            if let Some(renderdoc) = state.renderdoc.as_mut() {
-                                let null = std::ptr::null();
-
-                                renderdoc.end_frame_capture(null, null);
-
-                                let num = renderdoc.get_num_captures();
-                                if num > 0 {
-                                    if let Some((path, _)) = renderdoc.get_capture(num - 1) {
-                                        println!("Opening capture: {:?}", path);
-                                        renderdoc.launch_replay_ui(true, path.to_str()).ok();
-                                    }
-                                }
-
-                                state.capture_next_frame = false;
-                            }
-                        }
+                        state.frame_capturer.finish_capture_after_frame();
                     }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
                     }
                 }
+
+                state.update_after_render();
             }
             WindowEvent::KeyboardInput {
                 event:

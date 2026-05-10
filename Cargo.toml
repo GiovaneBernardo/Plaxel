@@ -26,8 +26,12 @@ rand = "0.8.5"
 pollster = "0.3"
 tobj = { version = "3.2", default-features = false, features = ["async"] }
 
+# Physics
+rapier3d = { version = "0.29", features = ["simd-stable"] }
+
 # Threading
 rayon = "1.10"
+
 
 # Image
 image = { version = "0.24", default-features = false, features = [

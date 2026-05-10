@@ -1,10 +1,11 @@
+use engine::core::input::KeyCode;
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(
     dylib = "game_logic",
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
 )]
 mod game {
-    use engine::{KeyCode, MouseButton, MouseScrollDelta};
+    use engine::{MouseButton, MouseScrollDelta, core::input::KeyCode};
     hot_functions_from_file!("game/logic/src/lib.rs");
 }
 
@@ -58,7 +59,7 @@ pub fn run_editor() -> anyhow::Result<()> {
         editor_logic::update_editor(state);
     })
     .with_on_key(|state, code, pressed| {
-        if code == engine::KeyCode::KeyY && pressed {
+        if code == KeyCode::KeyY && pressed {
             #[cfg(feature = "hot-reload")]
             {
                 std::process::Command::new("cargo")

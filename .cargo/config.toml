@@ -11,3 +11,4 @@ build-game = "build -p game-runner -p game-logic --features game-runner/hot-relo
 xtask = "run --package xtask --quiet --"
 play = "xtask play"
 play-editor = "xtask play-editor"
+play-renderdoc = "xtask play-renderdoc"

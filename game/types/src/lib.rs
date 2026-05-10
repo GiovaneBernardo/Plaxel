@@ -1,3 +1,4 @@
+pub mod game_mode;
 pub mod octree;
 pub mod planet;
 pub mod player;

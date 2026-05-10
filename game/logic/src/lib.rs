@@ -1,4 +1,5 @@
 use engine::core::components::core::TransformComponent;
+use engine::core::input::KeyCode;
 use engine::ecs::query::Query;
 use engine::ecs::world::World;
 #[cfg(feature = "dynamic_linking")]
@@ -10,12 +11,12 @@ use cgmath::{InnerSpace, Point3};
 use engine::assets;
 use engine::assets::material::Material;
 use engine::engine_info;
+use engine::model::MeshAsset;
 use engine::model::{ModelVertex, Vertex};
 use engine::renderer::Topology;
 use engine::renderer::{CameraData, RenderData, RenderNode};
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
-use engine::{KeyCode, model::MeshAsset};
 use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
 use game_types::planet::{PlanetInstance, PlanetMesh};
@@ -24,6 +25,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::{cmp, env};
+
+mod systems;
+
+use game_types::game_mode::{GameMode, GameModeState};
+use systems::{InputMap, player_interaction_system};
 
 struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
@@ -209,6 +215,11 @@ pub fn register_systems(state: &mut engine::State) {
     let scene = state.active_scene_mut().unwrap();
     let world = scene.world_mut();
 
+    world.insert_resource(GameModeState {
+        mode: GameMode::Walking,
+    });
+    world.insert_resource(InputMap::default());
+
     world.insert_resource(GameCamera {
         camera,
         controller: engine::camera::CameraController::new(0.2),
@@ -242,6 +253,9 @@ pub fn register_systems(state: &mut engine::State) {
 
     scene.update_schedule_mut().add_system(camera_update_system);
     scene.update_schedule_mut().add_system(planet_lod_system);
+    scene
+        .update_schedule_mut()
+        .add_system(player_interaction_system);
 }
 
 #[unsafe(no_mangle)]
@@ -512,6 +526,8 @@ fn sync_planet_geometry(renderer: &mut engine::renderer::Renderer, world: &World
     }
 }
 
+// TODO: This should probably be deprecated as now inputs are passed around with InputState world's resource
+// Or maybe not, as it works well for debugging stuff
 #[unsafe(no_mangle)]
 pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {

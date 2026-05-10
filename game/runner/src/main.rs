@@ -1,3 +1,4 @@
+use engine::core::input::KeyCode;
 #[cfg(feature = "dynamic_linking")]
 #[allow(unused_imports)]
 use engine_dylib;
@@ -8,7 +9,7 @@ use engine_dylib;
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
 )]
 mod game {
-    use engine::{KeyCode, MouseButton, MouseScrollDelta};
+    use engine::{MouseButton, MouseScrollDelta, core::input::KeyCode};
     hot_functions_from_file!("game/logic/src/lib.rs");
 }
 
@@ -34,7 +35,7 @@ fn main() {
             game_logic::update(state);
         })
         .with_on_key(|state, code, pressed| {
-            if code == engine::KeyCode::KeyY && pressed {
+            if code == KeyCode::KeyY && pressed {
                 #[cfg(feature = "hot-reload")]
                 {
                     let mut features = String::from("game-runner/hot-reload");
