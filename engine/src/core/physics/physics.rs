@@ -4,6 +4,17 @@ use rapier3d::{
     prelude::*,
 };
 
+use crate::{
+    core::components::{
+        self,
+        core::TransformComponent,
+        physics::{
+            ColliderComponent, RapierColliderHandle, RapierRigidBodyHandle, RigidBodyComponent,
+        },
+    },
+    ecs::{commands::Commands, query::Query, world::World},
+};
+
 pub struct Physics {
     pub rigid_body_set: RigidBodySet,
     pub collider_set: ColliderSet,
@@ -60,11 +71,6 @@ impl Physics {
             &self.physics_hooks,
             &self.event_handler,
         );
-
-        if self.ball_body_handle != None {
-            let ball_body = &self.rigid_body_set[self.ball_body_handle.unwrap()];
-            println!("Ball altitude: {}", ball_body.translation().y);
-        }
     }
 
     pub fn terminate() {}
@@ -106,4 +112,72 @@ impl Physics {
            let ball_rigid_body_handle = physics.add_rigid_body_dynamic();
            physics.add_sphere_collider(params.radius, ball_rigid_body_handle);
     */
+    pub fn create_missing_rapier_bodies_system(world: &mut World, commands: &mut Commands) {
+        let mut physics = world.get_resource_mut::<Physics>().unwrap();
+        let Physics {
+            rigid_body_set,
+            collider_set,
+            ..
+        } = &mut *physics;
+        let mut query = Query::<(&mut ColliderComponent,)>::new(world);
+        //println!(query.iter_size());
+        query.for_each(|entity, (collider,)| {
+            if world.get::<RapierColliderHandle>(entity).is_some() {
+                return;
+            }
+
+            if world.get::<RapierRigidBodyHandle>(entity).is_some() {
+                return;
+            }
+
+            let Some(transform) = world.get::<TransformComponent>(entity) else {
+                return;
+            };
+
+            let mut rapier_collider = None;
+            match collider.shape {
+                components::physics::ColliderShape::Sphere { radius } => {
+                    rapier_collider = Some(ColliderBuilder::ball(radius).build());
+                }
+                components::physics::ColliderShape::Cuboid { half_extents } => {
+                    rapier_collider = Some(
+                        ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                            .build(),
+                    );
+                }
+            }
+
+            let rigid_body_component = world.get::<RigidBodyComponent>(entity);
+            if rigid_body_component.is_some() {
+                let rapier_rigid_body_handle = rigid_body_set.insert(
+                    RigidBodyBuilder::dynamic()
+                        .translation(vector![
+                            transform.position.x,
+                            transform.position.y,
+                            transform.position.z
+                        ])
+                        .build(),
+                );
+                let rapier_collider_handle = collider_set.insert_with_parent(
+                    rapier_collider.unwrap(),
+                    rapier_rigid_body_handle,
+                    rigid_body_set,
+                );
+
+                commands.insert(entity, RapierRigidBodyHandle(rapier_rigid_body_handle));
+                commands.insert(entity, RapierColliderHandle(rapier_collider_handle));
+            } else {
+                commands.insert(
+                    entity,
+                    RapierColliderHandle(collider_set.insert(rapier_collider.unwrap())),
+                );
+            }
+        });
+
+        let mut query = Query::<(&mut RapierRigidBodyHandle,)>::new(world);
+        query.for_each(|entity, (handle,)| {
+            let ball_body = &physics.rigid_body_set[handle.0];
+            println!("Ball altitude: {}", ball_body.translation().y);
+        });
+    }
 }

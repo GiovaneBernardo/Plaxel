@@ -8,7 +8,6 @@ use engine_dylib;
 
 use cgmath::{self, Array, EuclideanSpace, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
-use engine::assets;
 use engine::assets::material::Material;
 use engine::core::physics::physics::Physics;
 use engine::engine_info;
@@ -18,6 +17,7 @@ use engine::renderer::Topology;
 use engine::renderer::{CameraData, RenderData, RenderNode};
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
+use engine::{assets, renderer};
 use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
 use game_types::planet::{PlanetInstance, PlanetMesh};
@@ -252,11 +252,17 @@ pub fn register_systems(state: &mut engine::State) {
         completed: 0,
     });
 
+    scene
+        .update_schedule_mut()
+        .add_system(Physics::create_missing_rapier_bodies_system);
     scene.update_schedule_mut().add_system(camera_update_system);
     scene.update_schedule_mut().add_system(planet_lod_system);
     scene
         .update_schedule_mut()
         .add_system(player_interaction_system);
+    scene
+        .update_schedule_mut()
+        .add_system(renderer::get_render_data_system);
 }
 
 #[unsafe(no_mangle)]

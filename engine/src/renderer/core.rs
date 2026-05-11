@@ -12,6 +12,12 @@ use crate::assets;
 use crate::assets::manager::Handle;
 use crate::assets::material::{Material, PipelineDescriptor};
 pub use crate::core::camera;
+use crate::core::components::core::TransformComponent;
+use crate::core::components::physics::RapierRigidBodyHandle;
+use crate::core::components::renderer::MeshRendererComponent;
+use crate::ecs::commands::Commands;
+use crate::ecs::query::Query;
+use crate::ecs::world::World;
 use crate::engine_info;
 use crate::model;
 use crate::model::MeshAsset;
@@ -807,3 +813,38 @@ impl RenderGraph {
 }
 
 impl dyn RenderNode {}
+
+pub struct GeometryRenderQueue {
+    pub items: Vec<RenderData>,
+}
+
+impl GeometryRenderQueue {
+    pub fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+}
+
+pub fn get_render_data_system(world: &mut World, commands: &mut Commands) {
+    let render_data = {
+        let mut items = Vec::new();
+
+        let mut query = Query::<(&MeshRendererComponent, &TransformComponent)>::new(world);
+        query.for_each(|_entity, (mesh_renderer, transform)| {
+            items.push(RenderData {
+                mesh: mesh_renderer.mesh,
+                material: mesh_renderer.material.clone(),
+                transform_index: 0,
+                sort_key: 0,
+            });
+        });
+
+        items
+    };
+
+    let Some(mut queue) = world.get_resource_mut::<GeometryRenderQueue>() else {
+        return;
+    };
+
+    queue.items.clear();
+    queue.items.extend(render_data);
+}

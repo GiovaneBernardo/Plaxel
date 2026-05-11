@@ -34,6 +34,7 @@ use crate::core::physics::physics::Physics;
 use crate::core::time::Time;
 use crate::ecs::scene::Scene;
 use crate::frame_capturer::FrameCapturer;
+use crate::renderer::GeometryRenderQueue;
 use crate::renderer::Renderer;
 
 // This will store the state of our game
@@ -235,6 +236,7 @@ impl State {
         world.insert_resource(Time::new());
         world.insert_resource(InputState::new());
         world.insert_resource(Physics::new());
+        world.insert_resource(GeometryRenderQueue::new());
     }
 
     pub fn create_main_game_scene() -> Scene {

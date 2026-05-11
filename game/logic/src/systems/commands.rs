@@ -3,7 +3,7 @@ use engine::{
     core::{
         components::{
             core::TransformComponent,
-            physics::{RigidBody, SphereCollider},
+            physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
         },
         physics::physics::Physics,
     },
@@ -33,26 +33,22 @@ impl GameCommandsExt for Commands {
             );
             world.insert(
                 entity,
-                SphereCollider {
-                    radius: params.radius,
+                ColliderComponent {
+                    shape: ColliderShape::Sphere {
+                        radius: params.radius,
+                    },
+                    friction: 0.5,
+                    restitution: 0.5,
                 },
             );
             world.insert(
                 entity,
-                RigidBody {
+                RigidBodyComponent {
+                    kind: BodyKind::Dynamic,
                     mass: params.mass,
                     velocity: cgmath::vec3(0.0, 0.0, 0.0),
                 },
             );
-
-            let Some(mut physics) = world.get_resource_mut::<Physics>() else {
-                return;
-            };
-
-            physics.add_cuboid_collider(100.0, 0.1, 100.0);
-
-            let ball_rigid_body_handle = physics.add_rigid_body_dynamic(&params.position);
-            physics.add_sphere_collider(params.radius, Some(ball_rigid_body_handle));
         });
     }
 }
