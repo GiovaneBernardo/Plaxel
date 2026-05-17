@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 pub mod assets;
 pub mod core;
@@ -25,8 +25,12 @@ pub use winit::{
     window::Window,
 };
 
-use crate::assets::manager::AssetManager;
-use crate::core::components::core::TransformComponent;
+use crate::assets::{manager::AssetManager, material::Material};
+use crate::core::components::{
+    core::TransformComponent,
+    physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
+    renderer::MeshRendererComponent,
+};
 use crate::core::ecs::world::World;
 use crate::core::input::InputState;
 use crate::core::input::KeyCode;
@@ -34,8 +38,9 @@ use crate::core::physics::physics::Physics;
 use crate::core::time::Time;
 use crate::ecs::scene::Scene;
 use crate::frame_capturer::FrameCapturer;
-use crate::renderer::GeometryRenderQueue;
+use crate::model::{AttributeFormat, MeshAsset, StepMode, VertexAttribute, VertexLayout};
 use crate::renderer::Renderer;
+use crate::renderer::{GeometryPassNode, GeometryRenderQueue};
 
 // This will store the state of our game
 pub struct State {
@@ -193,10 +198,162 @@ impl State {
         if button == MouseButton::Right {
             //self.camera_controller.handle_mouse_click(is_pressed);
         }
+
+        let world = self.active_scene_mut().unwrap().world_mut();
+        let mut input = world.get_resource_mut::<InputState>().unwrap();
+        if is_pressed {
+            input.mouse_pressed.insert(button);
+            input.mouse_just_pressed.insert(button);
+        } else {
+            input.mouse_pressed.remove(&button);
+            input.mouse_just_released.insert(button);
+        }
     }
 
     fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
         //self.camera_controller.handle_mouse_scroll(delta);
+    }
+
+    fn handle_dropped_file(&mut self, path: &Path) {
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("obj"))
+        {
+            return;
+        }
+
+        if let Err(error) = self.spawn_dropped_obj(path) {
+            log::error!("Unable to load dropped OBJ {:?}: {error}", path);
+        }
+    }
+
+    fn spawn_dropped_obj(&mut self, path: &Path) -> anyhow::Result<()> {
+        let (models, _) = tobj::load_obj(
+            path,
+            &tobj::LoadOptions {
+                triangulate: true,
+                single_index: true,
+                ..Default::default()
+            },
+        )?;
+
+        let y_offset = -10.0;
+        let mut positions = Vec::<[f32; 3]>::new();
+        let mut indices = Vec::<u32>::new();
+        let mut min = cgmath::vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut max = cgmath::vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+        for model in &models {
+            let base_vertex = positions.len() as u32;
+            for position in model.mesh.positions.chunks_exact(3) {
+                let baked = [position[0], position[1] + y_offset, position[2]];
+                min.x = min.x.min(baked[0]);
+                min.y = min.y.min(baked[1]);
+                min.z = min.z.min(baked[2]);
+                max.x = max.x.max(baked[0]);
+                max.y = max.y.max(baked[1]);
+                max.z = max.z.max(baked[2]);
+                positions.push(baked);
+            }
+
+            indices.extend(model.mesh.indices.iter().map(|index| base_vertex + *index));
+        }
+
+        if positions.is_empty() || indices.is_empty() {
+            anyhow::bail!("OBJ has no triangle mesh data");
+        }
+
+        let vertex_layout = VertexLayout {
+            stride: std::mem::size_of::<[f32; 3]>() as u64,
+            step_mode: StepMode::Vertex,
+            attributes: vec![VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: AttributeFormat::Float32x3,
+            }],
+        };
+
+        let mesh = MeshAsset {
+            name: path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("DroppedObj")
+                .to_string(),
+            uuid: assets::manager::Uuid::new_v4(),
+            vertices: bytemuck::cast_slice(&positions).to_vec(),
+            indices,
+            vertex_layout: vertex_layout.clone(),
+        };
+
+        let material =
+            Material::new("shaders/cube.wgsl".to_string()).with_vertex_layouts(vec![vertex_layout]);
+
+        let Some(camera_layout) = self
+            .renderer
+            .render_graph
+            .get_node_mut::<GeometryPassNode>(0)
+            .and_then(|node| node.camera_bind_group_layout)
+        else {
+            anyhow::bail!("GeometryPassNode camera bind group layout is not available");
+        };
+
+        self.renderer
+            .renderer_api
+            .create_pipeline(&material, &[camera_layout]);
+        let mesh_handle = self.renderer.renderer_api.upload_mesh(&mesh);
+
+        let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
+            return Ok(());
+        };
+        let Some(scene) = self.scenes.get_mut(scene_index) else {
+            return Ok(());
+        };
+
+        let mut center = (min + max) * 0.5;
+        center.y -= 10000.0;
+        let mut half_extents = (max - min) * 0.5;
+        half_extents.x = half_extents.x.max(0.01);
+        half_extents.y = half_extents.y.max(0.01);
+        half_extents.z = half_extents.z.max(0.01);
+
+        let world = scene.world_mut();
+        let entity = world.spawn();
+        world.insert(
+            entity,
+            TransformComponent {
+                position: center,
+                rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+                scale: cgmath::vec3(1.0, 1.0, 1.0),
+                velocity: cgmath::vec3(0.0, 0.0, 0.0),
+            },
+        );
+        world.insert(
+            entity,
+            MeshRendererComponent {
+                mesh: mesh_handle,
+                material,
+            },
+        );
+        world.insert(
+            entity,
+            ColliderComponent {
+                shape: ColliderShape::Cuboid { half_extents },
+                restitution: 0.2,
+                friction: 0.9,
+            },
+        );
+        world.insert(
+            entity,
+            RigidBodyComponent {
+                kind: BodyKind::Fixed,
+                mass: 0.0,
+                velocity: cgmath::vec3(0.0, 0.0, 0.0),
+            },
+        );
+
+        log::info!("Spawned dropped OBJ {:?} as entity {:?}", path, entity);
+        Ok(())
     }
 
     fn update(&mut self) {
@@ -221,6 +378,17 @@ impl State {
         Self::clear_input_system(world);
     }
 
+    fn sync_render_queues(&mut self) {
+        let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
+            return;
+        };
+        let Some(scene) = self.scenes.get(scene_index) else {
+            return;
+        };
+
+        self.renderer.sync_geometry_render_queue(scene.world());
+    }
+
     fn clear_input_system(world: &mut World) {
         let Some(mut input) = world.get_resource_mut::<InputState>() else {
             return;
@@ -228,6 +396,8 @@ impl State {
 
         input.just_pressed.clear();
         input.just_released.clear();
+        input.mouse_just_pressed.clear();
+        input.mouse_just_released.clear();
         input.mouse_delta = (0.0, 0.0);
         input.scroll = 0.0;
     }
@@ -432,9 +602,11 @@ impl ApplicationHandler<State> for App {
                 }
                 state.window.request_redraw();
                 state.update();
+                state.renderer.clear_geometry_render_data();
                 if let Some(f) = &mut self.on_update {
                     f(state);
                 }
+                state.sync_render_queues();
                 state.events.clear();
                 let mut state = self.state.as_mut().unwrap();
                 match state.renderer.render() {
@@ -488,6 +660,9 @@ impl ApplicationHandler<State> for App {
                 if let Some(f) = &mut self.on_mouse_scroll {
                     f(state, delta);
                 }
+            }
+            WindowEvent::DroppedFile(path) => {
+                state.handle_dropped_file(&path);
             }
             _ => {}
         }

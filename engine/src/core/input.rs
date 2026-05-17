@@ -1,11 +1,15 @@
 use std::collections::HashSet;
 
 pub type KeyCode = winit::keyboard::KeyCode;
+pub type MouseButton = winit::event::MouseButton;
 
 pub struct InputState {
     pub pressed: HashSet<KeyCode>,
     pub just_pressed: HashSet<KeyCode>,
     pub just_released: HashSet<KeyCode>,
+    pub mouse_pressed: HashSet<MouseButton>,
+    pub mouse_just_pressed: HashSet<MouseButton>,
+    pub mouse_just_released: HashSet<MouseButton>,
     pub mouse_delta: (f32, f32),
     pub scroll: f32,
 }
@@ -16,6 +20,9 @@ impl InputState {
             pressed: HashSet::new(),
             just_pressed: HashSet::new(),
             just_released: HashSet::new(),
+            mouse_just_pressed: HashSet::new(),
+            mouse_just_released: HashSet::new(),
+            mouse_pressed: HashSet::new(),
             mouse_delta: (0.0, 0.0),
             scroll: 0.0,
         }

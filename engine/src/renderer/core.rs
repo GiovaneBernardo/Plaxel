@@ -492,6 +492,28 @@ impl Renderer {
         self.prepare();
         self.renderer_api.render(&mut self.render_graph)
     }
+
+    pub fn clear_geometry_render_data(&mut self) {
+        let Some(geometry_node) = self.render_graph.get_node_mut::<GeometryPassNode>(0) else {
+            return;
+        };
+
+        geometry_node.clear_render_data();
+    }
+
+    pub fn sync_geometry_render_queue(&mut self, world: &World) {
+        let Some(queue) = world.get_resource::<GeometryRenderQueue>() else {
+            return;
+        };
+
+        let Some(geometry_node) = self.render_graph.get_node_mut::<GeometryPassNode>(0) else {
+            return;
+        };
+
+        for item in &queue.items {
+            geometry_node.add_render_data(item.clone());
+        }
+    }
 }
 
 pub struct CameraData {
@@ -824,12 +846,12 @@ impl GeometryRenderQueue {
     }
 }
 
-pub fn get_render_data_system(world: &mut World, commands: &mut Commands) {
+pub fn get_render_data_system(world: &mut World, _commands: &mut Commands) {
     let render_data = {
         let mut items = Vec::new();
 
         let mut query = Query::<(&MeshRendererComponent, &TransformComponent)>::new(world);
-        query.for_each(|_entity, (mesh_renderer, transform)| {
+        query.for_each(|_entity, (mesh_renderer, _transform)| {
             items.push(RenderData {
                 mesh: mesh_renderer.mesh,
                 material: mesh_renderer.material.clone(),

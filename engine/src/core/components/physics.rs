@@ -1,9 +1,11 @@
+#[derive(Clone, Copy)]
 pub enum BodyKind {
     Dynamic,
     Fixed,
     Kinematic,
 }
 
+#[derive(Clone, Copy)]
 pub enum ColliderShape {
     Sphere { radius: f32 },
     Cuboid { half_extents: cgmath::Vector3<f32> },

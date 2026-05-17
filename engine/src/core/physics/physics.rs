@@ -134,32 +134,44 @@ impl Physics {
                 return;
             };
 
-            let mut rapier_collider = None;
-            match collider.shape {
+            let rapier_collider = match collider.shape {
                 components::physics::ColliderShape::Sphere { radius } => {
-                    rapier_collider = Some(ColliderBuilder::ball(radius).build());
+                    ColliderBuilder::ball(radius)
                 }
                 components::physics::ColliderShape::Cuboid { half_extents } => {
-                    rapier_collider = Some(
-                        ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
-                            .build(),
-                    );
+                    ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
                 }
             }
+            .restitution(collider.restitution)
+            .friction(collider.friction)
+            .build();
 
             let rigid_body_component = world.get::<RigidBodyComponent>(entity);
-            if rigid_body_component.is_some() {
-                let rapier_rigid_body_handle = rigid_body_set.insert(
-                    RigidBodyBuilder::dynamic()
-                        .translation(vector![
-                            transform.position.x,
-                            transform.position.y,
-                            transform.position.z
-                        ])
-                        .build(),
-                );
+            if let Some(rigid_body_component) = rigid_body_component {
+                let mut builder = match rigid_body_component.kind {
+                    components::physics::BodyKind::Dynamic => RigidBodyBuilder::dynamic(),
+                    components::physics::BodyKind::Fixed => RigidBodyBuilder::fixed(),
+                    components::physics::BodyKind::Kinematic => {
+                        RigidBodyBuilder::kinematic_position_based()
+                    }
+                };
+
+                builder = builder.translation(vector![
+                    transform.position.x,
+                    transform.position.y,
+                    transform.position.z
+                ]);
+
+                if matches!(
+                    rigid_body_component.kind,
+                    components::physics::BodyKind::Dynamic
+                ) {
+                    builder = builder.additional_mass(rigid_body_component.mass);
+                }
+
+                let rapier_rigid_body_handle = rigid_body_set.insert(builder.build());
                 let rapier_collider_handle = collider_set.insert_with_parent(
-                    rapier_collider.unwrap(),
+                    rapier_collider,
                     rapier_rigid_body_handle,
                     rigid_body_set,
                 );
@@ -167,9 +179,15 @@ impl Physics {
                 commands.insert(entity, RapierRigidBodyHandle(rapier_rigid_body_handle));
                 commands.insert(entity, RapierColliderHandle(rapier_collider_handle));
             } else {
+                let mut rapier_collider = rapier_collider;
+                rapier_collider.set_translation(vector![
+                    transform.position.x,
+                    transform.position.y,
+                    transform.position.z
+                ]);
                 commands.insert(
                     entity,
-                    RapierColliderHandle(collider_set.insert(rapier_collider.unwrap())),
+                    RapierColliderHandle(collider_set.insert(rapier_collider)),
                 );
             }
         });

@@ -68,10 +68,6 @@ pub fn player_interaction_system(world: &mut World, commands: &mut Commands) {
 
     match mode.mode {
         GameMode::Walking => {
-            println!("Walking");
-            if input.pressed.contains(&KeyCode::KeyT) {
-                println!("Pressionando T :D ");
-            }
             if input_map.just_pressed(&input, Action::Interact) {
                 let mut rng = rand::thread_rng();
 

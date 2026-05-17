@@ -252,17 +252,14 @@ pub fn register_systems(state: &mut engine::State) {
         completed: 0,
     });
 
-    scene
-        .update_schedule_mut()
-        .add_system(Physics::create_missing_rapier_bodies_system);
-    scene.update_schedule_mut().add_system(camera_update_system);
-    scene.update_schedule_mut().add_system(planet_lod_system);
-    scene
-        .update_schedule_mut()
-        .add_system(player_interaction_system);
-    scene
-        .update_schedule_mut()
-        .add_system(renderer::get_render_data_system);
+    let mut update_schedule_mut = scene.update_schedule_mut();
+
+    update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
+    update_schedule_mut.add_system(camera_update_system);
+    update_schedule_mut.add_system(planet_lod_system);
+    update_schedule_mut.add_system(player_interaction_system);
+    update_schedule_mut.add_system(renderer::get_render_data_system);
+    update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
 }
 
 #[unsafe(no_mangle)]
