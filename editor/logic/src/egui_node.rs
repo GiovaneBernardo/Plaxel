@@ -122,10 +122,11 @@ impl EguiRenderNode {
 }
 
 impl RenderNode for EguiRenderNode {
-    fn describe(&self) -> RenderNodeDescriptor {
+    fn describe_pass(&self) -> RenderNodeDescriptor {
         RenderNodeDescriptor {
+            name: "egui",
             input_textures: &[],
-            output_textures: &[OutputTexture::WriteTo("color")],
+            output_textures: &[OutputTexture::WriteTo("swapchain_image")],
             input_buffers: &[],
             output_buffers: &[],
         }

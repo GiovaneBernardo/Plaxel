@@ -49,21 +49,14 @@ impl RenderNode for DebugPassNode {
         true
     }
 
-    fn describe(&self) -> RenderNodeDescriptor {
+    fn describe_pass(&self) -> RenderNodeDescriptor {
         RenderNodeDescriptor {
+            name: "debug",
             input_textures: &[],
-            output_textures: &[OutputTexture::Create(TextureSlot {
-                name: "color",
-                texture_descriptor: TextureDescriptor {
-                    label: "color",
-                    size: TextureSize::FullRes,
-                    format: TextureFormat::Bgra8UnormSrgb,
-                    dimension: TextureDimension::D2,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    mip_levels: 1,
-                    sample_count: 1,
-                },
-            })],
+            output_textures: &[
+                OutputTexture::WriteTo("swapchain_image"),
+                OutputTexture::WriteTo("main_depth"),
+            ],
             input_buffers: &[],
             output_buffers: &[],
         }

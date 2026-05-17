@@ -1,7 +1,7 @@
 use std::any::Any;
 
-use crate::camera;
 use crate::renderer::core::*;
+use crate::{camera, texture};
 
 pub struct GeometryPassNode {
     pub render_data: Vec<RenderData>,
@@ -16,7 +16,7 @@ impl RenderNode for GeometryPassNode {
         true
     }
 
-    fn describe(&self) -> RenderNodeDescriptor {
+    fn describe_pass(&self) -> RenderNodeDescriptor {
         //RenderNodeDescriptor {
         //    input_textures: &[],
         //    output_textures: &[],
@@ -25,25 +25,54 @@ impl RenderNode for GeometryPassNode {
         //}
 
         RenderNodeDescriptor {
+            name: "geometry_pass",
             input_textures: &[],
-            output_textures: &[OutputTexture::Create(TextureSlot {
-                name: "color",
-                texture_descriptor: TextureDescriptor {
-                    label: "color",
-                    size: TextureSize::FullRes,
-                    format: TextureFormat::Bgra8UnormSrgb,
-                    dimension: TextureDimension::D2,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    mip_levels: 1,
-                    sample_count: 1,
-                },
-            })],
+            output_textures: &[
+                // Later when the renderer have post processes, uncomment the create path and rename all other nodes to use the main_color
+                //OutputTexture::Create(TextureSlot {
+                //    name: "main_color",
+                //    texture_descriptor: TextureDescriptor {
+                //        label: "main_color",
+                //        size: TextureSize::FullRes,
+                //        format: TextureFormat::Bgra8UnormSrgb,
+                //        dimension: TextureDimension::D2,
+                //        usage: TextureUsages::RENDER_ATTACHMENT,
+                //        mip_levels: 1,
+                //        sample_count: 1,
+                //    },
+                //}),
+                OutputTexture::WriteTo("swapchain_image"),
+                OutputTexture::Create(TextureSlot {
+                    name: "main_depth",
+                    texture_descriptor: TextureDescriptor {
+                        label: "main_depth",
+                        size: TextureSize::FullRes,
+                        format: TextureFormat::Depth32Float,
+                        dimension: TextureDimension::D2,
+                        usage: TextureUsages::RENDER_ATTACHMENT,
+                        mip_levels: 1,
+                        sample_count: 1,
+                    },
+                }),
+            ],
             input_buffers: &[],
             output_buffers: &[],
         }
     }
 
     fn compile(&mut self, ctx: &mut NodeCompileContext) {
+        let descriptor = self.describe_pass();
+
+        for output_texture in descriptor.output_textures {
+            match output_texture {
+                OutputTexture::Create(texture_slot) => {
+                    ctx.render_resources
+                        .insert_labeled(texture_slot.name, texture_slot);
+                }
+                _ => {}
+            }
+        }
+
         let buffer = ctx.create_buffer(&BufferDescriptor {
             label: "camera_uniform",
             size: size_of::<camera::CameraUniform>() as u64,
@@ -116,5 +145,19 @@ impl GeometryPassNode {
 
     pub fn clear_render_data(&mut self) {
         self.render_data.clear();
+    }
+
+    pub fn get_world_position(
+        &mut self,
+        ctx: &mut dyn RenderContext,
+        resources: &mut RenderResources,
+        x: f32,
+        y: f32,
+    ) {
+        //let Some(texture) = resources.get_labeled::<TextureSlot>("color") else {
+        //    return;
+        //};
+        //ctx.resolved_inputs;
+        //ctx.api().read_texture(ctx.retexture.name, 0.0, 0.0);
     }
 }

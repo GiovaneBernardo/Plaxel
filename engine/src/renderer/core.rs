@@ -70,6 +70,7 @@ pub struct Buffer {
 
 pub struct RenderGraph {
     pub nodes: Vec<(i8, Box<dyn RenderNode>)>,
+    pub resources: GraphResources,
     pub compiled: bool,
 }
 
@@ -238,6 +239,7 @@ pub struct BufferSlot {
 }
 
 pub struct RenderNodeDescriptor {
+    pub name: &'static str,
     pub input_textures: &'static [&'static str],
     pub output_textures: &'static [OutputTexture],
     pub input_buffers: &'static [&'static str],
@@ -255,13 +257,35 @@ pub enum OutputBuffer {
 }
 
 pub trait RenderNode {
-    fn describe(&self) -> RenderNodeDescriptor;
+    fn describe_pass(&self) -> RenderNodeDescriptor;
     fn compile(&mut self, ctx: &mut NodeCompileContext);
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI);
     fn run(&mut self, ctx: &mut dyn RenderContext);
     fn should_render_to_swapchain(&self) -> bool;
     fn needs_depth(&self) -> bool {
         true
+    }
+    fn resize(
+        &mut self,
+        ctx: &mut NodeCompileContext,
+        graph_resources: &GraphResources,
+        width: u32,
+        height: u32,
+    ) {
+        let descriptor = self.describe_pass();
+        for output_texture in descriptor.output_textures {
+            match output_texture {
+                OutputTexture::Create(create) => {
+                    if graph_resources.textures.contains_key(create.name) {
+                        ctx.api.resize_texture(
+                            graph_resources.texture(create.name).unwrap(),
+                            &create.texture_descriptor,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -385,6 +409,21 @@ pub enum TextureFormat {
     Rgb9e5Ufloat,
 }
 
+impl TextureFormat {
+    pub fn is_depth(&self) -> bool {
+        match self {
+            TextureFormat::Depth16Unorm
+            | TextureFormat::Depth24Plus
+            | TextureFormat::Depth24PlusStencil8
+            | TextureFormat::Depth32Float
+            | TextureFormat::Depth32FloatStencil8
+            | TextureFormat::Depth32Stencil8
+            | TextureFormat::Stencil8 => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Hash, Eq, PartialEq)]
 pub struct PipelineKey {
     pub shader: String,
@@ -464,6 +503,7 @@ impl Renderer {
             render_resources: RenderResources::new(),
             render_graph: RenderGraph {
                 nodes: Vec::new(),
+                resources: GraphResources::new(),
                 compiled: false,
             },
             pipelines: Vec::new(),
@@ -525,6 +565,12 @@ pub struct GraphResources {
 }
 
 impl GraphResources {
+    pub fn new() -> Self {
+        Self {
+            textures: HashMap::new(),
+            buffers: HashMap::new(),
+        }
+    }
     pub fn resolve_inputs(
         &self,
         desc: &RenderNodeDescriptor,
@@ -541,14 +587,31 @@ impl GraphResources {
     ) -> HashMap<&'static str, TextureHandle> {
         desc.output_textures
             .iter()
-            .map(|output| {
+            .filter_map(|output| {
                 let name = match output {
                     OutputTexture::Create(slot) => slot.name,
                     OutputTexture::WriteTo(slot_name) => slot_name,
                 };
-                (name, self.textures[name])
+
+                self.textures.get(name).map(|texture| (name, *texture))
             })
             .collect()
+    }
+
+    pub fn texture(&self, name: &str) -> Option<&TextureHandle> {
+        self.textures.get(name)
+    }
+
+    pub fn texture_mut(&mut self, name: &str) -> Option<&mut TextureHandle> {
+        self.textures.get_mut(name)
+    }
+
+    pub fn buffer(&self, name: &str) -> Option<&BufferHandle> {
+        self.buffers.get(name)
+    }
+
+    pub fn buffer_mut(&mut self, name: &str) -> Option<&mut BufferHandle> {
+        self.buffers.get_mut(name)
     }
 }
 
@@ -556,6 +619,7 @@ impl RenderGraph {
     pub fn default_render_graph(renderer_api: &mut dyn RendererAPI) -> Self {
         let mut graph = RenderGraph {
             nodes: Vec::new(),
+            resources: GraphResources::new(),
             compiled: false,
         };
 
@@ -768,7 +832,7 @@ impl RenderGraph {
         let mut buffers = HashMap::new();
 
         for (_, node) in nodes {
-            for slot in node.describe().output_textures {
+            for slot in node.describe_pass().output_textures {
                 match slot {
                     OutputTexture::Create(slot) => {
                         textures.insert(slot.name, api.create_texture(&slot.texture_descriptor));
@@ -777,7 +841,7 @@ impl RenderGraph {
                 }
             }
 
-            for slot in node.describe().output_buffers {
+            for slot in node.describe_pass().output_buffers {
                 match slot {
                     OutputBuffer::Create(slot) => {
                         buffers.insert(slot.name, api.create_buffer(&slot.buffer_descriptor));
@@ -791,19 +855,39 @@ impl RenderGraph {
     }
 
     pub fn compile(&mut self, render_resources: &mut RenderResources, api: &mut dyn RendererAPI) {
-        let allocated = RenderGraph::allocate_graph_resources(&self.nodes, api); // textures for all declared outputs
+        self.resources = RenderGraph::allocate_graph_resources(&self.nodes, api); // textures for all declared outputs
 
         for (_, node) in &mut self.nodes {
-            let desc = node.describe();
+            let desc = node.describe_pass();
             let mut ctx = NodeCompileContext {
                 api,
                 render_resources,
-                resolved_inputs: allocated.resolve_inputs(&desc),
-                resolved_outputs: allocated.resolve_outputs(&desc),
+                resolved_inputs: self.resources.resolve_inputs(&desc),
+                resolved_outputs: self.resources.resolve_outputs(&desc),
             };
             node.compile(&mut ctx);
         }
         self.compiled = true;
+    }
+
+    pub fn resize(
+        &mut self,
+        api: &mut dyn RendererAPI,
+        render_resources: &mut RenderResources,
+        width: u32,
+        height: u32,
+    ) {
+        for (_, node) in &mut self.nodes {
+            let desc = node.describe_pass();
+            let mut ctx = NodeCompileContext {
+                api,
+                render_resources,
+                resolved_inputs: self.resources.resolve_inputs(&desc),
+                resolved_outputs: self.resources.resolve_outputs(&desc),
+            };
+
+            node.resize(&mut ctx, &self.resources, width, height);
+        }
     }
 
     pub fn get_node_mut<T: 'static>(&mut self, index: i8) -> Option<&mut T> {

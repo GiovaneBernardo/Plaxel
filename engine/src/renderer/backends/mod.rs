@@ -15,6 +15,7 @@ use crate::renderer::{
     BufferDescriptor, BufferUsages, RenderData, RenderResources, TextureDescriptor,
 };
 use crate::texture;
+use bytemuck::{Pod, Zeroable};
 use uuid::Uuid;
 
 pub trait RendererAPI {
@@ -23,6 +24,7 @@ pub trait RendererAPI {
 
     fn compile(&mut self);
     fn resize(&mut self, width: u32, height: u32);
+    fn resize_texture(&mut self, texture_handle: &TextureHandle, descriptor: &TextureDescriptor);
     fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle;
     fn submit(&mut self, graph: &RenderGraph);
     fn render(&mut self, render_graph: &mut RenderGraph) -> anyhow::Result<()>;
@@ -51,6 +53,8 @@ pub trait RendererAPI {
         descriptor: &BindGroupLayoutDescriptor,
     ) -> BindGroupLayoutHandle;
     fn write_buffer(&mut self, buffer: BufferHandle, data: &[u8]);
+
+    fn read_texture_bytes(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]);
 
     // Get using uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle>;
@@ -153,5 +157,22 @@ impl<'a> NodeCompileContext<'a> {
 
     pub fn create_bind_group(&mut self, descriptor: &BindGroupDescriptor) -> BindGroupHandle {
         self.api.create_bind_group(descriptor)
+    }
+}
+
+pub trait RendererReadTextureExt {
+    fn read_texture<T: bytemuck::Pod>(&mut self, texture: &TextureHandle, x: f32, y: f32) -> T;
+}
+
+impl<R: RendererAPI + ?Sized> RendererReadTextureExt for R {
+    fn read_texture<T: bytemuck::Pod>(&mut self, texture: &TextureHandle, x: f32, y: f32) -> T {
+        let mut value = std::mem::MaybeUninit::<T>::uninit();
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, std::mem::size_of::<T>())
+        };
+
+        self.read_texture_bytes(texture, x, y, bytes);
+
+        unsafe { value.assume_init() }
     }
 }

@@ -9,6 +9,8 @@ use crate::model::MeshAsset;
 use crate::model::VertexLayout;
 use crate::renderer::BindGroupHandle;
 use crate::renderer::BufferDescriptor;
+use crate::renderer::GraphResources;
+use crate::renderer::OutputTexture;
 use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
 pub use crate::renderer::pool::*;
@@ -418,6 +420,41 @@ impl RendererAPI for WgpuBackend {
         );
     }
 
+    fn resize_texture(&mut self, texture_handle: &TextureHandle, descriptor: &TextureDescriptor) {
+        let width = self.window.inner_size().width;
+        let height = self.window.inner_size().height;
+        let (tex_width, tex_height) = match descriptor.size {
+            TextureSize::FullRes => (width, height),
+            TextureSize::HalfRes => (width / 2, height / 2),
+            TextureSize::QuarterRes => (width / 4, height / 4),
+            TextureSize::Custom { width, height } => (width, height),
+        };
+
+        let depth_or_array_layers = match descriptor.dimension {
+            TextureDimension::Cube => 6,
+            _ => 1,
+        };
+
+        let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(descriptor.label),
+            size: wgpu::Extent3d {
+                width: tex_width,
+                height: tex_height,
+                depth_or_array_layers,
+            },
+            mip_level_count: descriptor.mip_levels,
+            sample_count: descriptor.sample_count,
+            dimension: descriptor.dimension.into(),
+            format: descriptor.format.into(),
+            usage: descriptor.usage.into(),
+            view_formats: &[],
+        });
+
+        let view = wgpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.textures.insert(*texture_handle, wgpu_texture);
+        self.texture_views.insert(*texture_handle, view);
+    }
+
     fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle {
         PipelineHandle(0)
     }
@@ -456,7 +493,13 @@ impl RendererAPI for WgpuBackend {
             });
 
         for (i, (_, node)) in render_graph.nodes.iter_mut().enumerate() {
-            self.render_node(node.as_mut(), &mut encoder, &view, i == 0);
+            self.render_node(
+                node.as_mut(),
+                &render_graph.resources,
+                &mut encoder,
+                &view,
+                i == 0,
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -562,7 +605,7 @@ impl RendererAPI for WgpuBackend {
         let render_pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Render Pipeline"),
+                label: Some(&material.pipeline_descriptor.shader),
                 layout: Some(&render_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -635,6 +678,59 @@ impl RendererAPI for WgpuBackend {
         self.queue.write_buffer(wgpu_buffer, 0, data);
     }
 
+    fn read_texture_bytes(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]) {
+        let wgpu_texture = self.get_texture(*texture).unwrap();
+        let width = wgpu_texture.width();
+        let height = wgpu_texture.height();
+
+        let bytes_per_pixel = WgpuBackend::bytes_per_pixel(wgpu_texture.format()).unwrap();
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let padded_bytes_per_row =
+            unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+
+        let buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: (wgpu_texture.width() * wgpu_texture.height() * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Reader Encoder"),
+            });
+
+        let texture_size = wgpu::Extent3d {
+            width: width,
+            height: height,
+            depth_or_array_layers: 0,
+        };
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &wgpu_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row), // Must be multiple of 256
+                    rows_per_image: Some(height),
+                },
+            },
+            texture_size,
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        //self.device.r
+    }
+
     // Get using Uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle> {
         self.pipelines_by_uuid.get(&uuid).cloned()
@@ -670,6 +766,7 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn set_texture(&mut self, texture: &texture::Texture) {
+        // ?????????????? I don't even know what set_texture is used for
         self.depth_texture = texture.clone();
     }
 
@@ -974,6 +1071,7 @@ impl WgpuBackend {
     fn render_node(
         &mut self,
         node: &mut dyn RenderNode,
+        resources: &GraphResources,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         clear: bool,
@@ -983,19 +1081,6 @@ impl WgpuBackend {
             wgpu::LoadOp::Clear(0.0)
         } else {
             wgpu::LoadOp::Load
-        };
-
-        let depth_stencil_attachment = if node.needs_depth() {
-            Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_texture.view,
-                depth_ops: Some(wgpu::Operations {
-                    load: depth_load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            })
-        } else {
-            None
         };
 
         let color_load = if clear {
@@ -1009,18 +1094,79 @@ impl WgpuBackend {
             wgpu::LoadOp::Load
         };
 
+        let render_node_descriptor = node.describe_pass();
+        let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = Vec::new();
+        let mut i = 0;
+        let mut depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment<'_>> = None;
+
+        for output_texture in render_node_descriptor.output_textures {
+            let texture_name = match output_texture {
+                OutputTexture::Create(slot) => slot.name,
+                OutputTexture::WriteTo(name) => name,
+            };
+
+            if texture_name == "swapchain_image" {
+                color_attachments.insert(
+                    i,
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: color_load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                );
+                i += 1;
+                continue;
+            }
+
+            let handle = resources.texture(texture_name).unwrap();
+            let Some(view) = self.get_texture_view(*handle) else {
+                continue;
+            };
+            let Some(texture) = self.get_texture(*handle) else {
+                continue;
+            };
+
+            let format = texture.format();
+
+            if WgpuBackend::is_depth(format) {
+                depth_stencil_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: depth_load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                });
+                continue;
+            }
+
+            color_attachments.insert(
+                i,
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: color_load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                }),
+            );
+            i += 1;
+        }
+
+        if color_attachments.len() == 0 && depth_stencil_attachment.is_none() {
+            return;
+        }
+
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Render Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: color_load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment,
+            label: Some(render_node_descriptor.name),
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: depth_stencil_attachment,
             occlusion_query_set: None,
             timestamp_writes: None,
         });
@@ -1115,5 +1261,34 @@ impl WgpuBackend {
         handle: BindGroupLayoutHandle,
     ) -> Option<&wgpu::BindGroupLayout> {
         self.bind_group_layouts.get(&handle)
+    }
+
+    pub fn bytes_per_pixel(format: wgpu::TextureFormat) -> Option<u32> {
+        use wgpu::TextureFormat::*;
+
+        Some(match format {
+            R8Unorm | R8Snorm | R8Uint | R8Sint => 1,
+
+            Rg8Unorm | Rg8Snorm | Rg8Uint | Rg8Sint | R16Uint | R16Sint | R16Float => 2,
+
+            Rgba8Unorm | Rgba8UnormSrgb | Bgra8Unorm | Bgra8UnormSrgb | Rgba8Snorm | Rgba8Uint
+            | Rgba8Sint | R32Float | R32Uint | R32Sint | Depth32Float => 4,
+
+            Rgba16Float | Rgba16Uint | Rgba16Sint | Rg32Float | Rg32Uint | Rg32Sint => 8,
+
+            Rgba32Float | Rgba32Uint | Rgba32Sint => 16,
+
+            _ => return None,
+        })
+    }
+
+    pub fn is_depth(format: wgpu::TextureFormat) -> bool {
+        use wgpu::TextureFormat::*;
+        match format {
+            Depth16Unorm | Depth24Plus | Depth24PlusStencil8 | Depth32Float
+            | Depth32FloatStencil8 | Stencil8 => true,
+
+            _ => return false,
+        }
     }
 }

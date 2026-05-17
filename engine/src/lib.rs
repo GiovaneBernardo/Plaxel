@@ -168,7 +168,14 @@ impl State {
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.renderer.resize(width, height);
-            //self.camera.aspect = width as f32 / height as f32;
+
+            // Resize render graph
+            self.renderer.render_graph.resize(
+                self.renderer.renderer_api.as_mut(),
+                &mut self.renderer.render_resources,
+                width,
+                height,
+            );
         }
     }
 
