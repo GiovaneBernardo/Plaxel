@@ -1,6 +1,7 @@
 pub mod editor;
 pub mod egui_node;
 pub mod hierarchy;
+pub mod viewport_context_menu;
 
 use egui_node::EguiRenderNode;
 

@@ -5,11 +5,10 @@ use engine::renderer::backends::NodeCompileContext;
 use engine::renderer::backends::RenderContext;
 use engine::renderer::backends::RendererAPI;
 use engine::renderer::wgpu_backend::WgpuBackend;
-use engine::renderer::{
-    OutputTexture, RenderNode, RenderNodeDescriptor, RenderResources,
-};
+use engine::renderer::{OutputTexture, RenderNode, RenderNodeDescriptor, RenderResources};
 
 use crate::hierarchy::hierarchy_draw;
+use crate::viewport_context_menu::viewport_context_menu;
 
 pub struct EguiRenderNode {
     egui_ctx: egui::Context,
@@ -18,6 +17,8 @@ pub struct EguiRenderNode {
     clipped_primitives: Vec<egui::ClippedPrimitive>,
     textures_delta: egui::TexturesDelta,
     screen_descriptor: egui_wgpu::ScreenDescriptor,
+    viewport_menu_open: bool,
+    viewport_menu_pos: egui::Pos2,
 }
 
 impl EguiRenderNode {
@@ -32,6 +33,8 @@ impl EguiRenderNode {
                 size_in_pixels: [1, 1],
                 pixels_per_point: 1.0,
             },
+            viewport_menu_open: false,
+            viewport_menu_pos: egui::Pos2::ZERO,
         }
     }
 
@@ -61,6 +64,17 @@ impl EguiRenderNode {
         let raw_input = egui_winit.take_egui_input(&state.window);
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            let open_viewport_menu = ctx.input(|input| {
+                input.modifiers.alt && input.pointer.button_pressed(egui::PointerButton::Secondary)
+            });
+
+            if open_viewport_menu {
+                self.viewport_menu_open = true;
+                self.viewport_menu_pos = ctx
+                    .input(|input| input.pointer.latest_pos())
+                    .unwrap_or_default();
+            }
+
             egui::Window::new("Editor")
                 .resizable([true, true])
                 .show(ctx, |ui| {
@@ -69,6 +83,27 @@ impl EguiRenderNode {
                 });
 
             hierarchy_draw(state, ctx);
+
+            if self.viewport_menu_open {
+                let response = viewport_context_menu(
+                    &mut self.viewport_menu_pos,
+                    &mut self.viewport_menu_open,
+                    state,
+                    ctx,
+                );
+
+                let close_menu = ctx.input(|input| {
+                    input.key_pressed(egui::Key::Escape)
+                        || (input.pointer.any_pressed()
+                            && !response
+                                .rect
+                                .contains(input.pointer.latest_pos().unwrap_or_default()))
+                });
+
+                if close_menu {
+                    self.viewport_menu_open = false;
+                }
+            }
         });
 
         egui_winit.handle_platform_output(&state.window, full_output.platform_output);
