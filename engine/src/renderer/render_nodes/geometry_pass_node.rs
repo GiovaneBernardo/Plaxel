@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use cgmath::{EuclideanSpace, SquareMatrix, point3};
+
 use crate::renderer::core::*;
 use crate::{camera, texture};
 
@@ -23,6 +25,9 @@ impl RenderNode for GeometryPassNode {
         //    input_buffers: &[],
         //    output_buffers: &[],
         //}
+
+        const MAIN_DEPTH_USAGE: TextureUsages =
+            TextureUsages::RENDER_ATTACHMENT.union(TextureUsages::COPY_SRC);
 
         RenderNodeDescriptor {
             name: "geometry_pass",
@@ -49,7 +54,7 @@ impl RenderNode for GeometryPassNode {
                         size: TextureSize::FullRes,
                         format: TextureFormat::Depth32Float,
                         dimension: TextureDimension::D2,
-                        usage: TextureUsages::RENDER_ATTACHMENT,
+                        usage: MAIN_DEPTH_USAGE,
                         mip_levels: 1,
                         sample_count: 1,
                     },
@@ -147,17 +152,40 @@ impl GeometryPassNode {
         self.render_data.clear();
     }
 
-    pub fn get_world_position(
+    pub fn get_world_position_from_depth(
         &mut self,
-        ctx: &mut dyn RenderContext,
-        resources: &mut RenderResources,
+        api: &mut dyn RendererAPI,
+        graph_resources: &mut GraphResources,
+        render_resources: &RenderResources,
         x: f32,
         y: f32,
-    ) {
-        //let Some(texture) = resources.get_labeled::<TextureSlot>("color") else {
-        //    return;
-        //};
-        //ctx.resolved_inputs;
-        //ctx.api().read_texture(ctx.retexture.name, 0.0, 0.0);
+    ) -> cgmath::Point3<f32> {
+        let Some(texture) = graph_resources.texture("main_depth") else {
+            return point3(0.0, 0.0, 0.0);
+        };
+
+        let texture_width = api.get_texture_size(texture).x as f32;
+        let texture_height = api.get_texture_size(texture).y as f32;
+
+        let Some(camera_data) = render_resources.get::<CameraData>() else {
+            return point3(0.0, 0.0, 0.0);
+        };
+
+        let depth = api.read_texture::<f32>(texture, x, y);
+        println!("Depth: {}", depth);
+        let view_proj: cgmath::Matrix4<f32> = camera_data.uniform.view_proj.into();
+        let Some(inv_view_proj) = view_proj.invert() else {
+            return point3(0.0, 0.0, 0.0);
+        };
+
+        let ndc_x = (x / texture_width) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (y / texture_height) * 2.0;
+
+        let clip = cgmath::Vector4::new(ndc_x, ndc_y, depth, 1.0);
+
+        let world = inv_view_proj * clip;
+        let world_pos = world.truncate() / world.w;
+        let world_pos = cgmath::Point3::from_vec(world_pos);
+        world_pos
     }
 }

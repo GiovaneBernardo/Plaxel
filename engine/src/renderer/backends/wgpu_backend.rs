@@ -19,6 +19,7 @@ use crate::renderer::{
     TextureUsages,
 };
 use crate::texture;
+use cgmath::point2;
 use offset_allocator::Allocation;
 use wgpu::IndexFormat;
 use wgpu::util::DeviceExt;
@@ -678,7 +679,7 @@ impl RendererAPI for WgpuBackend {
         self.queue.write_buffer(wgpu_buffer, 0, data);
     }
 
-    fn read_texture_bytes(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]) {
+    fn read_texture_bytes_at(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]) {
         let wgpu_texture = self.get_texture(*texture).unwrap();
         let width = wgpu_texture.width();
         let height = wgpu_texture.height();
@@ -690,13 +691,15 @@ impl RendererAPI for WgpuBackend {
 
         let buffer_size = padded_bytes_per_row as u64 * height as u64;
 
+        // Create buffer used to turn gpu texture into cpu buffer
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
-            size: (wgpu_texture.width() * wgpu_texture.height() * 4) as u64,
+            size: buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
+        // Queue the copy texture to buffer
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -706,7 +709,7 @@ impl RendererAPI for WgpuBackend {
         let texture_size = wgpu::Extent3d {
             width: width,
             height: height,
-            depth_or_array_layers: 0,
+            depth_or_array_layers: 1,
         };
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -726,9 +729,38 @@ impl RendererAPI for WgpuBackend {
             texture_size,
         );
 
+        // Immediately submit queue and read results to cpu
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        //self.device.r
+        let buffer_slice = output_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+        receiver.recv().unwrap().unwrap();
+
+        let data = buffer_slice.get_mapped_range();
+
+        // Send bytes to out[]
+        let px = x as u32;
+        let py = y as u32;
+
+        let offset = (py * padded_bytes_per_row + px * bytes_per_pixel) as usize;
+        let len = out.len().min(bytes_per_pixel as usize);
+
+        out[..len].copy_from_slice(&data[offset..offset + len]);
+
+        // Drop data
+        drop(data);
+        output_buffer.unmap();
     }
 
     // Get using Uuids
@@ -768,6 +800,14 @@ impl RendererAPI for WgpuBackend {
     fn set_texture(&mut self, texture: &texture::Texture) {
         // ?????????????? I don't even know what set_texture is used for
         self.depth_texture = texture.clone();
+    }
+
+    fn get_texture_size(&self, handle: &TextureHandle) -> Point2<u32> {
+        let Some(texture) = self.get_texture(*handle) else {
+            return point2(0, 0);
+        };
+
+        point2(texture.size().width, texture.size().height)
     }
 
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {

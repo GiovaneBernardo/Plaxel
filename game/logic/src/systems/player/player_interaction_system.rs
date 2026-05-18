@@ -2,12 +2,11 @@ use rand::Rng;
 
 use cgmath::Vector3;
 use engine::core::input::{InputState, KeyCode};
-use engine::ecs::commands::Commands;
+use engine::ecs::commands::{Commands, PhysicalSphereParams};
 use engine::ecs::world::World;
 use game_types::game_mode::{GameMode, GameModeState};
 
 use crate::GameCamera;
-use crate::systems::commands::{GameCommandsExt, PhysicalSphereParams};
 
 pub enum Action {
     Interact,

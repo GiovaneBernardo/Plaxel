@@ -1,6 +1,6 @@
 use cgmath::Vector3;
 use rapier3d::{
-    na::{ArrayStorage, Const},
+    na::{ArrayStorage, Const, Quaternion, Translation},
     prelude::*,
 };
 
@@ -194,8 +194,9 @@ impl Physics {
 
         let mut query = Query::<(&mut RapierRigidBodyHandle,)>::new(world);
         query.for_each(|entity, (handle,)| {
-            let ball_body = &physics.rigid_body_set[handle.0];
-            println!("Ball altitude: {}", ball_body.translation().y);
+            let ball_body = &mut physics.rigid_body_set[handle.0];
+
+            ball_body.set_position(nalgebra::Isometry3::translation(1.0, 0.0, 50.0), true);
         });
     }
 }

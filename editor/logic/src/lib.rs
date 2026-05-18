@@ -4,11 +4,19 @@ pub mod hierarchy;
 pub mod viewport_context_menu;
 
 use egui_node::EguiRenderNode;
+use viewport_context_menu::{EditorSpawnRequests, editor_spawn_system};
 
 pub const EGUI_NODE_INDEX: i8 = 10;
 
 #[unsafe(no_mangle)]
 pub fn register_editor(state: &mut engine::State) {
+    if let Some(scene) = state.active_scene_mut() {
+        scene
+            .world_mut()
+            .insert_resource(EditorSpawnRequests::default());
+        scene.update_schedule_mut().add_system(editor_spawn_system);
+    }
+
     let egui_node = EguiRenderNode::new();
     state
         .renderer

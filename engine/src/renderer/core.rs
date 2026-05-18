@@ -152,10 +152,19 @@ impl TextureUsages {
     pub const fn bits(self) -> u32 {
         self.0
     }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
 }
 
 impl std::ops::BitOr for TextureUsages {
     type Output = Self;
+
     fn bitor(self, rhs: Self) -> Self {
         Self(self.0 | rhs.0)
     }
@@ -163,6 +172,7 @@ impl std::ops::BitOr for TextureUsages {
 
 impl std::ops::BitAnd for TextureUsages {
     type Output = Self;
+
     fn bitand(self, rhs: Self) -> Self {
         Self(self.0 & rhs.0)
     }

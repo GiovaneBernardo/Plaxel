@@ -16,6 +16,7 @@ use crate::renderer::{
 };
 use crate::texture;
 use bytemuck::{Pod, Zeroable};
+use cgmath::Point2;
 use uuid::Uuid;
 
 pub trait RendererAPI {
@@ -54,7 +55,7 @@ pub trait RendererAPI {
     ) -> BindGroupLayoutHandle;
     fn write_buffer(&mut self, buffer: BufferHandle, data: &[u8]);
 
-    fn read_texture_bytes(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]);
+    fn read_texture_bytes_at(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]);
 
     // Get using uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle>;
@@ -65,6 +66,8 @@ pub trait RendererAPI {
     fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange;
     fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32;
     fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
+
+    fn get_texture_size(&self, handle: &TextureHandle) -> Point2<u32>;
 
     // Temporary
     fn set_texture(&mut self, texture: &texture::Texture);
@@ -171,7 +174,7 @@ impl<R: RendererAPI + ?Sized> RendererReadTextureExt for R {
             std::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, std::mem::size_of::<T>())
         };
 
-        self.read_texture_bytes(texture, x, y, bytes);
+        self.read_texture_bytes_at(texture, x, y, bytes);
 
         unsafe { value.assume_init() }
     }
