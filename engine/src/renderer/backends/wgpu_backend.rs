@@ -33,6 +33,34 @@ use std::collections::HashMap;
 pub use crate::renderer::backends::*;
 use wgpu;
 
+fn texture_extent_from_descriptor(
+    size: winit::dpi::PhysicalSize<u32>,
+    descriptor: &TextureDescriptor,
+) -> (u32, u32) {
+    let (width, height) = match descriptor.size {
+        TextureSize::FullRes => (size.width, size.height),
+        TextureSize::HalfRes => (size.width / 2, size.height / 2),
+        TextureSize::QuarterRes => (size.width / 4, size.height / 4),
+        TextureSize::Custom { width, height } => (width, height),
+    };
+
+    (width.max(1), height.max(1))
+}
+
+fn load_shader_source(shader_path: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        assets::resources::embedded_shader_source(shader_path)
+            .unwrap_or_else(|| panic!("shader is not embedded for wasm: {shader_path}"))
+            .to_string()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        pollster::block_on(assets::resources::load_string(shader_path)).unwrap()
+    }
+}
+
 // --- From impls: engine types -> wgpu types ---
 
 impl From<TextureFormat> for wgpu::TextureFormat {
@@ -411,8 +439,8 @@ impl RendererAPI for WgpuBackend {
     fn compile(&mut self) {}
 
     fn resize(&mut self, width: u32, height: u32) {
-        self.surface_config.width = width;
-        self.surface_config.height = height;
+        self.surface_config.width = width.max(1);
+        self.surface_config.height = height.max(1);
         self.surface.configure(&self.device, &self.surface_config);
         self.depth_texture = texture::Texture::create_depth_texture(
             &self.device,
@@ -422,14 +450,8 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn resize_texture(&mut self, texture_handle: &TextureHandle, descriptor: &TextureDescriptor) {
-        let width = self.window.inner_size().width;
-        let height = self.window.inner_size().height;
-        let (tex_width, tex_height) = match descriptor.size {
-            TextureSize::FullRes => (width, height),
-            TextureSize::HalfRes => (width / 2, height / 2),
-            TextureSize::QuarterRes => (width / 4, height / 4),
-            TextureSize::Custom { width, height } => (width, height),
-        };
+        let (tex_width, tex_height) =
+            texture_extent_from_descriptor(self.window.inner_size(), descriptor);
 
         let depth_or_array_layers = match descriptor.dimension {
             TextureDimension::Cube => 6,
@@ -537,11 +559,7 @@ impl RendererAPI for WgpuBackend {
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Shader"),
                 source: wgpu::ShaderSource::Wgsl(
-                    pollster::block_on(assets::resources::load_string(
-                        &material.pipeline_descriptor.shader,
-                    ))
-                    .unwrap()
-                    .into(),
+                    load_shader_source(&material.pipeline_descriptor.shader).into(),
                 ),
             });
 
@@ -815,13 +833,8 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureHandle {
-        let size = self.window.inner_size();
-        let (tex_width, tex_height) = match descriptor.size {
-            TextureSize::FullRes => (size.width, size.height),
-            TextureSize::HalfRes => (size.width / 2, size.height / 2),
-            TextureSize::QuarterRes => (size.width / 4, size.height / 4),
-            TextureSize::Custom { width, height } => (width, height),
-        };
+        let (tex_width, tex_height) =
+            texture_extent_from_descriptor(self.window.inner_size(), descriptor);
 
         let depth_or_array_layers = match descriptor.dimension {
             TextureDimension::Cube => 6,
@@ -1076,8 +1089,8 @@ impl WgpuBackend {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
+            width: size.width.max(1),
+            height: size.height.max(1),
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],

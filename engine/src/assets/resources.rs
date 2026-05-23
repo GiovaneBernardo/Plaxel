@@ -8,11 +8,14 @@ use crate::{
 };
 
 #[cfg(target_arch = "wasm32")]
+include!(concat!(env!("OUT_DIR"), "/embedded_shaders.rs"));
+
+#[cfg(target_arch = "wasm32")]
 fn format_url(file_name: &str) -> reqwest::Url {
     let window = web_sys::window().unwrap();
     let location = window.location();
     let origin = location.origin().unwrap();
-    let base = reqwest::Url::parse(&format!("{}/", origin)).unwrap();
+    let base = reqwest::Url::parse(&format!("{}/res/", origin)).unwrap();
     base.join(file_name).unwrap()
 }
 

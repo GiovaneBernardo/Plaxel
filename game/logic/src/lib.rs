@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::{cmp, env};
+use web_time::{Duration, Instant};
 
 mod systems;
 
@@ -95,6 +96,20 @@ struct OctreeBuildResult {
 }
 
 fn spawn_octree_worker(camera_pos: Point3<f32>, tx: mpsc::Sender<OctreeBuildResult>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
+        let max_depth = octree_max_depth(&octree, 0);
+        let mut leaves = Vec::new();
+        Planet::collect_leaf_nodes(&octree, 0, &mut leaves);
+        let _ = tx.send(OctreeBuildResult {
+            camera_pos,
+            max_depth,
+            leaves,
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     rayon::spawn(move || {
         let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
         let max_depth = octree_max_depth(&octree, 0);
@@ -109,21 +124,33 @@ fn spawn_octree_worker(camera_pos: Point3<f32>, tx: mpsc::Sender<OctreeBuildResu
 }
 
 fn spawn_chunk_worker(center: Point3<f32>, size: f32, key: NodeKey, tx: mpsc::Sender<ReadyChunk>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let chunk = build_chunk(center, size, key);
+        let _ = tx.send(chunk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     rayon::spawn(move || {
-        let resolution = size / CHUNK_SIZE as f32;
-        let min_corner = Point3::new(
-            center.x - 16.0 * resolution,
-            center.y - 16.0 * resolution,
-            center.z - 16.0 * resolution,
-        );
-        let grid = Planet::generate_grid(34, 34, 34, resolution, center);
-        let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
-        let _ = tx.send(ReadyChunk {
-            key,
-            vertices,
-            indices,
-        });
+        let chunk = build_chunk(center, size, key);
+        let _ = tx.send(chunk);
     });
+}
+
+fn build_chunk(center: Point3<f32>, size: f32, key: NodeKey) -> ReadyChunk {
+    let resolution = size / CHUNK_SIZE as f32;
+    let min_corner = Point3::new(
+        center.x - 16.0 * resolution,
+        center.y - 16.0 * resolution,
+        center.z - 16.0 * resolution,
+    );
+    let grid = Planet::generate_grid(34, 34, 34, resolution, center);
+    let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
+    ReadyChunk {
+        key,
+        vertices,
+        indices,
+    }
 }
 
 struct PlanetWorkerCoord {
@@ -133,7 +160,7 @@ struct PlanetWorkerCoord {
     completed: usize,
 }
 
-const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
 const PLANET_SIZE: usize = 65536 * 16;
 const CHUNK_SIZE: usize = 32;
@@ -453,7 +480,7 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
 }
 
 fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut World) {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let Some(mut game_state) = world.get_resource_mut::<GameState>() else {
         return;
     };
@@ -774,7 +801,7 @@ impl PlanetExt for Planet {
 
         println!(
             "Amount of nodes to cover entire planet: {:?}",
-            (PLANET_SIZE / CHUNK_SIZE) * (PLANET_SIZE / CHUNK_SIZE) * (PLANET_SIZE / CHUNK_SIZE)
+            u128::from((PLANET_SIZE / CHUNK_SIZE) as u64).pow(3)
         );
 
         let octree = Planet::create_octree(size as u32 / 2, &camera_pos);

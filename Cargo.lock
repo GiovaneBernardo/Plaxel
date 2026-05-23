@@ -640,6 +640,8 @@ name = "editor-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "console_error_panic_hook",
+ "console_log",
  "editor-logic",
  "egui",
  "egui-wgpu",
@@ -647,6 +649,7 @@ dependencies = [
  "engine",
  "game-logic",
  "hot-lib-reloader",
+ "log",
  "wasm-bindgen",
  "wgpu",
  "winit",
@@ -1046,8 +1049,8 @@ dependencies = [
  "pollster",
  "rand",
  "rayon",
- "renderdoc",
  "tracing",
+ "web-time",
  "wgpu",
 ]
 

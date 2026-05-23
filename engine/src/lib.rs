@@ -124,7 +124,7 @@ impl State {
         let camera = camera::Camera {
             position: (0.0, 65536.0, 2.0).into(),
             orientation: cgmath::Quaternion::from_sv(1.0, cgmath::Vector3::new(0.0, 0.0, 0.0)),
-            aspect: size.width as f32 / size.height as f32,
+            aspect: size.width.max(1) as f32 / size.height.max(1) as f32,
             fovy: 65.0,
             znear: 0.1,
             zfar: 15000000.0,
@@ -135,6 +135,8 @@ impl State {
 
         let mut scenes = Vec::new();
         scenes.insert(0, Self::create_main_game_scene());
+
+        let frame_capturer = FrameCapturer::new();
 
         let mut renderer = Renderer::new(window.clone()).await?;
         renderer.init();
@@ -148,7 +150,7 @@ impl State {
             scenes,
             renderer,
             asset_manager,
-            frame_capturer: FrameCapturer::new(),
+            frame_capturer,
             frame_index: 0,
             registered_systems: false,
             input: InputState::new(),

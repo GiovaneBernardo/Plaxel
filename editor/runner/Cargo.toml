@@ -10,7 +10,6 @@ hot-reload = ["dep:hot-lib-reloader"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-engine = { path = "../../engine", features = ["renderdoc"] }
 game-logic = { path = "../../game/logic" }
 editor-logic = { path = "../logic" }
 anyhow = { workspace = true }
@@ -21,11 +20,16 @@ egui-wgpu = { workspace = true }
 hot-lib-reloader = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+engine = { path = "../../engine", features = ["renderdoc"] }
 egui-winit = "0.33.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+engine = { path = "../../engine" }
 egui-winit = { version = "0.33.3", default-features = false }
 wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
+log = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

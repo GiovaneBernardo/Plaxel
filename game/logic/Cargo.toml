@@ -17,8 +17,8 @@ rayon = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 libloading = { workspace = true }
-renderdoc = { workspace = true }
 rand = { workspace = true }
+web-time = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
