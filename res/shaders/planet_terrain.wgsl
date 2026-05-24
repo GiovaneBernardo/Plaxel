@@ -62,6 +62,11 @@ fn get_material_color(index: u32) -> vec4<f32> {
     return vec4(0.2, 0.2, 0.9, 1.0);
 }
 
+@group(1) @binding(0)
+var my_textures: binding_array<texture_2d<f32>, 128>;
+@group(1) @binding(1)
+var default_sampler: sampler;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let distance = length(camera.position - in.clip_position.xyz);
@@ -71,5 +76,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color_a = get_material_color(in.mat_a);
     let color_b = get_material_color(in.mat_b);
     let color_final = mix(color_a, color_b, in.blend) * dot(in.normal, vec3(0.3, 0.5, 0.0)) + (attenuation);
-    return vec4<f32>(color_final);
+
+    return textureSample(my_textures[0], default_sampler, vec2<f32>(in.blend, in.blend));
+    //return vec4<f32>(color_final);
 }

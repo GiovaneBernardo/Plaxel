@@ -14,7 +14,7 @@ use engine::engine_info;
 use engine::model::MeshAsset;
 use engine::model::{ModelVertex, Vertex};
 use engine::renderer::Topology;
-use engine::renderer::{CameraData, RenderData, RenderNode};
+use engine::renderer::{CameraData, FrameBindings, RenderData, RenderNode};
 use engine::renderer::{CullMode, DepthState, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
 use engine::{assets, renderer};
@@ -228,15 +228,21 @@ pub fn register_systems(state: &mut engine::State) {
         .get_node_mut::<GeometryPassNode>(0)
         .and_then(|node| node.camera_bind_group_layout)
         .expect("GeometryPassNode must be compiled before creating planet pipelines");
+    let materials_layout = state
+        .renderer
+        .render_resources
+        .get_labeled::<FrameBindings>("frame_bindings")
+        .map(|bindings| bindings.materials_layout)
+        .expect("Frame material bind group layout must be initialized before creating planet pipelines");
 
     state
         .renderer
         .renderer_api
-        .create_pipeline(&solid_material, &[camera_layout]);
+        .create_pipeline(&solid_material, &[camera_layout, materials_layout]);
     state
         .renderer
         .renderer_api
-        .create_pipeline(&line_material, &[camera_layout]);
+        .create_pipeline(&line_material, &[camera_layout, materials_layout]);
 
     let (chunk_tx, chunk_rx) = mpsc::channel();
     let (octree_tx, octree_rx) = mpsc::channel();

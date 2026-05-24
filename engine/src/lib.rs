@@ -40,7 +40,11 @@ use crate::ecs::scene::Scene;
 use crate::frame_capturer::FrameCapturer;
 use crate::model::{AttributeFormat, MeshAsset, StepMode, VertexAttribute, VertexLayout};
 use crate::renderer::Renderer;
-use crate::renderer::{GeometryPassNode, GeometryRenderQueue};
+use crate::renderer::TextureDimension;
+use crate::renderer::TextureFormat;
+use crate::renderer::TextureSize;
+use crate::renderer::TextureUsages;
+use crate::renderer::{FrameBindings, GeometryPassNode, GeometryRenderQueue};
 
 // This will store the state of our game
 pub struct State {
@@ -192,6 +196,10 @@ impl State {
             self.frame_capturer.request_capture();
         }
 
+        if code == KeyCode::KeyR && is_pressed {
+            self.renderer.renderer_api.reload_shaders();
+        }
+
         let world = self.active_scene_mut().unwrap().world_mut();
         let mut input = world.get_resource_mut::<InputState>().unwrap();
         if is_pressed {
@@ -224,6 +232,32 @@ impl State {
     }
 
     fn handle_dropped_file(&mut self, path: &Path) {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg"))
+        {
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            self.renderer.renderer_api.load_texture(
+                &path.to_str().unwrap().to_string(),
+                &crate::renderer::TextureDescriptor {
+                    label: file_name,
+                    format: TextureFormat::Rgba8Unorm,
+                    size: TextureSize::Custom {
+                        width: 256,
+                        height: 256,
+                    },
+                    dimension: TextureDimension::D2,
+                    usage: TextureUsages::COPY_SRC
+                        | TextureUsages::COPY_DST
+                        | TextureUsages::TEXTURE_BINDING,
+                    mip_levels: 1,
+                    sample_count: 1,
+                },
+            );
+            return;
+        }
+
         if !path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -306,10 +340,18 @@ impl State {
         else {
             anyhow::bail!("GeometryPassNode camera bind group layout is not available");
         };
+        let Some(materials_layout) = self
+            .renderer
+            .render_resources
+            .get_labeled::<FrameBindings>("frame_bindings")
+            .map(|bindings| bindings.materials_layout)
+        else {
+            anyhow::bail!("Frame material bind group layout is not available");
+        };
 
         self.renderer
             .renderer_api
-            .create_pipeline(&material, &[camera_layout]);
+            .create_pipeline(&material, &[camera_layout, materials_layout]);
         let mesh_handle = self.renderer.renderer_api.upload_mesh(&mesh);
 
         let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {

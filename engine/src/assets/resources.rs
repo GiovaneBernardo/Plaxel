@@ -10,6 +10,13 @@ use crate::{
 #[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/embedded_shaders.rs"));
 
+#[cfg(not(target_arch = "wasm32"))]
+fn resource_path(file_name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../res")
+        .join(file_name)
+}
+
 #[cfg(target_arch = "wasm32")]
 fn format_url(file_name: &str) -> reqwest::Url {
     let window = web_sys::window().unwrap();
@@ -27,12 +34,7 @@ pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     };
     #[cfg(not(target_arch = "wasm32"))]
     let txt = {
-        let exe_dir = std::env::current_exe()?
-            .parent()
-            .expect("exe has no parent directory")
-            .to_path_buf();
-
-        let path = exe_dir.join("res").join(file_name);
+        let path = resource_path(file_name);
         eprintln!("Loading: {}", path.display());
         std::fs::read_to_string(path)?
     };
@@ -49,13 +51,7 @@ pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
 
     #[cfg(not(target_arch = "wasm32"))]
     let data = {
-        // Get the folder where the .exe lives
-        let exe_dir = std::env::current_exe()?
-            .parent()
-            .expect("exe has no parent directory")
-            .to_path_buf();
-
-        let path = exe_dir.join("res").join(file_name);
+        let path = resource_path(file_name);
         std::fs::read(path)?
     };
 

@@ -125,10 +125,10 @@ impl RenderNode for EguiRenderNode {
     fn describe_pass(&self) -> RenderNodeDescriptor {
         RenderNodeDescriptor {
             name: "egui",
-            input_textures: &[],
-            output_textures: &[OutputTexture::WriteTo("swapchain_image")],
-            input_buffers: &[],
-            output_buffers: &[],
+            input_textures: Vec::new(),
+            output_textures: vec![OutputTexture::WriteTo("swapchain_image")],
+            input_buffers: Vec::new(),
+            output_buffers: Vec::new(),
         }
     }
 
@@ -193,7 +193,7 @@ impl RenderNode for EguiRenderNode {
         self.textures_delta = egui::TexturesDelta::default();
     }
 
-    fn run(&mut self, ctx: &mut dyn RenderContext) {
+    fn run(&mut self, ctx: &mut dyn RenderContext, _render_resources: &RenderResources) {
         let primitives = &self.clipped_primitives;
         let screen = &self.screen_descriptor;
         let renderer = self.egui_renderer.as_ref().unwrap();

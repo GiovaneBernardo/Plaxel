@@ -52,21 +52,21 @@ impl RenderNode for DebugPassNode {
     fn describe_pass(&self) -> RenderNodeDescriptor {
         RenderNodeDescriptor {
             name: "debug",
-            input_textures: &[],
-            output_textures: &[
+            input_textures: Vec::new(),
+            output_textures: vec![
                 OutputTexture::WriteTo("swapchain_image"),
                 OutputTexture::WriteTo("main_depth"),
             ],
-            input_buffers: &[],
-            output_buffers: &[],
+            input_buffers: Vec::new(),
+            output_buffers: Vec::new(),
         }
     }
 
     fn compile(&mut self, ctx: &mut NodeCompileContext) {
         let buffer = ctx.create_buffer(&BufferDescriptor {
-            label: "camera_uniform",
+            label: "camera_uniform".to_string(),
             size: size_of::<camera::CameraUniform>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST | BufferUsages::VERTEX,
         });
 
         let layout = ctx
@@ -77,6 +77,7 @@ impl RenderNode for DebugPassNode {
                     binding: 0,
                     visibility: ShaderStages::Vertex,
                     entry_type: BindingType::UniformBuffer,
+                    count: None,
                 }],
             });
 
@@ -119,7 +120,7 @@ impl RenderNode for DebugPassNode {
             if self.sphere_instance_count > self.sphere_instance_capacity {
                 let new_cap = self.sphere_instance_count.next_power_of_two().max(64);
                 self.sphere_instance_buffer = Some(api.create_buffer(&BufferDescriptor {
-                    label: "sphere_instance_buffer",
+                    label: "sphere_instance_buffer".to_string(),
                     size: new_cap as u64 * size_of::<InstanceRaw>() as u64,
                     usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 }));
@@ -152,7 +153,7 @@ impl RenderNode for DebugPassNode {
             if self.cube_instance_count > self.cube_instance_capacity {
                 let new_cap = self.cube_instance_count.next_power_of_two().max(64);
                 self.cube_instance_buffer = Some(api.create_buffer(&BufferDescriptor {
-                    label: "cube_instance_buffer",
+                    label: "cube_instance_buffer".to_string(),
                     size: new_cap as u64 * size_of::<InstanceRaw>() as u64,
                     usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 }));
@@ -185,7 +186,7 @@ impl RenderNode for DebugPassNode {
             if self.wire_cube_instance_count > self.wire_cube_instance_capacity {
                 let new_cap = self.wire_cube_instance_count.next_power_of_two().max(64);
                 self.wire_cube_instance_buffer = Some(api.create_buffer(&BufferDescriptor {
-                    label: "wire_cube_instance_buffer",
+                    label: "wire_cube_instance_buffer".to_string(),
                     size: new_cap as u64 * size_of::<InstanceRaw>() as u64,
                     usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 }));
@@ -200,7 +201,7 @@ impl RenderNode for DebugPassNode {
         }
     }
 
-    fn run(&mut self, ctx: &mut dyn RenderContext) {
+    fn run(&mut self, ctx: &mut dyn RenderContext, _render_resources: &RenderResources) {
         ctx.bind_bind_group(0, self.camera_bind_group.unwrap());
 
         // Draw spheres

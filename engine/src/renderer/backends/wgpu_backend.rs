@@ -9,26 +9,31 @@ use crate::model::MeshAsset;
 use crate::model::VertexLayout;
 use crate::renderer::BindGroupHandle;
 use crate::renderer::BufferDescriptor;
+use crate::renderer::FrameBindings;
 use crate::renderer::GraphResources;
 use crate::renderer::OutputTexture;
+use crate::renderer::SamplerDescriptor;
 use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
 pub use crate::renderer::pool::*;
 use crate::renderer::{
-    self, BindGroupEntry, BindingType, BufferUsages, ShaderStages, TextureDimension, TextureFormat,
-    TextureUsages,
+    self, AddressMode, BindGroupEntry, BindingType, BufferUsages, FilterMode, SamplerBorderColor,
+    ShaderStages, TextureDimension, TextureFormat, TextureUsages,
 };
 use crate::texture;
 use cgmath::point2;
 use offset_allocator::Allocation;
 use wgpu::IndexFormat;
+use wgpu::Sampler;
 use wgpu::util::DeviceExt;
+use wgpu::wgt::TextureDataOrder;
 
 use super::{
     BufferHandle, PipelineHandle, RenderGraph, RenderNode, RenderPassHandle, RendererAPI,
     TextureHandle,
 };
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 pub use crate::renderer::backends::*;
 use wgpu;
@@ -124,6 +129,37 @@ impl From<TextureDimension> for wgpu::TextureDimension {
             TextureDimension::D3 => wgpu::TextureDimension::D3,
             TextureDimension::D2Array => wgpu::TextureDimension::D2,
             TextureDimension::Cube => wgpu::TextureDimension::D2,
+        }
+    }
+}
+
+impl From<AddressMode> for wgpu::AddressMode {
+    fn from(mode: AddressMode) -> wgpu::AddressMode {
+        match mode {
+            AddressMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+            AddressMode::Repeat => wgpu::AddressMode::Repeat,
+            AddressMode::MirrorRepeat => wgpu::AddressMode::MirrorRepeat,
+            AddressMode::ClampToBorder => wgpu::AddressMode::ClampToBorder,
+        }
+    }
+}
+
+impl From<FilterMode> for wgpu::FilterMode {
+    fn from(mode: FilterMode) -> wgpu::FilterMode {
+        match mode {
+            FilterMode::Nearest => wgpu::FilterMode::Nearest,
+            FilterMode::Linear => wgpu::FilterMode::Linear,
+        }
+    }
+}
+
+impl From<SamplerBorderColor> for wgpu::SamplerBorderColor {
+    fn from(color: SamplerBorderColor) -> wgpu::SamplerBorderColor {
+        match color {
+            SamplerBorderColor::TransparentBlack => wgpu::SamplerBorderColor::TransparentBlack,
+            SamplerBorderColor::OpaqueBlack => wgpu::SamplerBorderColor::OpaqueBlack,
+            SamplerBorderColor::OpaqueWhite => wgpu::SamplerBorderColor::OpaqueWhite,
+            SamplerBorderColor::Zero => wgpu::SamplerBorderColor::Zero,
         }
     }
 }
@@ -349,6 +385,13 @@ pub struct GpuMesh {
     pub base_vertex: i32,
 }
 
+#[derive(Clone)]
+struct ShaderHotReloadData {
+    pipeline_descriptor: PipelineDescriptor,
+    bind_group_layouts: Vec<BindGroupLayoutHandle>,
+    pipeline_handle: PipelineHandle,
+}
+
 pub struct WgpuBackend {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -364,9 +407,16 @@ pub struct WgpuBackend {
     bind_group_layouts: HashMap<BindGroupLayoutHandle, wgpu::BindGroupLayout>,
     textures: HashMap<TextureHandle, wgpu::Texture>,
     texture_views: HashMap<TextureHandle, wgpu::TextureView>,
+    samplers: HashMap<SamplerHandle, wgpu::Sampler>,
     pool_manager: PoolManager,
     gpu_meshes: HashMap<Handle<MeshAsset>, GpuMesh>,
-    shaders_hot_reload_data: HashMap<String, Vec<(PipelineDescriptor, PipelineHandle)>>,
+    shaders_hot_reload_data: HashMap<String, Vec<ShaderHotReloadData>>,
+    white_texture: Option<TextureHandle>,
+    default_sampler: Option<SamplerHandle>,
+    dirty_global_textures: bool,
+    textures_to_upload: Vec<(u32, TextureHandle)>,
+    uploaded_textures: Vec<TextureHandle>,
+    uploaded_textures_last_available_index: u32,
 }
 
 pub struct WgpuRenderContext<'a> {
@@ -436,7 +486,25 @@ impl RendererAPI for WgpuBackend {
         self
     }
 
-    fn compile(&mut self) {}
+    fn compile(&mut self) {
+        self.create_white_texture();
+        self.default_sampler = Some(self.create_sampler(&SamplerDescriptor {
+            label: "default_sampler".to_string(),
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat,
+            anisotropy_clamp: 16,
+            border_color: None,
+            compare: None,
+            lod_max_clamp: 0.0,
+            lod_min_clamp: 0.0,
+            mag_filter: FilterMode::default(),
+            min_filter: FilterMode::default(),
+            mipmap_filter: FilterMode::default(),
+        }));
+
+        self.uploaded_textures = vec![self.get_white_texture(); 128];
+    }
 
     fn resize(&mut self, width: u32, height: u32) {
         self.surface_config.width = width.max(1);
@@ -459,7 +527,7 @@ impl RendererAPI for WgpuBackend {
         };
 
         let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(descriptor.label),
+            label: Some(descriptor.label.as_str()),
             size: wgpu::Extent3d {
                 width: tex_width,
                 height: tex_height,
@@ -484,7 +552,11 @@ impl RendererAPI for WgpuBackend {
 
     fn submit(&mut self, graph: &RenderGraph) {}
 
-    fn render(&mut self, render_graph: &mut RenderGraph) -> anyhow::Result<()> {
+    fn render(
+        &mut self,
+        render_graph: &mut RenderGraph,
+        render_resources: &mut RenderResources,
+    ) -> anyhow::Result<()> {
         //match state.render(&mut self.on_render) {
         //    Ok(_) => {}
         //    // Reconfigure the surface if it's lost or outdated
@@ -515,10 +587,16 @@ impl RendererAPI for WgpuBackend {
                 label: Some("Render Encoder"),
             });
 
+        // Check if the global textures arrays are dirty to update them
+        if self.dirty_global_textures {
+            self.update_global_textures(render_resources);
+        }
+
         for (i, (_, node)) in render_graph.nodes.iter_mut().enumerate() {
             self.render_node(
                 node.as_mut(),
                 &render_graph.resources,
+                render_resources,
                 &mut encoder,
                 &view,
                 i == 0,
@@ -531,10 +609,131 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn reload_shader(&mut self, shader_path: &str) {
-        //self.create_pipeline(material, bind_group_layouts);
+        let Some(reload_data) = self.shaders_hot_reload_data.get(shader_path).cloned() else {
+            engine_info!("No pipelines registered for shader reload: {shader_path}");
+            return;
+        };
+
+        for data in reload_data {
+            let pipeline =
+                self.create_render_pipeline(&data.pipeline_descriptor, &data.bind_group_layouts);
+            self.pipelines.insert(data.pipeline_handle, pipeline);
+            self.pipelines_by_uuid
+                .insert(data.pipeline_descriptor.uuid, data.pipeline_handle);
+        }
+
+        engine_info!(
+            "Reloaded shader {:?} for {} pipeline(s)",
+            shader_path,
+            self.shaders_hot_reload_data
+                .get(shader_path)
+                .map_or(0, Vec::len)
+        );
+    }
+
+    fn reload_shaders(&mut self) {
+        let shader_paths: Vec<String> = self.shaders_hot_reload_data.keys().cloned().collect();
+
+        for shader_path in shader_paths {
+            self.reload_shader(&shader_path);
+        }
     }
 
     // Load assets
+    fn create_white_texture(&mut self) {
+        let size = 64u32;
+        self.white_texture = Some(self.create_texture(&TextureDescriptor {
+            label: "white_texture".to_string(),
+            format: TextureFormat::Rgba8Unorm,
+            size: TextureSize::Custom {
+                width: size,
+                height: size,
+            },
+            dimension: TextureDimension::D2,
+            usage: TextureUsages::COPY_SRC
+                | TextureUsages::COPY_DST
+                | TextureUsages::TEXTURE_BINDING,
+            mip_levels: 1,
+            sample_count: 1,
+        }));
+
+        let mut texture = self.get_texture(self.white_texture.unwrap()).unwrap();
+        let white = vec![255u8; (size * size * 4) as usize];
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &white,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * size),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    fn get_white_texture(&self) -> TextureHandle {
+        self.white_texture.unwrap()
+    }
+
+    fn get_default_sampler(&self) -> SamplerHandle {
+        self.default_sampler.unwrap()
+    }
+
+    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor) {
+        // Load JPG from disk
+        let img = image::open(path)
+            .expect("Failed to load texture")
+            .to_rgba8();
+
+        let (width, height) = img.dimensions();
+
+        let depth_or_array_layers = match descriptor.dimension {
+            TextureDimension::Cube => 6,
+            _ => 1,
+        };
+
+        let data = img.as_raw();
+
+        let depth_or_array_layers = match descriptor.dimension {
+            TextureDimension::Cube => 6,
+            _ => 1,
+        };
+
+        //let data: [u8; 1] = [32];
+
+        let wgpu_texture = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some(descriptor.label.as_str()),
+                size: wgpu::Extent3d {
+                    width: width,
+                    height: height,
+                    depth_or_array_layers,
+                },
+                mip_level_count: descriptor.mip_levels,
+                sample_count: descriptor.sample_count,
+                dimension: descriptor.dimension.into(),
+                format: descriptor.format.into(),
+                usage: descriptor.usage.into(),
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            &data,
+        );
+
+        let handle = self.add_texture(wgpu_texture);
+        self.upload_texture(&handle, None);
+    }
+
     fn load_material(&mut self, header: &crate::assets::manager::AssetHeader) -> Material {
         engine_info!("Loading material: {:?}", header);
 
@@ -553,115 +752,13 @@ impl RendererAPI for WgpuBackend {
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
     ) {
-        engine_info!("Shader name: {:?}", material.pipeline_descriptor.shader);
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    load_shader_source(&material.pipeline_descriptor.shader).into(),
-                ),
-            });
-
-        let wgpu_layouts: Vec<&wgpu::BindGroupLayout> = bind_group_layouts
-            .iter()
-            .map(|h| self.get_bind_group_layout(*h).unwrap())
-            .collect();
-
-        let render_pipeline_layout =
-            self.device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("Render Pipeline Layout"),
-                    bind_group_layouts: &wgpu_layouts,
-                    push_constant_ranges: &[],
-                });
-
-        engine_info!("Depth Format: {:?}", texture::Texture::DEPTH_FORMAT);
-
-        let desc = &material.pipeline_descriptor;
-
-        // Build vertex buffer layouts from material's layout descriptors
-        let wgpu_attributes: Vec<Vec<wgpu::VertexAttribute>> = desc
-            .vertex_layouts
-            .iter()
-            .map(|layout| {
-                layout
-                    .attributes
-                    .iter()
-                    .map(|attr| wgpu::VertexAttribute {
-                        offset: attr.offset,
-                        shader_location: attr.shader_location,
-                        format: attr.format.into(),
-                    })
-                    .collect()
-            })
-            .collect();
-
-        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = desc
-            .vertex_layouts
-            .iter()
-            .enumerate()
-            .map(|(i, layout)| wgpu::VertexBufferLayout {
-                array_stride: layout.stride,
-                step_mode: layout.step_mode.into(),
-                attributes: &wgpu_attributes[i],
-            })
-            .collect();
-
-        let strip_index_format = match desc.topology {
-            Topology::TriangleStrip | Topology::LineStrip => Some(wgpu::IndexFormat::Uint32),
-            _ => None,
-        };
-
-        let depth_stencil = desc.depth_state.map(|ds| wgpu::DepthStencilState {
-            format: texture::Texture::DEPTH_FORMAT,
-            depth_write_enabled: ds.write_enabled,
-            depth_compare: ds.compare.into(),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        });
-
-        let render_pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&material.pipeline_descriptor.shader),
-                layout: Some(&render_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffer_layouts,
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_config.format,
-                        blend: blend_mode_to_wgpu(desc.blend_mode),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: desc.topology.into(),
-                    strip_index_format,
-                    front_face: desc.front_face.into(),
-                    cull_mode: desc.cull_mode.into(),
-                    polygon_mode: desc.polygon_mode.into(),
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil,
-                multisample: wgpu::MultisampleState {
-                    count: desc.multisample.count,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview: None,
-                cache: None,
-            });
-
-        self.add_render_pipeline(render_pipeline, &material.pipeline_descriptor);
+        let render_pipeline =
+            self.create_render_pipeline(&material.pipeline_descriptor, bind_group_layouts);
+        self.add_render_pipeline(
+            render_pipeline,
+            &material.pipeline_descriptor,
+            bind_group_layouts,
+        );
     }
 
     fn create_render_data(
@@ -781,6 +878,32 @@ impl RendererAPI for WgpuBackend {
         output_buffer.unmap();
     }
 
+    fn upload_texture(&mut self, handle: &TextureHandle, index: Option<u32>) {
+        if index.is_some() {
+            self.uploaded_textures[index.unwrap() as usize] = *handle;
+        } else {
+            let index = self
+                .find_first_empty_uploaded_texture_index(
+                    self.uploaded_textures_last_available_index,
+                )
+                .unwrap_or(self.uploaded_textures.len() as u32);
+
+            if index as usize == self.uploaded_textures.len() {
+                self.uploaded_textures.push(*handle);
+            } else {
+                self.uploaded_textures[index as usize] = *handle;
+            }
+
+            self.uploaded_textures_last_available_index = self
+                .find_first_empty_uploaded_texture_index(index + 1)
+                .unwrap_or(self.uploaded_textures.len() as u32);
+        }
+
+        self.dirty_global_textures = true;
+    }
+
+    // TODO: UNLOAD TEXTURE FROM uploaded_textures
+
     // Get using Uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle> {
         self.pipelines_by_uuid.get(&uuid).cloned()
@@ -842,7 +965,7 @@ impl RendererAPI for WgpuBackend {
         };
 
         let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(descriptor.label),
+            label: Some(descriptor.label.as_str()),
             size: wgpu::Extent3d {
                 width: tex_width,
                 height: tex_height,
@@ -859,9 +982,27 @@ impl RendererAPI for WgpuBackend {
         self.add_texture(wgpu_texture)
     }
 
+    fn create_sampler(&mut self, descriptor: &SamplerDescriptor) -> SamplerHandle {
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(descriptor.label.as_str()),
+            address_mode_u: descriptor.address_mode_u.into(),
+            address_mode_v: descriptor.address_mode_v.into(),
+            address_mode_w: descriptor.address_mode_w.into(),
+            mag_filter: descriptor.mag_filter.into(),
+            min_filter: descriptor.min_filter.into(),
+            mipmap_filter: descriptor.mipmap_filter.into(),
+            lod_min_clamp: descriptor.lod_min_clamp,
+            lod_max_clamp: descriptor.lod_max_clamp,
+            compare: descriptor.compare.map(Into::into),
+            anisotropy_clamp: descriptor.anisotropy_clamp,
+            border_color: descriptor.border_color.map(Into::into),
+        });
+        self.add_sampler(sampler)
+    }
+
     fn create_buffer(&mut self, descriptor: &BufferDescriptor) -> BufferHandle {
         let wgpu_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(descriptor.label),
+            label: Some(descriptor.label.as_str()),
             size: descriptor.size,
             usage: descriptor.usage.into(),
             mapped_at_creation: false,
@@ -881,14 +1022,14 @@ impl RendererAPI for WgpuBackend {
                 binding: entry.binding,
                 visibility: entry.visibility.into(),
                 ty: (&entry.entry_type).into(),
-                count: None,
+                count: entry.count.and_then(NonZeroU32::new),
             })
             .collect();
 
         let wgpu_bind_group_layout =
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some(&descriptor.label),
+                    label: Some(descriptor.label.as_str()),
                     entries: &wgpu_entries,
                 });
 
@@ -896,8 +1037,22 @@ impl RendererAPI for WgpuBackend {
     }
 
     fn create_bind_group(&mut self, descriptor: &BindGroupDescriptor) -> BindGroupHandle {
-        // Collect resource references first since we need to borrow self immutably
         let layout = self.get_bind_group_layout(descriptor.layout).unwrap();
+
+        let mut texture_view_arrays: Vec<Vec<&wgpu::TextureView>> = Vec::new();
+
+        for (_, entry) in &descriptor.entries {
+            if let BindGroupEntry::TextureArray(texture_handles) = entry {
+                let views = texture_handles
+                    .iter()
+                    .map(|handle| self.get_texture_view(**handle).unwrap())
+                    .collect::<Vec<_>>();
+
+                texture_view_arrays.push(views);
+            }
+        }
+
+        let mut texture_array_index = 0;
 
         let wgpu_entries: Vec<wgpu::BindGroupEntry> = descriptor
             .entries
@@ -910,6 +1065,14 @@ impl RendererAPI for WgpuBackend {
                     BindGroupEntry::Texture(handle) => {
                         wgpu::BindingResource::TextureView(self.get_texture_view(*handle).unwrap())
                     }
+                    BindGroupEntry::Sampler(handle) => {
+                        wgpu::BindingResource::Sampler(self.get_sampler(*handle).unwrap())
+                    }
+                    BindGroupEntry::TextureArray(_) => {
+                        let views = &texture_view_arrays[texture_array_index];
+                        texture_array_index += 1;
+                        wgpu::BindingResource::TextureViewArray(views)
+                    }
                 };
                 wgpu::BindGroupEntry {
                     binding: *binding,
@@ -920,7 +1083,7 @@ impl RendererAPI for WgpuBackend {
 
         let wgpu_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout,
-            label: Some(&descriptor.label),
+            label: Some(descriptor.label.as_str()),
             entries: &wgpu_entries,
         });
 
@@ -1064,67 +1227,129 @@ impl WgpuBackend {
             })
             .await?;
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                required_limits: if cfg!(target_arch = "wasm32") {
-                    wgpu::Limits::default()
-                } else {
-                    wgpu::Limits::default()
-                },
-                memory_hints: Default::default(),
-                trace: wgpu::Trace::Off,
+        let info = adapter.get_info();
+        log::info!("adapter backend: {:?}", info.backend);
+        log::info!("adapter name: {}", info.name);
+        log::info!("features: {:?}", adapter.features());
+        log::info!(
+            "max binding array elements: {}",
+            adapter.limits().max_binding_array_elements_per_shader_stage
+        );
+
+        let supported_features = adapter.features();
+        let limits = adapter.limits();
+
+        log::info!("features: {:?}", supported_features);
+        log::info!(
+            "max binding array elements: {}",
+            limits.max_binding_array_elements_per_shader_stage
+        );
+
+        let supported_features = adapter.features();
+        let wanted_features = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        let enabled_features = wanted_features & supported_features;
+
+        let has_texture_binding_array =
+            enabled_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY);
+
+        let has_partially_bound =
+            enabled_features.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY);
+
+        let adapter_limits = adapter.limits();
+
+        let mut required_limits = wgpu::Limits::default();
+        required_limits.max_binding_array_elements_per_shader_stage = adapter_limits
+            .max_binding_array_elements_per_shader_stage
+            .min(128);
+
+        unsafe {
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: enabled_features,
+                    experimental_features: wgpu::ExperimentalFeatures::enabled(),
+                    required_limits: if cfg!(target_arch = "wasm32") {
+                        required_limits
+                    } else {
+                        required_limits
+                    },
+                    memory_hints: Default::default(),
+                    trace: wgpu::Trace::Off,
+                })
+                .await?;
+
+            let wanted_texture_slots = 128;
+            let adapter_limits = adapter.limits();
+
+            let max_supported = adapter_limits.max_binding_array_elements_per_shader_stage;
+
+            if max_supported < wanted_texture_slots {
+                anyhow::bail!(
+                    "Texture binding arrays need {wanted_texture_slots} slots, but this adapter only supports {max_supported}"
+                );
+            }
+
+            if !supported_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY) {
+                anyhow::bail!("This GPU/backend does not support TEXTURE_BINDING_ARRAY");
+            }
+
+            let surface_caps = surface.get_capabilities(&adapter);
+            let surface_format = surface_caps
+                .formats
+                .iter()
+                .find(|f| f.is_srgb())
+                .copied()
+                .unwrap_or(surface_caps.formats[0]);
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: surface_caps.present_modes[0],
+                alpha_mode: surface_caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+
+            let depth_texture =
+                texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+
+            Ok(Self {
+                window,
+                device,
+                queue,
+                surface,
+                surface_config: config,
+                is_surface_configured: false,
+                depth_texture,
+                pipelines: HashMap::new(),
+                pipelines_by_uuid: HashMap::new(),
+                buffers: HashMap::new(),
+                bind_groups: HashMap::new(),
+                bind_group_layouts: HashMap::new(),
+                textures: HashMap::new(),
+                texture_views: HashMap::new(),
+                samplers: HashMap::new(),
+                pool_manager: PoolManager::new(),
+                gpu_meshes: HashMap::new(),
+                shaders_hot_reload_data: HashMap::new(),
+                white_texture: None,
+                default_sampler: None,
+                dirty_global_textures: true,
+                textures_to_upload: Vec::new(),
+                uploaded_textures: Vec::new(),
+                uploaded_textures_last_available_index: 0,
             })
-            .await?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
-        let depth_texture =
-            texture::Texture::create_depth_texture(&device, &config, "depth_texture");
-
-        Ok(Self {
-            window,
-            device,
-            queue,
-            surface,
-            surface_config: config,
-            is_surface_configured: false,
-            depth_texture,
-            pipelines: HashMap::new(),
-            pipelines_by_uuid: HashMap::new(),
-            buffers: HashMap::new(),
-            bind_groups: HashMap::new(),
-            bind_group_layouts: HashMap::new(),
-            textures: HashMap::new(),
-            texture_views: HashMap::new(),
-            pool_manager: PoolManager::new(),
-            gpu_meshes: HashMap::new(),
-            shaders_hot_reload_data: HashMap::new(),
-        })
+        }
     }
 
     fn render_node(
         &mut self,
         node: &mut dyn RenderNode,
         resources: &GraphResources,
+        render_resources: &RenderResources,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         clear: bool,
@@ -1228,7 +1453,7 @@ impl WgpuBackend {
             backend: self,
             pass: render_pass,
         };
-        node.run(&mut ctx);
+        node.run(&mut ctx, render_resources);
 
         //for render_data in &node.render_data {
         //    render_pass.set_pipeline(render_data.pipeline);
@@ -1239,6 +1464,153 @@ impl WgpuBackend {
         //    );
         //    render_pass.draw_indexed(0..render_data.num_elements, 0, 0..1);
         //}
+    }
+
+    pub fn update_global_textures(&mut self, render_resources: &mut RenderResources) {
+        let mut frame_bindings = render_resources
+            .get_labeled_mut::<FrameBindings>("frame_bindings")
+            .unwrap();
+
+        let clone = self.uploaded_textures.clone();
+        let texture_refs: Vec<&TextureHandle> = clone.iter().collect();
+
+        let sampler = self.get_default_sampler();
+        frame_bindings.materials_bind_group = self.create_bind_group(&BindGroupDescriptor {
+            label: "materials_bind_group".to_string(),
+            layout: frame_bindings.materials_layout.clone(),
+            entries: vec![
+                (0, BindGroupEntry::TextureArray(&texture_refs)),
+                (1, BindGroupEntry::Sampler(sampler)),
+            ],
+        });
+    }
+
+    pub fn find_first_empty_uploaded_texture_index(&self, start_index: u32) -> Option<u32> {
+        let white_texture = self.white_texture?;
+
+        self.uploaded_textures
+            .iter()
+            .enumerate()
+            .skip(start_index as usize)
+            .find_map(|(index, texture)| {
+                if *texture == white_texture {
+                    Some(index as u32)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn create_render_pipeline(
+        &self,
+        pipeline_descriptor: &PipelineDescriptor,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> wgpu::RenderPipeline {
+        engine_info!("Shader name: {:?}", pipeline_descriptor.shader);
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    load_shader_source(&pipeline_descriptor.shader).into(),
+                ),
+            });
+
+        let wgpu_layouts: Vec<&wgpu::BindGroupLayout> = bind_group_layouts
+            .iter()
+            .map(|h| self.get_bind_group_layout(*h).unwrap())
+            .collect();
+
+        let render_pipeline_layout =
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Render Pipeline Layout"),
+                    bind_group_layouts: &wgpu_layouts,
+                    push_constant_ranges: &[],
+                });
+
+        engine_info!("Depth Format: {:?}", texture::Texture::DEPTH_FORMAT);
+
+        let desc = pipeline_descriptor;
+
+        let wgpu_attributes: Vec<Vec<wgpu::VertexAttribute>> = desc
+            .vertex_layouts
+            .iter()
+            .map(|layout| {
+                layout
+                    .attributes
+                    .iter()
+                    .map(|attr| wgpu::VertexAttribute {
+                        offset: attr.offset,
+                        shader_location: attr.shader_location,
+                        format: attr.format.into(),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = desc
+            .vertex_layouts
+            .iter()
+            .enumerate()
+            .map(|(i, layout)| wgpu::VertexBufferLayout {
+                array_stride: layout.stride,
+                step_mode: layout.step_mode.into(),
+                attributes: &wgpu_attributes[i],
+            })
+            .collect();
+
+        let strip_index_format = match desc.topology {
+            Topology::TriangleStrip | Topology::LineStrip => Some(wgpu::IndexFormat::Uint32),
+            _ => None,
+        };
+
+        let depth_stencil = desc.depth_state.map(|ds| wgpu::DepthStencilState {
+            format: texture::Texture::DEPTH_FORMAT,
+            depth_write_enabled: ds.write_enabled,
+            depth_compare: ds.compare.into(),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+
+        self.device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&pipeline_descriptor.shader),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffer_layouts,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_config.format,
+                        blend: blend_mode_to_wgpu(desc.blend_mode),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: desc.topology.into(),
+                    strip_index_format,
+                    front_face: desc.front_face.into(),
+                    cull_mode: desc.cull_mode.into(),
+                    polygon_mode: desc.polygon_mode.into(),
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil,
+                multisample: wgpu::MultisampleState {
+                    count: desc.multisample.count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            })
     }
 
     fn get_render_pipeline(
@@ -1252,6 +1624,7 @@ impl WgpuBackend {
         &mut self,
         pipeline: wgpu::RenderPipeline,
         pipeline_descriptor: &PipelineDescriptor,
+        bind_group_layouts: &[BindGroupLayoutHandle],
     ) -> PipelineHandle {
         let handle = PipelineHandle(self.pipelines.len() as u32);
         self.pipelines.insert(handle, pipeline);
@@ -1260,7 +1633,11 @@ impl WgpuBackend {
         self.shaders_hot_reload_data
             .entry(pipeline_descriptor.shader.clone())
             .or_insert_with(Vec::new)
-            .push((pipeline_descriptor.clone(), handle));
+            .push(ShaderHotReloadData {
+                pipeline_descriptor: pipeline_descriptor.clone(),
+                bind_group_layouts: bind_group_layouts.to_vec(),
+                pipeline_handle: handle,
+            });
         handle
     }
 
@@ -1294,6 +1671,16 @@ impl WgpuBackend {
         self.textures.insert(handle, texture);
         self.texture_views.insert(handle, view);
         handle
+    }
+
+    pub fn add_sampler(&mut self, sampler: wgpu::Sampler) -> SamplerHandle {
+        let handle = SamplerHandle(self.samplers.len() as u32);
+        self.samplers.insert(handle, sampler);
+        handle
+    }
+
+    fn get_sampler(&self, handle: SamplerHandle) -> Option<&wgpu::Sampler> {
+        self.samplers.get(&handle)
     }
 
     fn get_texture_view(&self, handle: TextureHandle) -> Option<&wgpu::TextureView> {

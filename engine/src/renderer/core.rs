@@ -37,6 +37,8 @@ pub struct BufferHandle(pub u32);
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct TextureHandle(pub u32);
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
+pub struct SamplerHandle(pub u32);
+#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct BindGroupHandle(pub u32);
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct BindGroupLayoutHandle(pub u32);
@@ -89,12 +91,38 @@ pub enum TextureSize {
     Custom { width: u32, height: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextureDimension {
+    #[default]
     D2,
     D3,
     D2Array,
     Cube,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AddressMode {
+    #[default]
+    ClampToEdge = 0,
+    Repeat = 1,
+    MirrorRepeat = 2,
+    ClampToBorder = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FilterMode {
+    Nearest = 0,
+    #[default]
+    Linear = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SamplerBorderColor {
+    #[default]
+    TransparentBlack,
+    OpaqueBlack,
+    OpaqueWhite,
+    Zero,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -179,7 +207,7 @@ impl std::ops::BitAnd for TextureUsages {
 }
 
 pub struct TextureDescriptor {
-    pub label: &'static str,
+    pub label: String,
     pub format: TextureFormat,
     pub size: TextureSize,
     pub dimension: TextureDimension,
@@ -188,8 +216,23 @@ pub struct TextureDescriptor {
     pub sample_count: u32,
 }
 
+pub struct SamplerDescriptor {
+    pub label: String,
+    pub address_mode_u: AddressMode,
+    pub address_mode_v: AddressMode,
+    pub address_mode_w: AddressMode,
+    pub mag_filter: FilterMode,
+    pub min_filter: FilterMode,
+    pub mipmap_filter: FilterMode,
+    pub lod_min_clamp: f32,
+    pub lod_max_clamp: f32,
+    pub compare: Option<CompareFunction>,
+    pub anisotropy_clamp: u16,
+    pub border_color: Option<SamplerBorderColor>,
+}
+
 pub struct BufferDescriptor {
-    pub label: &'static str,
+    pub label: String,
     pub size: u64,
     pub usage: BufferUsages,
 }
@@ -216,15 +259,18 @@ pub enum BindingType {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum BindGroupEntry {
+pub enum BindGroupEntry<'a> {
     Buffer(BufferHandle),
     Texture(TextureHandle),
+    Sampler(SamplerHandle),
+    TextureArray(&'a [&'a TextureHandle]),
 }
 
 pub struct BindGroupLayoutEntry {
     pub binding: u32,
     pub visibility: ShaderStages,
     pub entry_type: BindingType,
+    pub count: Option<u32>,
 }
 
 pub struct BindGroupLayoutDescriptor {
@@ -232,10 +278,10 @@ pub struct BindGroupLayoutDescriptor {
     pub entries: Vec<BindGroupLayoutEntry>,
 }
 
-pub struct BindGroupDescriptor {
+pub struct BindGroupDescriptor<'a> {
     pub label: String,
     pub layout: BindGroupLayoutHandle,
-    pub entries: Vec<(u32, BindGroupEntry)>,
+    pub entries: Vec<(u32, BindGroupEntry<'a>)>,
 }
 
 pub struct TextureSlot {
@@ -250,10 +296,10 @@ pub struct BufferSlot {
 
 pub struct RenderNodeDescriptor {
     pub name: &'static str,
-    pub input_textures: &'static [&'static str],
-    pub output_textures: &'static [OutputTexture],
-    pub input_buffers: &'static [&'static str],
-    pub output_buffers: &'static [OutputBuffer],
+    pub input_textures: Vec<&'static str>,
+    pub output_textures: Vec<OutputTexture>,
+    pub input_buffers: Vec<&'static str>,
+    pub output_buffers: Vec<OutputBuffer>,
 }
 
 pub enum OutputTexture {
@@ -270,7 +316,7 @@ pub trait RenderNode {
     fn describe_pass(&self) -> RenderNodeDescriptor;
     fn compile(&mut self, ctx: &mut NodeCompileContext);
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI);
-    fn run(&mut self, ctx: &mut dyn RenderContext);
+    fn run(&mut self, ctx: &mut dyn RenderContext, render_resources: &RenderResources);
     fn should_render_to_swapchain(&self) -> bool;
     fn needs_depth(&self) -> bool {
         true
@@ -471,6 +517,16 @@ impl PipelineKey {
     }
 }
 
+pub struct FrameBindings {
+    pub camera_buffer: BufferHandle,
+    pub camera_layout: BindGroupLayoutHandle,
+    pub camera_bind_group: BindGroupHandle,
+
+    pub materials_buffer: BufferHandle,
+    pub materials_layout: BindGroupLayoutHandle,
+    pub materials_bind_group: BindGroupHandle,
+}
+
 pub struct RenderResources {
     map: HashMap<(TypeId, &'static str), Box<dyn Any + Send + Sync>>,
 }
@@ -523,6 +579,8 @@ impl Renderer {
 
     pub fn init(&mut self) {
         self.renderer_api.compile();
+        self.init_frame_bindings();
+
         self.render_graph = RenderGraph::default_render_graph(self.renderer_api.as_mut());
         self.render_graph
             .compile(&mut self.render_resources, self.renderer_api.as_mut());
@@ -540,7 +598,8 @@ impl Renderer {
 
     pub fn render(&mut self) -> anyhow::Result<()> {
         self.prepare();
-        self.renderer_api.render(&mut self.render_graph)
+        self.renderer_api
+            .render(&mut self.render_graph, &mut self.render_resources)
     }
 
     pub fn clear_geometry_render_data(&mut self) {
@@ -563,6 +622,92 @@ impl Renderer {
         for item in &queue.items {
             geometry_node.add_render_data(item.clone());
         }
+    }
+
+    pub fn init_frame_bindings(&mut self) {
+        // Camera (group 0)
+        let camera_buffer = self.renderer_api.create_buffer(&BufferDescriptor {
+            label: "camera_uniform".to_string(),
+            size: size_of::<camera::CameraUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST | BufferUsages::VERTEX,
+        });
+
+        let camera_layout =
+            self.renderer_api
+                .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: "camera_layout".to_string(),
+                    entries: vec![BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::Both,
+                        entry_type: BindingType::UniformBuffer,
+                        count: None,
+                    }],
+                });
+
+        let camera_bind_group = self.renderer_api.create_bind_group(&BindGroupDescriptor {
+            label: "camera_bind_group".to_string(),
+            layout: camera_layout,
+            entries: vec![(0, BindGroupEntry::Buffer(camera_buffer))],
+        });
+
+        // Global Materials (group 1)
+        let materials_buffer = self.renderer_api.create_buffer(&BufferDescriptor {
+            label: "materials_uniform".to_string(),
+            size: size_of::<camera::CameraUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
+        let materials_layout =
+            self.renderer_api
+                .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: "materials_layout".to_string(),
+                    entries: vec![
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::Fragment,
+                            entry_type: BindingType::Texture {
+                                dimension: TextureDimension::D2,
+                                multisampled: false,
+                            },
+                            count: Some(128),
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::Fragment,
+                            entry_type: BindingType::Sampler,
+                            count: None,
+                        },
+                    ],
+                });
+
+        let white = self.renderer_api.get_white_texture();
+
+        let textures = vec![white; 128];
+        let texture_refs: Vec<&TextureHandle> = textures.iter().collect();
+
+        let materials_bind_group = self.renderer_api.create_bind_group(&BindGroupDescriptor {
+            label: "materials_bind_group".to_string(),
+            layout: materials_layout,
+            entries: vec![
+                (0, BindGroupEntry::TextureArray(&texture_refs)),
+                (
+                    1,
+                    BindGroupEntry::Sampler(self.renderer_api.get_default_sampler()),
+                ),
+            ],
+        });
+
+        self.render_resources.insert_labeled(
+            "frame_bindings",
+            FrameBindings {
+                camera_buffer,
+                camera_layout,
+                camera_bind_group,
+                materials_buffer,
+                materials_layout,
+                materials_bind_group,
+            },
+        );
     }
 }
 

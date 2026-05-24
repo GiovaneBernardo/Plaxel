@@ -1,6 +1,7 @@
 pub mod wgpu_backend;
 use std::collections::HashMap;
 use std::option;
+use std::path::Path;
 
 pub use crate::State;
 use crate::assets::manager::{AssetHeader, Handle};
@@ -12,7 +13,8 @@ use crate::renderer::core::{
 };
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,
-    BufferDescriptor, BufferUsages, RenderData, RenderResources, TextureDescriptor,
+    BufferDescriptor, BufferUsages, RenderData, RenderResources, SamplerDescriptor, SamplerHandle,
+    TextureDescriptor,
 };
 use crate::texture;
 use bytemuck::{Pod, Zeroable};
@@ -28,11 +30,21 @@ pub trait RendererAPI {
     fn resize_texture(&mut self, texture_handle: &TextureHandle, descriptor: &TextureDescriptor);
     fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle;
     fn submit(&mut self, graph: &RenderGraph);
-    fn render(&mut self, render_graph: &mut RenderGraph) -> anyhow::Result<()>;
+    fn render(
+        &mut self,
+        render_graph: &mut RenderGraph,
+        render_resources: &mut RenderResources,
+    ) -> anyhow::Result<()>;
     fn reload_shader(&mut self, shader_path: &str);
+    fn reload_shaders(&mut self);
 
     // Load assets
+    fn create_white_texture(&mut self);
+    fn get_white_texture(&self) -> TextureHandle;
+    fn get_default_sampler(&self) -> SamplerHandle;
+
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
+    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor);
     fn load_material(&mut self, header: &AssetHeader) -> Material;
     fn create_pipeline(
         &mut self,
@@ -48,6 +60,7 @@ pub trait RendererAPI {
     }
     fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureHandle;
     fn create_buffer(&mut self, descriptor: &BufferDescriptor) -> BufferHandle;
+    fn create_sampler(&mut self, descriptor: &SamplerDescriptor) -> SamplerHandle;
     fn create_bind_group(&mut self, descriptor: &BindGroupDescriptor) -> BindGroupHandle;
     fn create_bind_group_layout(
         &mut self,
@@ -56,6 +69,7 @@ pub trait RendererAPI {
     fn write_buffer(&mut self, buffer: BufferHandle, data: &[u8]);
 
     fn read_texture_bytes_at(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]);
+    fn upload_texture(&mut self, texture: &TextureHandle, index: Option<u32>);
 
     // Get using uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle>;
@@ -82,7 +96,6 @@ pub trait RendererAPI {
 
 pub trait RenderContext {
     fn api(&mut self) -> &mut dyn RendererAPI;
-
     fn bind_pipeline(&mut self, pipeline: PipelineHandle);
     fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle);
     fn bind_index_buffer(&mut self, buffer: BufferHandle);

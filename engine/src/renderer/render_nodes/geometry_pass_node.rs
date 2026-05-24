@@ -20,10 +20,10 @@ impl RenderNode for GeometryPassNode {
 
     fn describe_pass(&self) -> RenderNodeDescriptor {
         //RenderNodeDescriptor {
-        //    input_textures: &[],
-        //    output_textures: &[],
-        //    input_buffers: &[],
-        //    output_buffers: &[],
+        //    input_textures: Vec::new(),
+        //    output_textures: Vec::new(),
+        //    input_buffers: Vec::new(),
+        //    output_buffers: Vec::new(),
         //}
 
         const MAIN_DEPTH_USAGE: TextureUsages =
@@ -31,13 +31,13 @@ impl RenderNode for GeometryPassNode {
 
         RenderNodeDescriptor {
             name: "geometry_pass",
-            input_textures: &[],
-            output_textures: &[
+            input_textures: Vec::new(),
+            output_textures: vec![
                 // Later when the renderer have post processes, uncomment the create path and rename all other nodes to use the main_color
                 //OutputTexture::Create(TextureSlot {
                 //    name: "main_color",
                 //    texture_descriptor: TextureDescriptor {
-                //        label: "main_color",
+                //        label: "main_color".to_string(),
                 //        size: TextureSize::FullRes,
                 //        format: TextureFormat::Bgra8UnormSrgb,
                 //        dimension: TextureDimension::D2,
@@ -50,7 +50,7 @@ impl RenderNode for GeometryPassNode {
                 OutputTexture::Create(TextureSlot {
                     name: "main_depth",
                     texture_descriptor: TextureDescriptor {
-                        label: "main_depth",
+                        label: "main_depth".to_string(),
                         size: TextureSize::FullRes,
                         format: TextureFormat::Depth32Float,
                         dimension: TextureDimension::D2,
@@ -60,8 +60,8 @@ impl RenderNode for GeometryPassNode {
                     },
                 }),
             ],
-            input_buffers: &[],
-            output_buffers: &[],
+            input_buffers: Vec::new(),
+            output_buffers: Vec::new(),
         }
     }
 
@@ -79,9 +79,9 @@ impl RenderNode for GeometryPassNode {
         }
 
         let buffer = ctx.create_buffer(&BufferDescriptor {
-            label: "camera_uniform",
+            label: "camera_uniform".to_string(),
             size: size_of::<camera::CameraUniform>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST | BufferUsages::VERTEX,
         });
 
         let layout = ctx
@@ -92,6 +92,7 @@ impl RenderNode for GeometryPassNode {
                     binding: 0,
                     visibility: ShaderStages::Both,
                     entry_type: BindingType::UniformBuffer,
+                    count: None,
                 }],
             });
 
@@ -114,8 +115,13 @@ impl RenderNode for GeometryPassNode {
         }
     }
 
-    fn run(&mut self, ctx: &mut dyn RenderContext) {
+    fn run(&mut self, ctx: &mut dyn RenderContext, render_resources: &RenderResources) {
         ctx.bind_bind_group(0, self.camera_bind_group.unwrap());
+        if let Some(frame_bindings) =
+            render_resources.get_labeled::<FrameBindings>("frame_bindings")
+        {
+            ctx.bind_bind_group(1, frame_bindings.materials_bind_group);
+        }
         //ctx.bind_bind_group(1, self.pass_inputs_group);
         for render_data in &mut self.render_data {
             let pipeline = ctx
