@@ -34,23 +34,33 @@ struct VertexOutput {
 @vertex
 fn vs_main(
     model: VertexInput,
-    instance: InstanceInput,
 ) -> VertexOutput {
-    let model_matrix = mat4x4<f32>(
-        instance.model_matrix_0,
-        instance.model_matrix_1,
-        instance.model_matrix_2,
-        instance.model_matrix_3,
-    );
-
     var out: VertexOutput;
-    out.normal = model.normal;
-    out.world_position = model.position;
-    out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
+    let world_pos = vec4<f32>(model.position, 1.0);
+
+    out.world_position = world_pos.xyz;
+    out.clip_position = camera.view_proj * world_pos;
+
+    out.normal = safe_normal(model.normal, model.position);
     out.mat_a = u32(model.mats & 0xFFFFu);
     out.mat_b = u32(model.mats >> 16u);
     out.blend = f32(model.blend_packed & 0xFFu) / 255.0;
+
     return out;
+}
+
+fn safe_normal(normal: vec3<f32>, fallback_position: vec3<f32>) -> vec3<f32> {
+    let normal_len2 = dot(normal, normal);
+    if normal_len2 > 0.000001 {
+        return normal * inverseSqrt(normal_len2);
+    }
+
+    let fallback_len2 = dot(fallback_position, fallback_position);
+    if fallback_len2 > 0.000001 {
+        return fallback_position * inverseSqrt(fallback_len2);
+    }
+
+    return vec3<f32>(0.0, 1.0, 0.0);
 }
 
 fn get_material_color(index: u32) -> vec4<f32> {
@@ -67,16 +77,50 @@ var my_textures: binding_array<texture_2d<f32>, 128>;
 @group(1) @binding(1)
 var default_sampler: sampler;
 
+fn triplanar_sample(tex_index: u32, pos: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
+    let texture_scale = 0.0025;
+
+    let n = safe_normal(normal, pos);
+    let an = abs(n);
+
+    let weights = an / max(an.x + an.y + an.z, 0.0001);
+
+    let p = pos * texture_scale;
+
+    var x_uv = p.zy;
+    var y_uv = p.xz;
+    var z_uv = p.xy;
+
+    if n.x < 0.0 {
+        x_uv.x = -x_uv.x;
+    }
+    if n.y < 0.0 {
+        y_uv.x = -y_uv.x;
+    }
+    if n.z < 0.0 {
+        z_uv.x = -z_uv.x;
+    }
+
+    let x_sample = textureSample(my_textures[tex_index], default_sampler, x_uv);
+    let y_sample = textureSample(my_textures[tex_index], default_sampler, y_uv);
+    let z_sample = textureSample(my_textures[tex_index], default_sampler, z_uv);
+
+    return x_sample * weights.x +
+           y_sample * weights.y +
+           z_sample * weights.z;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let distance = length(camera.position - in.clip_position.xyz);
-    let attenuation = 1.0 / (1.0 + 0.09 * distance + 
-    		    0.032 * (distance * distance));
-    let tex_color = vec4(1.0, 1.0, 1.0, 1.0) * dot(in.normal, vec3(0.3, 0.5, 0.0)) + (attenuation);//textureSample(t_diffuse, s_diffuse, in.uv);
-    let color_a = get_material_color(in.mat_a);
-    let color_b = get_material_color(in.mat_b);
-    let color_final = mix(color_a, color_b, in.blend) * dot(in.normal, vec3(0.3, 0.5, 0.0)) + (attenuation);
+    let normal = safe_normal(in.normal, in.world_position);
 
-    return textureSample(my_textures[0], default_sampler, vec2<f32>(in.blend, in.blend));
-    //return vec4<f32>(color_final);
+    let material_a = triplanar_sample(in.mat_a, in.world_position, normal);
+    let material_b = triplanar_sample(in.mat_b, in.world_position, normal);
+    let albedo = mix(material_a, material_b, in.blend);
+
+    let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.4));
+    let diffuse = max(dot(normal, light_dir), 0.0);
+    let lighting = 0.35 + 0.65 * diffuse;
+
+    return vec4<f32>(albedo.rgb * lighting, albedo.a);
 }
