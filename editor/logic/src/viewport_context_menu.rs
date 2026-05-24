@@ -10,10 +10,7 @@ pub struct EditorSpawnRequests {
     pub physical_spheres: Vec<PhysicalSphereParams>,
 }
 
-pub fn editor_spawn_system(
-    world: &mut World,
-    commands: &mut engine::ecs::commands::Commands,
-) {
+pub fn editor_spawn_system(world: &mut World, commands: &mut engine::ecs::commands::Commands) {
     let Some(mut requests) = world.get_resource_mut::<EditorSpawnRequests>() else {
         return;
     };
@@ -45,9 +42,8 @@ pub fn viewport_context_menu(
                     let Some(scene) = state.active_scene_mut() else {
                         return;
                     };
-                    let Some(mut requests) = scene
-                        .world_mut()
-                        .get_resource_mut::<EditorSpawnRequests>()
+                    let Some(mut requests) =
+                        scene.world_mut().get_resource_mut::<EditorSpawnRequests>()
                     else {
                         return;
                     };
@@ -64,7 +60,7 @@ pub fn viewport_context_menu(
 }
 
 pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> cgmath::Point3<f32> {
-    let Some(mut node) = state.renderer.render_graph.take_node(0) else {
+    let Some(mut node) = state.global_resources.renderer.render_graph.take_node(0) else {
         return point3(0.0, 0.0, 0.0);
     };
 
@@ -72,16 +68,20 @@ pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> cgmath::Poi
 
     if let Some(geometry_pass_node) = node.as_any_mut().downcast_mut::<GeometryPassNode>() {
         world_pos = geometry_pass_node.get_world_position_from_depth(
-            state.renderer.renderer_api.as_mut(),
-            &mut state.renderer.render_graph.resources,
-            &mut state.renderer.render_resources,
+            state.global_resources.renderer.renderer_api.as_mut(),
+            &mut state.global_resources.renderer.render_graph.resources,
+            &mut state.global_resources.renderer.render_resources,
             mouse_pos.x,
             mouse_pos.y,
         );
     }
 
     println!("Position: {:?}", world_pos);
-    state.renderer.render_graph.return_node(0, node);
+    state
+        .global_resources
+        .renderer
+        .render_graph
+        .return_node(0, node);
 
     world_pos
 }

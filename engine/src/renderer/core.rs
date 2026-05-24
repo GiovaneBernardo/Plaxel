@@ -6,7 +6,6 @@ use std::{fs, option};
 use uuid::Uuid;
 
 use crate::Arc;
-use crate::InstanceRaw;
 use crate::Window;
 use crate::assets;
 use crate::assets::manager::Handle;

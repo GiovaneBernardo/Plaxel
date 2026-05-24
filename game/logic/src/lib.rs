@@ -209,6 +209,7 @@ pub fn register_systems(state: &mut engine::State) {
     uniform.update_view_proj(&camera);
     let initial_camera_pos = camera.position;
     state
+        .global_resources
         .renderer
         .render_resources
         .insert(CameraData { uniform });
@@ -223,23 +224,29 @@ pub fn register_systems(state: &mut engine::State) {
         .with_cull(CullMode::None);
 
     let camera_layout = state
+        .global_resources
         .renderer
         .render_graph
         .get_node_mut::<GeometryPassNode>(0)
         .and_then(|node| node.camera_bind_group_layout)
         .expect("GeometryPassNode must be compiled before creating planet pipelines");
     let materials_layout = state
+        .global_resources
         .renderer
         .render_resources
         .get_labeled::<FrameBindings>("frame_bindings")
         .map(|bindings| bindings.materials_layout)
-        .expect("Frame material bind group layout must be initialized before creating planet pipelines");
+        .expect(
+            "Frame material bind group layout must be initialized before creating planet pipelines",
+        );
 
     state
+        .global_resources
         .renderer
         .renderer_api
         .create_pipeline(&solid_material, &[camera_layout, materials_layout]);
     state
+        .global_resources
         .renderer
         .renderer_api
         .create_pipeline(&line_material, &[camera_layout, materials_layout]);
@@ -304,7 +311,7 @@ pub fn update(state: &mut engine::State) {
         return;
     };
 
-    let (renderer, scenes) = (&mut state.renderer, &mut state.scenes);
+    let (renderer, scenes) = (&mut state.global_resources.renderer, &mut state.scenes);
     let Some(scene) = scenes.get_mut(scene_index) else {
         return;
     };
@@ -800,6 +807,7 @@ impl PlanetExt for Planet {
     fn generate_planet(state: &mut engine::State, camera_pos: &cgmath::Point3<f32>) -> Self {
         let size: usize = PLANET_SIZE;
         let debug_pass_node: &mut DebugPassNode = state
+            .global_resources
             .renderer
             .render_graph
             .get_node_mut::<DebugPassNode>(1)
@@ -829,6 +837,7 @@ impl PlanetExt for Planet {
         line_material: &Material,
     ) {
         let debug_pass_node: &mut DebugPassNode = state
+            .global_resources
             .renderer
             .render_graph
             .get_node_mut::<DebugPassNode>(1)
@@ -859,21 +868,30 @@ impl PlanetExt for Planet {
                 meshes_count += 1;
                 println!("Added meshes: {}", meshes_count);
                 let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.positions).to_vec();
-                let solid_render_data = state.renderer.renderer_api.create_render_data(
-                    &vertex_bytes,
-                    &mesh.indices,
-                    solid_material.clone(),
-                    &PipelineHandle(0),
-                );
+                let solid_render_data = state
+                    .global_resources
+                    .renderer
+                    .renderer_api
+                    .create_render_data(
+                        &vertex_bytes,
+                        &mesh.indices,
+                        solid_material.clone(),
+                        &PipelineHandle(0),
+                    );
 
-                let line_render_data = state.renderer.renderer_api.create_render_data(
-                    &vertex_bytes,
-                    &mesh.indices,
-                    line_material.clone(),
-                    &PipelineHandle(0),
-                );
+                let line_render_data = state
+                    .global_resources
+                    .renderer
+                    .renderer_api
+                    .create_render_data(
+                        &vertex_bytes,
+                        &mesh.indices,
+                        line_material.clone(),
+                        &PipelineHandle(0),
+                    );
 
                 if let Some(node) = state
+                    .global_resources
                     .renderer
                     .render_graph
                     .nodes
@@ -1440,6 +1458,7 @@ fn rebuild_octree_debug(state: &mut engine::State, camera_pos: &cgmath::Point3<f
     let depth = OCTREE_DEBUG_DEPTH.load(Ordering::Relaxed);
 
     let debug_pass_node: &mut DebugPassNode = state
+        .global_resources
         .renderer
         .render_graph
         .get_node_mut::<DebugPassNode>(1)

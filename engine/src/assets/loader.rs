@@ -1,3 +1,5 @@
+// NOTE: Loader uses engine formats and loads them into the GPU/CPU
+
 use crate::assets::manager::AssetContext;
 use crate::assets::manager::AssetHeader;
 use crate::assets::manager::AssetManager;

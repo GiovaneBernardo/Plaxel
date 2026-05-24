@@ -3,6 +3,7 @@ use std::{path::Path, sync::Arc};
 pub mod assets;
 pub mod core;
 pub mod frame_capturer;
+pub mod global_resources;
 pub mod logging;
 pub mod renderer;
 
@@ -38,6 +39,7 @@ use crate::core::physics::physics::Physics;
 use crate::core::time::Time;
 use crate::ecs::scene::Scene;
 use crate::frame_capturer::FrameCapturer;
+use crate::global_resources::GlobalResources;
 use crate::model::{AttributeFormat, MeshAsset, StepMode, VertexAttribute, VertexLayout};
 use crate::renderer::Renderer;
 use crate::renderer::TextureDimension;
@@ -52,112 +54,29 @@ pub struct State {
     pub active_scene_index: Option<u32>,
     pub scenes: Vec<ecs::scene::Scene>,
     pub events: Vec<WindowEvent>,
-    pub renderer: renderer::Renderer,
-    pub asset_manager: AssetManager,
-    pub frame_capturer: FrameCapturer,
     pub frame_index: u32,
     pub registered_systems: bool,
-    pub input: InputState,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct InstanceRaw {
-    model: [[f32; 4]; 4],
-}
-
-impl InstanceRaw {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            // We need to switch from using a step mode of Vertex to Instance
-            // This means that our shaders will only change to use the next
-            // instance when the shader starts processing a new instance
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                // A mat4 takes up 4 vertex slots as it is technically 4 vec4s. We need to define a slot
-                // for each vec4. We'll have to reassemble the mat4 in the shader.
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    // While our vertex shader only uses locations 0, and 1 now, in later tutorials, we'll
-                    // be using 2, 3, and 4, for Vertex. We'll start at slot 5, not conflict with them later
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        }
-    }
-}
-
-struct Instance {
-    position: cgmath::Vector3<f32>,
-    rotation: cgmath::Quaternion<f32>,
-    scale: f32,
-}
-
-impl Instance {
-    fn to_raw(&self) -> InstanceRaw {
-        InstanceRaw {
-            model: (cgmath::Matrix4::from_translation(self.position)
-                * cgmath::Matrix4::from(self.rotation)
-                * cgmath::Matrix4::from_scale(self.scale))
-            .into(),
-        }
-    }
+    pub global_resources: GlobalResources,
 }
 
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
-        let camera = camera::Camera {
-            position: (0.0, 65536.0, 2.0).into(),
-            orientation: cgmath::Quaternion::from_sv(1.0, cgmath::Vector3::new(0.0, 0.0, 0.0)),
-            aspect: size.width.max(1) as f32 / size.height.max(1) as f32,
-            fovy: 65.0,
-            znear: 0.1,
-            zfar: 15000000.0,
-        };
-
-        let mut camera_uniform = camera::CameraUniform::new();
-        camera_uniform.update_view_proj(&camera);
 
         let mut scenes = Vec::new();
         scenes.insert(0, Self::create_main_game_scene());
 
-        let frame_capturer = FrameCapturer::new();
-
-        let mut renderer = Renderer::new(window.clone()).await?;
-        renderer.init();
-
-        let mut asset_manager = AssetManager::new();
+        let mut global_resources = GlobalResources::new(window.clone()).await;
+        global_resources.renderer.init();
 
         Ok(Self {
             window,
             events: Vec::new(),
             active_scene_index: Some(0),
             scenes,
-            renderer,
-            asset_manager,
-            frame_capturer,
             frame_index: 0,
             registered_systems: false,
-            input: InputState::new(),
+            global_resources,
         })
     }
 
@@ -173,12 +92,12 @@ impl State {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.renderer.resize(width, height);
+            self.global_resources.renderer.resize(width, height);
 
             // Resize render graph
-            self.renderer.render_graph.resize(
-                self.renderer.renderer_api.as_mut(),
-                &mut self.renderer.render_resources,
+            self.global_resources.renderer.render_graph.resize(
+                self.global_resources.renderer.renderer_api.as_mut(),
+                &mut self.global_resources.renderer.render_resources,
                 width,
                 height,
             );
@@ -193,11 +112,11 @@ impl State {
         }
 
         if code == KeyCode::KeyH && is_pressed {
-            self.frame_capturer.request_capture();
+            self.global_resources.frame_capturer.request_capture();
         }
 
         if code == KeyCode::KeyR && is_pressed {
-            self.renderer.renderer_api.reload_shaders();
+            self.global_resources.renderer.renderer_api.reload_shaders();
         }
 
         let world = self.active_scene_mut().unwrap().world_mut();
@@ -238,11 +157,11 @@ impl State {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg"))
         {
             let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-            self.renderer.renderer_api.load_texture(
+            self.global_resources.renderer.renderer_api.load_texture(
                 &path.to_str().unwrap().to_string(),
                 &crate::renderer::TextureDescriptor {
                     label: file_name,
-                    format: TextureFormat::Rgba8Unorm,
+                    format: TextureFormat::Rgba8Srgb,
                     size: TextureSize::Custom {
                         width: 256,
                         height: 256,
@@ -333,6 +252,7 @@ impl State {
             Material::new("shaders/cube.wgsl".to_string()).with_vertex_layouts(vec![vertex_layout]);
 
         let Some(camera_layout) = self
+            .global_resources
             .renderer
             .render_graph
             .get_node_mut::<GeometryPassNode>(0)
@@ -341,6 +261,7 @@ impl State {
             anyhow::bail!("GeometryPassNode camera bind group layout is not available");
         };
         let Some(materials_layout) = self
+            .global_resources
             .renderer
             .render_resources
             .get_labeled::<FrameBindings>("frame_bindings")
@@ -349,10 +270,15 @@ impl State {
             anyhow::bail!("Frame material bind group layout is not available");
         };
 
-        self.renderer
+        self.global_resources
+            .renderer
             .renderer_api
             .create_pipeline(&material, &[camera_layout, materials_layout]);
-        let mesh_handle = self.renderer.renderer_api.upload_mesh(&mesh);
+        let mesh_handle = self
+            .global_resources
+            .renderer
+            .renderer_api
+            .upload_mesh(&mesh);
 
         let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
             return Ok(());
@@ -437,7 +363,9 @@ impl State {
             return;
         };
 
-        self.renderer.sync_geometry_render_queue(scene.world());
+        self.global_resources
+            .renderer
+            .sync_geometry_render_queue(scene.world());
     }
 
     fn clear_input_system(world: &mut World) {
@@ -653,16 +581,19 @@ impl ApplicationHandler<State> for App {
                 }
                 state.window.request_redraw();
                 state.update();
-                state.renderer.clear_geometry_render_data();
+                state.global_resources.renderer.clear_geometry_render_data();
                 if let Some(f) = &mut self.on_update {
                     f(state);
                 }
                 state.sync_render_queues();
                 state.events.clear();
                 let mut state = self.state.as_mut().unwrap();
-                match state.renderer.render() {
+                match state.global_resources.renderer.render() {
                     Ok(_) => {
-                        state.frame_capturer.finish_capture_after_frame();
+                        state
+                            .global_resources
+                            .frame_capturer
+                            .finish_capture_after_frame();
                     }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
