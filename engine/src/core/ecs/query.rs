@@ -1,9 +1,6 @@
 use std::cell::{Ref, RefMut};
 
-use crate::{
-    core::components::core::TransformComponent,
-    ecs::{component::Component, entity::Entity, storage::Storage, world::World},
-};
+use crate::ecs::{component::Component, entity::Entity, storage::Storage, world::World};
 
 pub trait QueryParam<'w> {
     type Fetch;

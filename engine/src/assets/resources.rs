@@ -1,11 +1,6 @@
-use std::io::{BufReader, Cursor};
 
-use image::RgbaImage;
 
-use crate::{
-    engine_info,
-    renderer::{model, texture},
-};
+use crate::renderer::texture;
 
 #[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/embedded_shaders.rs"));

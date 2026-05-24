@@ -1,4 +1,4 @@
-use crate::octree::{self, OctreeNode};
+use crate::octree::OctreeNode;
 use engine::model::*;
 
 pub struct Planet {

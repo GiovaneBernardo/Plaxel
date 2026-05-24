@@ -6,7 +6,6 @@ use crate::assets::manager::Handle;
 use crate::assets::material::PipelineDescriptor;
 use crate::engine_info;
 use crate::model::MeshAsset;
-use crate::model::VertexLayout;
 use crate::renderer::BindGroupHandle;
 use crate::renderer::BufferDescriptor;
 use crate::renderer::FrameBindings;
@@ -17,21 +16,17 @@ use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
 pub use crate::renderer::pool::*;
 use crate::renderer::{
-    self, AddressMode, BindGroupEntry, BindingType, BufferUsages, FilterMode, SamplerBorderColor,
+    AddressMode, BindGroupEntry, BindingType, BufferUsages, FilterMode, SamplerBorderColor,
     ShaderStages, TextureDimension, TextureFormat, TextureUsages,
 };
 use crate::texture;
 use cgmath::point2;
 use offset_allocator::Allocation;
 use wgpu::IndexFormat;
-use wgpu::Sampler;
 use wgpu::util::DeviceExt;
 use wgpu::wgt::TextureDataOrder;
 
-use super::{
-    BufferHandle, PipelineHandle, RenderGraph, RenderNode, RenderPassHandle, RendererAPI,
-    TextureHandle,
-};
+use super::{BufferHandle, PipelineHandle, RenderGraph, RenderNode, TextureHandle};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
@@ -270,10 +265,7 @@ impl From<&BindingType> for wgpu::BindingType {
 }
 
 use crate::model::{AttributeFormat, StepMode};
-use crate::renderer::{
-    BlendMode, CompareFunction, CullMode, DepthState, FrontFace, MultisampleState, PolygonMode,
-    Topology,
-};
+use crate::renderer::{BlendMode, CompareFunction, CullMode, FrontFace, PolygonMode, Topology};
 
 impl From<Topology> for wgpu::PrimitiveTopology {
     fn from(t: Topology) -> wgpu::PrimitiveTopology {
@@ -398,7 +390,6 @@ pub struct WgpuBackend {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     surface: wgpu::Surface<'static>,
-    is_surface_configured: bool,
     depth_texture: texture::Texture,
     pipelines: HashMap<PipelineHandle, wgpu::RenderPipeline>,
     pipelines_by_uuid: HashMap<Uuid, PipelineHandle>,
@@ -414,7 +405,6 @@ pub struct WgpuBackend {
     white_texture: Option<TextureHandle>,
     default_sampler: Option<SamplerHandle>,
     dirty_global_textures: bool,
-    textures_to_upload: Vec<(u32, TextureHandle)>,
     uploaded_textures: Vec<TextureHandle>,
     uploaded_textures_last_available_index: u32,
 }
@@ -546,11 +536,11 @@ impl RendererAPI for WgpuBackend {
         self.texture_views.insert(*texture_handle, view);
     }
 
-    fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle {
+    fn compile_pipeline(&mut self, _node: &dyn RenderNode) -> PipelineHandle {
         PipelineHandle(0)
     }
 
-    fn submit(&mut self, graph: &RenderGraph) {}
+    fn submit(&mut self, _graph: &RenderGraph) {}
 
     fn render(
         &mut self,
@@ -574,7 +564,7 @@ impl RendererAPI for WgpuBackend {
             //render_graph.compile(self.render_resources, self);
         }
 
-        let surface = &self.surface;
+        let _surface = &self.surface;
 
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -657,7 +647,7 @@ impl RendererAPI for WgpuBackend {
             sample_count: 1,
         }));
 
-        let mut texture = self.get_texture(self.white_texture.unwrap()).unwrap();
+        let texture = self.get_texture(self.white_texture.unwrap()).unwrap();
         let white = vec![255u8; (size * size * 4) as usize];
 
         self.queue.write_texture(
@@ -696,7 +686,7 @@ impl RendererAPI for WgpuBackend {
 
         let (width, height) = img.dimensions();
 
-        let depth_or_array_layers = match descriptor.dimension {
+        let _depth_or_array_layers = match descriptor.dimension {
             TextureDimension::Cube => 6,
             _ => 1,
         };
@@ -738,7 +728,7 @@ impl RendererAPI for WgpuBackend {
         engine_info!("Loading material: {:?}", header);
 
         let pipeline_descriptor = PipelineDescriptor::new("shaders/cube.wgsl".to_string());
-        let pipeline_uuid = pipeline_descriptor.uuid;
+        let _pipeline_uuid = pipeline_descriptor.uuid;
         Material::default()
         //Material {
         //    uuid: Uuid::new_v4(),
@@ -766,7 +756,7 @@ impl RendererAPI for WgpuBackend {
         vertex_bytes: &Vec<u8>, // How to turn a Vec of vertices into bytes: bytemuck::cast_slice(&positions_raw).to_vec();
         indices: &Vec<u32>,
         material: Material,
-        pipeline_handle: &PipelineHandle,
+        _pipeline_handle: &PipelineHandle,
     ) -> RenderData {
         let mesh = MeshAsset {
             name: "Cube".to_string(),
@@ -1251,10 +1241,10 @@ impl WgpuBackend {
             | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
         let enabled_features = wanted_features & supported_features;
 
-        let has_texture_binding_array =
+        let _has_texture_binding_array =
             enabled_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY);
 
-        let has_partially_bound =
+        let _has_partially_bound =
             enabled_features.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY);
 
         let adapter_limits = adapter.limits();
@@ -1322,7 +1312,6 @@ impl WgpuBackend {
                 queue,
                 surface,
                 surface_config: config,
-                is_surface_configured: false,
                 depth_texture,
                 pipelines: HashMap::new(),
                 pipelines_by_uuid: HashMap::new(),
@@ -1338,7 +1327,6 @@ impl WgpuBackend {
                 white_texture: None,
                 default_sampler: None,
                 dirty_global_textures: true,
-                textures_to_upload: Vec::new(),
                 uploaded_textures: Vec::new(),
                 uploaded_textures_last_available_index: 0,
             })
@@ -1441,7 +1429,7 @@ impl WgpuBackend {
             return;
         }
 
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(render_node_descriptor.name),
             color_attachments: &color_attachments,
             depth_stencil_attachment: depth_stencil_attachment,
@@ -1467,7 +1455,7 @@ impl WgpuBackend {
     }
 
     pub fn update_global_textures(&mut self, render_resources: &mut RenderResources) {
-        let mut frame_bindings = render_resources
+        let frame_bindings = render_resources
             .get_labeled_mut::<FrameBindings>("frame_bindings")
             .unwrap();
 
@@ -1613,7 +1601,7 @@ impl WgpuBackend {
             })
     }
 
-    fn get_render_pipeline(
+    fn _get_render_pipeline(
         &self,
         pipeline_handle: PipelineHandle,
     ) -> Option<&wgpu::RenderPipeline> {

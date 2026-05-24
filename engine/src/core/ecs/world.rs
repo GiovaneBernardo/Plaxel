@@ -46,13 +46,13 @@ impl World {
         self.resources.insert(resource);
     }
 
-    pub fn get<T: Component>(&self, entity: Entity) -> Option<std::cell::Ref<T>> {
+    pub fn get<T: Component>(&self, entity: Entity) -> Option<std::cell::Ref<'_, T>> {
         let storage = self.storages.get_storage::<T>()?;
 
         std::cell::Ref::filter_map(storage, |s| s.get(entity)).ok()
     }
 
-    pub fn get_mut<T: Component>(&self, entity: Entity) -> Option<std::cell::RefMut<T>> {
+    pub fn get_mut<T: Component>(&self, entity: Entity) -> Option<std::cell::RefMut<'_, T>> {
         let storage = self.storages.get_storage_mut::<T>()?;
 
         std::cell::RefMut::filter_map(storage, |s| s.get_mut(entity)).ok()
@@ -70,11 +70,11 @@ impl World {
         &self.entities
     }
 
-    pub fn get_storage<T: Component>(&self) -> Option<std::cell::Ref<Storage<T>>> {
+    pub fn get_storage<T: Component>(&self) -> Option<std::cell::Ref<'_, Storage<T>>> {
         self.storages.get_storage::<T>()
     }
 
-    pub fn get_storage_mut<T: Component>(&self) -> Option<std::cell::RefMut<Storage<T>>> {
+    pub fn get_storage_mut<T: Component>(&self) -> Option<std::cell::RefMut<'_, Storage<T>>> {
         self.storages.get_storage_mut::<T>()
     }
 }

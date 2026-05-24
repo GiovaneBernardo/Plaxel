@@ -1,14 +1,3 @@
-use cgmath::vec3;
-use engine::{
-    core::{
-        components::{
-            core::TransformComponent,
-            physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
-        },
-        physics::physics::Physics,
-    },
-    ecs::{commands::Commands, entity::Entity, world::World},
-};
 
 // Currently leaving it as an example as I'll clearly forget how to expand the commands
 // This is a very good example on how to do so but it'll be moved to engine

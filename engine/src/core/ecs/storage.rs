@@ -158,7 +158,7 @@ impl Storages {
         }
     }
 
-    pub fn get_storage<T: Component>(&self) -> Option<std::cell::Ref<Storage<T>>> {
+    pub fn get_storage<T: Component>(&self) -> Option<std::cell::Ref<'_, Storage<T>>> {
         self.map.get(&TypeId::of::<T>()).map(|cell| {
             std::cell::Ref::map(cell.borrow(), |boxed| {
                 boxed
@@ -169,7 +169,7 @@ impl Storages {
         })
     }
 
-    pub fn get_storage_mut<T: Component>(&self) -> Option<std::cell::RefMut<Storage<T>>> {
+    pub fn get_storage_mut<T: Component>(&self) -> Option<std::cell::RefMut<'_, Storage<T>>> {
         self.map.get(&TypeId::of::<T>()).map(|cell| {
             std::cell::RefMut::map(cell.borrow_mut(), |boxed| {
                 boxed.as_any_mut().downcast_mut::<Storage<T>>().unwrap()
@@ -194,7 +194,7 @@ impl Storages {
         }
     }
 
-    pub fn ensure_storage<T: Component>(&mut self) -> std::cell::RefMut<Storage<T>> {
+    pub fn ensure_storage<T: Component>(&mut self) -> std::cell::RefMut<'_, Storage<T>> {
         let type_id = TypeId::of::<T>();
 
         let cell = self

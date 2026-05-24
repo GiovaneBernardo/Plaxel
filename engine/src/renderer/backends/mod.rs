@@ -1,23 +1,20 @@
 pub mod wgpu_backend;
 use std::collections::HashMap;
-use std::option;
-use std::path::Path;
 
 pub use crate::State;
 use crate::assets::manager::{AssetHeader, Handle};
-use crate::assets::material::{Material, PipelineDescriptor};
+use crate::assets::material::Material;
 use crate::model::MeshAsset;
 use crate::renderer::core::{
-    BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode, RenderPassHandle,
+    BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode,
     TextureHandle,
 };
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,
-    BufferDescriptor, BufferUsages, RenderData, RenderResources, SamplerDescriptor, SamplerHandle,
+    BufferDescriptor, RenderData, RenderResources, SamplerDescriptor, SamplerHandle,
     TextureDescriptor,
 };
 use crate::texture;
-use bytemuck::{Pod, Zeroable};
 use cgmath::Point2;
 use uuid::Uuid;
 

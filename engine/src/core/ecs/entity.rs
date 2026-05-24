@@ -1,4 +1,4 @@
-use std::num::{NonZero, NonZeroU32};
+use std::num::NonZeroU32;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Entity {

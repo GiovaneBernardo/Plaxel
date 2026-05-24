@@ -3,7 +3,7 @@ use crate::{
     ecs::{commands::Commands, world::World},
 };
 
-pub fn engine_input_system(world: &mut World, commands: &mut Commands) {
+pub fn engine_input_system(world: &mut World, _commands: &mut Commands) {
     let Some(input) = world.get_resource::<InputState>() else {
         return;
     };

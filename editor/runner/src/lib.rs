@@ -5,7 +5,7 @@ use engine::core::input::KeyCode;
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
 )]
 mod game {
-    use engine::{MouseButton, MouseScrollDelta, core::input::KeyCode};
+    use engine::core::input::KeyCode;
     hot_functions_from_file!("game/logic/src/lib.rs");
 }
 

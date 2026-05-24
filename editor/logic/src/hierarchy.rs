@@ -1,7 +1,6 @@
 use cgmath::vec3;
 use engine::{
-    assets::manager::{Asset, AssetManager},
-    core::components::{core::TransformComponent, renderer::MeshRendererComponent},
+    core::components::core::TransformComponent,
     ecs::query::Query,
 };
 
@@ -18,10 +17,10 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
                 state.active_scene_mut().unwrap().world_mut().spawn();
             }
 
-            let mut scene = state.active_scene_mut().unwrap();
-            let mut world = scene.world_mut();
+            let scene = state.active_scene_mut().unwrap();
+            let world = scene.world_mut();
             if ui.button("Spawn 1000").clicked() {
-                for i in 0..1000 {
+                for _i in 0..1000 {
                     let entity = world.spawn();
                     world.insert(
                         entity,

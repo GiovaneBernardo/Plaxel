@@ -1,7 +1,6 @@
 use std::ops::Range;
 
 use uuid::Uuid;
-use wgpu::VertexFormat;
 
 use crate::texture;
 

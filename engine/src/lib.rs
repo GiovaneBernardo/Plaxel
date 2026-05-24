@@ -12,11 +12,8 @@ pub use core::ecs;
 pub use renderer::model;
 pub use renderer::texture;
 
-use cgmath::prelude::*;
-use model::Vertex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
-use wgpu::util::DeviceExt;
 
 pub use winit::{
     application::ApplicationHandler,
@@ -26,7 +23,7 @@ pub use winit::{
     window::Window,
 };
 
-use crate::assets::{manager::AssetManager, material::Material};
+use crate::assets::material::Material;
 use crate::core::components::{
     core::TransformComponent,
     physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
@@ -38,10 +35,8 @@ use crate::core::input::KeyCode;
 use crate::core::physics::physics::Physics;
 use crate::core::time::Time;
 use crate::ecs::scene::Scene;
-use crate::frame_capturer::FrameCapturer;
 use crate::global_resources::GlobalResources;
 use crate::model::{AttributeFormat, MeshAsset, StepMode, VertexAttribute, VertexLayout};
-use crate::renderer::Renderer;
 use crate::renderer::TextureDimension;
 use crate::renderer::TextureFormat;
 use crate::renderer::TextureSize;
@@ -61,7 +56,7 @@ pub struct State {
 
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let size = window.inner_size();
+        let _size = window.inner_size();
 
         let mut scenes = Vec::new();
         scenes.insert(0, Self::create_main_game_scene());
@@ -146,7 +141,7 @@ impl State {
         }
     }
 
-    fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
+    fn handle_mouse_scroll(&mut self, _delta: MouseScrollDelta) {
         //self.camera_controller.handle_mouse_scroll(delta);
     }
 
@@ -587,7 +582,7 @@ impl ApplicationHandler<State> for App {
                 }
                 state.sync_render_queues();
                 state.events.clear();
-                let mut state = self.state.as_mut().unwrap();
+                let state = self.state.as_mut().unwrap();
                 match state.global_resources.renderer.render() {
                     Ok(_) => {
                         state
@@ -617,13 +612,13 @@ impl ApplicationHandler<State> for App {
                 }
             }
             WindowEvent::CursorMoved {
-                position: winit::dpi::PhysicalPosition { x, y },
+                position: winit::dpi::PhysicalPosition { x: _, y: _ },
                 ..
             } => {
                 // state.camera_controller.handle_mouse(x, y);
             }
             WindowEvent::MouseInput {
-                device_id,
+                device_id: _,
                 state: key_state,
                 button,
             } => {
@@ -634,9 +629,9 @@ impl ApplicationHandler<State> for App {
             }
 
             WindowEvent::MouseWheel {
-                device_id,
+                device_id: _,
                 delta,
-                phase,
+                phase: _,
             } => {
                 state.handle_mouse_scroll(delta);
                 if let Some(f) = &mut self.on_mouse_scroll {
@@ -652,8 +647,8 @@ impl ApplicationHandler<State> for App {
 
     fn device_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
-        device_id: DeviceId,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
         event: DeviceEvent,
     ) {
         if let Some(state) = &mut self.state {

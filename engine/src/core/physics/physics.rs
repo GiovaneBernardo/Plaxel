@@ -1,8 +1,5 @@
 use cgmath::Vector3;
-use rapier3d::{
-    na::{ArrayStorage, Const, Quaternion, Translation},
-    prelude::*,
-};
+use rapier3d::prelude::*;
 
 use crate::{
     core::components::{
@@ -53,7 +50,7 @@ impl Physics {
     }
 
     pub fn init() {
-        let gravity = vector!(0.0, -9.81, 0.0);
+        let _gravity = vector!(0.0, -9.81, 0.0);
     }
 
     pub fn step(&mut self) {
@@ -193,7 +190,7 @@ impl Physics {
         });
 
         let mut query = Query::<(&mut RapierRigidBodyHandle,)>::new(world);
-        query.for_each(|entity, (handle,)| {
+        query.for_each(|_entity, (handle,)| {
             let ball_body = &mut physics.rigid_body_set[handle.0];
 
             ball_body.set_position(nalgebra::Isometry3::translation(1.0, 0.0, 50.0), true);

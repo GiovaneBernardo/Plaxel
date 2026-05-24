@@ -1,33 +1,26 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::process::Output;
-use std::{fs, option};
 
 use uuid::Uuid;
 
 use crate::Arc;
 use crate::Window;
-use crate::assets;
 use crate::assets::manager::Handle;
-use crate::assets::material::{Material, PipelineDescriptor};
+use crate::assets::material::Material;
 pub use crate::core::camera;
 use crate::core::components::core::TransformComponent;
-use crate::core::components::physics::RapierRigidBodyHandle;
 use crate::core::components::renderer::MeshRendererComponent;
 use crate::ecs::commands::Commands;
 use crate::ecs::query::Query;
 use crate::ecs::world::World;
-use crate::engine_info;
 use crate::model;
 use crate::model::MeshAsset;
 use crate::model::VertexLayout;
 pub use crate::renderer::backends::*;
-use crate::renderer::model::Vertex;
 pub use crate::renderer::render_nodes::*;
 use crate::renderer::wgpu_backend::WgpuBackend;
-use crate::{State, texture};
+use crate::texture;
 use wgpu;
-use wgpu::util::DeviceExt;
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct PipelineHandle(pub u32);
@@ -324,8 +317,8 @@ pub trait RenderNode {
         &mut self,
         ctx: &mut NodeCompileContext,
         graph_resources: &GraphResources,
-        width: u32,
-        height: u32,
+        _width: u32,
+        _height: u32,
     ) {
         let descriptor = self.describe_pass();
         for output_texture in descriptor.output_textures {
@@ -786,7 +779,7 @@ impl RenderGraph {
         };
         graph.nodes.push((0, Box::new(geometry_pass_node)));
 
-        let meshe = MeshAsset {
+        let _meshe = MeshAsset {
             name: "eae".to_string(),
             uuid: Uuid::new_v4(),
             vertices: Vec::new(),
@@ -941,7 +934,7 @@ impl RenderGraph {
             ],
         };
 
-        let mut sphere_material = Material::new("shaders/debug.wgsl".to_string())
+        let sphere_material = Material::new("shaders/debug.wgsl".to_string())
             .with_vertex_layouts(vec![vertex_layout.clone(), instance_layout.clone()]);
         let cube_material = sphere_material.clone();
         let wire_cube_material = Material::new("shaders/debug.wgsl".to_string())

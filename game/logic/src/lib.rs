@@ -1,23 +1,19 @@
-use engine::core::components::core::TransformComponent;
 use engine::core::input::KeyCode;
-use engine::ecs::query::Query;
 use engine::ecs::world::World;
 #[cfg(feature = "dynamic_linking")]
 #[allow(unused_imports)]
 use engine_dylib;
 
-use cgmath::{self, Array, EuclideanSpace, Vector3, vec3};
+use cgmath::{self, EuclideanSpace, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
 use engine::assets::material::Material;
 use engine::core::physics::physics::Physics;
-use engine::engine_info;
-use engine::model::MeshAsset;
-use engine::model::{ModelVertex, Vertex};
+use engine::model::Vertex;
+use engine::renderer;
 use engine::renderer::Topology;
-use engine::renderer::{CameraData, FrameBindings, RenderData, RenderNode};
-use engine::renderer::{CullMode, DepthState, PipelineHandle};
+use engine::renderer::{CameraData, FrameBindings, RenderData};
+use engine::renderer::{CullMode, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
-use engine::{assets, renderer};
 use game_types::octree::OctreeNode;
 use game_types::planet::{Planet, PlanetVertex};
 use game_types::planet::{PlanetInstance, PlanetMesh};
@@ -25,7 +21,6 @@ pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, mpsc};
-use std::{cmp, env};
 use web_time::{Duration, Instant};
 
 mod systems;
@@ -44,7 +39,6 @@ struct GameState {
     // NodeKey (different position or size) always gets a clean attempt.
     empty_chunks: HashSet<NodeKey>,
     solid_material: Material,
-    line_material: Material,
     update_octree: bool,
     debug_nodes: Vec<(Point3<f32>, f32, u32)>,
     debug_depth: u32,
@@ -76,6 +70,7 @@ struct NodeKey {
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
+#[allow(dead_code)]
 struct ChunkState {
     x: i32,
     y: i32,
@@ -165,7 +160,9 @@ const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 const PLANET_SIZE: usize = 65536 * 16;
 const CHUNK_SIZE: usize = 32;
 
+#[allow(dead_code)]
 static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
+#[allow(dead_code)]
 static OCTREE_MAX_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 const DEPTH_COLORS: [[f32; 4]; 10] = [
@@ -274,7 +271,6 @@ pub fn register_systems(state: &mut engine::State) {
         in_flight: HashSet::new(),
         empty_chunks: HashSet::new(),
         solid_material,
-        line_material,
         update_octree: true,
         debug_nodes: Vec::new(),
         debug_depth: 0,
@@ -292,7 +288,7 @@ pub fn register_systems(state: &mut engine::State) {
         completed: 0,
     });
 
-    let mut update_schedule_mut = scene.update_schedule_mut();
+    let update_schedule_mut = scene.update_schedule_mut();
 
     update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
     update_schedule_mut.add_system(camera_update_system);
@@ -704,79 +700,10 @@ pub fn handle_resize(state: &mut engine::State, width: u32, height: u32) {
     }
 }
 
-fn schedule_planet_generation(state: &mut engine::State) {
-    //let debug_pass_node: &mut DebugPassNode = state
-    //    .renderer
-    //    .render_graph
-    //    .get_node_mut::<DebugPassNode>(1)
-    //    .unwrap();
-    //debug_pass_node.clear_wire_cubes();
-    //debug_pass_node.clear_cubes();
-    //
-    //if let Some(node) = state
-    //    .renderer
-    //    .render_graph
-    //    .nodes
-    //    .first_mut()
-    //    .unwrap()
-    //    .1
-    //    .as_any_mut()
-    //    .downcast_mut::<GeometryPassNode>()
-    //{
-    //    node.clear_render_data();
-    //}
-    //
-    //let size = PLANET_SIZE;
-    //let octree = Planet::create_octree(size as u32 / 2, &state.camera.position);
-    //let max_depth = octree_max_depth(&octree, 0);
-    //OCTREE_MAX_DEPTH.store(max_depth, Ordering::Relaxed);
-    //OCTREE_DEBUG_DEPTH.store(0, Ordering::Relaxed);
-    //
-    //let mut octree_nodes = Vec::new();
-    //Planet::collect_leaf_nodes(&octree, 0, &mut octree_nodes);
-    //println!(
-    //    "planet gen: scheduling {} chunks across rayon workers",
-    //    octree_nodes.len()
-    //);
-    //
-    //let tx_template = {
-    //    let mut coord = worker_coord().lock().unwrap();
-    //    while coord.rx.try_recv().is_ok() {}
-    //    coord.solid_material = Some(
-    //        state
-    //            .game_data
-    //            .downcast_mut::<GameState>()
-    //            .unwrap()
-    //            .solid_material
-    //            .clone(),
-    //    );
-    //    coord.scheduled = octree_nodes.len();
-    //    coord.completed = 0;
-    //    coord.tx.clone()
-    //};
-    //
-    //// Full reset — clear all tracking state since we're starting fresh.
-    //{
-    //    let game_state = state.game_data.downcast_mut::<GameState>().unwrap();
-    //    game_state.in_flight.clear();
-    //    game_state.empty_chunks.clear();
-    //    game_state.current_meshes.clear();
-    //    game_state.previous_leaves.clear();
-    //}
-    //
-    //for (center, node_size, _depth) in octree_nodes {
-    //    let key = NodeKey {
-    //        x: center.x as i32,
-    //        y: center.y as i32,
-    //        z: center.z as i32,
-    //        size: node_size as i32,
-    //    };
-    //    spawn_chunk_worker(center, node_size, key, tx_template.clone());
-    //}
-}
-
 trait PlanetExt {
+    #[allow(dead_code)]
     fn generate_planet(state: &mut engine::State, camera_pos: &cgmath::Point3<f32>) -> Self;
+    #[allow(dead_code)]
     fn load_meshes(
         &mut self,
         state: &mut engine::State,
@@ -806,7 +733,7 @@ trait PlanetExt {
 impl PlanetExt for Planet {
     fn generate_planet(state: &mut engine::State, camera_pos: &cgmath::Point3<f32>) -> Self {
         let size: usize = PLANET_SIZE;
-        let debug_pass_node: &mut DebugPassNode = state
+        let _debug_pass_node: &mut DebugPassNode = state
             .global_resources
             .renderer
             .render_graph
@@ -836,7 +763,7 @@ impl PlanetExt for Planet {
         solid_material: &Material,
         line_material: &Material,
     ) {
-        let debug_pass_node: &mut DebugPassNode = state
+        let _debug_pass_node: &mut DebugPassNode = state
             .global_resources
             .renderer
             .render_graph
@@ -849,7 +776,7 @@ impl PlanetExt for Planet {
 
         let mut meshes_count = 0;
 
-        for (center, node_size, node_depth) in &octree_nodes {
+        for (center, node_size, _node_depth) in &octree_nodes {
             let resolution = node_size / CHUNK_SIZE as f32;
             let min_corner = Point3::new(
                 center.x - 16.0 * resolution,
@@ -879,7 +806,7 @@ impl PlanetExt for Planet {
                         &PipelineHandle(0),
                     );
 
-                let line_render_data = state
+                let _line_render_data = state
                     .global_resources
                     .renderer
                     .renderer_api
@@ -986,23 +913,6 @@ impl PlanetExt for Planet {
                         vec3(bx, by + resolution, bz + resolution),
                         vec3(bx + resolution, by + resolution, bz + resolution),
                     ];
-
-                    fn f(x: f32, y: f32, z: f32) -> f32 {
-                        let r = (x * x + y * y + z * z).sqrt();
-                        r - 1.0
-                    }
-
-                    fn normal_from_function(vert: cgmath::Vector3<f32>) -> [f32; 3] {
-                        let eps = 0.001;
-                        let x = vert.x;
-                        let y = vert.y;
-                        let z = vert.z;
-                        let dx = (f(x + eps, y, z) - f(x - eps, y, z)) / (2.0 * eps);
-                        let dy = (f(x, y + eps, z) - f(x, y - eps, z)) / (2.0 * eps);
-                        let dz = (f(x, y, z + eps) - f(x, y, z - eps)) / (2.0 * eps);
-                        let normal = vec3(dx, dy, dz).normalize();
-                        [normal.x, normal.y, normal.z]
-                    }
 
                     let edges = [
                         (0, 1),
@@ -1190,19 +1100,6 @@ impl PlanetExt for Planet {
     }
 }
 
-trait PlanetMeshExt {
-    fn new() -> Self;
-}
-
-impl PlanetMeshExt for PlanetMesh {
-    fn new() -> Self {
-        PlanetMesh {
-            positions: Vec::new(),
-            indices: Vec::new(),
-        }
-    }
-}
-
 fn hash3(p: Vector3<f32>) -> f32 {
     let ix = (p.x.floor() as i32).wrapping_mul(1619);
     let iy = (p.y.floor() as i32).wrapping_mul(31337);
@@ -1257,20 +1154,20 @@ fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
     value
 }
 
-fn cave_sdf(p: Vector3<f32>) -> f32 {
-    let scale = 0.04;
-    let q = p * scale;
-    let warp = vec3(
-        fbm(q + vec3(1.7, 9.2, 3.4), 3),
-        fbm(q + vec3(8.3, 2.8, 5.1), 3),
-        fbm(q + vec3(4.1, 6.7, 1.9), 3),
-    ) * 2.0
-        - vec3(1.0, 1.0, 1.0);
-    let warped = q + warp * 0.6;
-    let tunnel_r = fbm(warped, 4);
-    let cave_dist = (tunnel_r - 0.5).abs() - 0.08;
-    cave_dist * (1.0 / scale)
-}
+//fn cave_sdf(p: Vector3<f32>) -> f32 {
+//    let scale = 0.04;
+//    let q = p * scale;
+//    let warp = vec3(
+//        fbm(q + vec3(1.7, 9.2, 3.4), 3),
+//        fbm(q + vec3(8.3, 2.8, 5.1), 3),
+//        fbm(q + vec3(4.1, 6.7, 1.9), 3),
+//    ) * 2.0
+//        - vec3(1.0, 1.0, 1.0);
+//    let warped = q + warp * 0.6;
+//    let tunnel_r = fbm(warped, 4);
+//    let cave_dist = (tunnel_r - 0.5).abs() - 0.08;
+//    cave_dist * (1.0 / scale)
+//}
 
 pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
     let planet_r = PLANET_SIZE as f32 / 8.0;
@@ -1290,16 +1187,16 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
     let terrain = sphere - mountain;
     return terrain;
 
-    let depth_below_surface = -terrain;
-    let fade_zone = planet_r * 0.1;
-    let cave_blend = (depth_below_surface / fade_zone).clamp(0.0, 1.0);
-    if cave_blend > 0.0 {
-        let cave = cave_sdf(p);
-        let carved = terrain.max(-cave);
-        terrain + (carved - terrain) * cave_blend
-    } else {
-        terrain
-    }
+    // let depth_below_surface = -terrain;
+    // let fade_zone = planet_r * 0.1;
+    // let cave_blend = (depth_below_surface / fade_zone).clamp(0.0, 1.0);
+    // if cave_blend > 0.0 {
+    //     let cave = cave_sdf(p);
+    //     let carved = terrain.max(-cave);
+    //     terrain + (carved - terrain) * cave_blend
+    // } else {
+    //     terrain
+    // }
 }
 
 const THRESHOLD: f32 = 0.3;
@@ -1329,7 +1226,7 @@ pub fn build_node(
     camera_position: &cgmath::Point3<f32>,
 ) -> OctreeNode {
     let has_surface = has_surface(min, size);
-    let is_behind_horizon = is_behind_horizon(
+    let _is_behind_horizon = is_behind_horizon(
         min + vec3(size * 0.5, size * 0.5, size * 0.5),
         vec3(camera_position.x, camera_position.y, camera_position.z),
         vec3(0.0, 0.0, 0.0),
@@ -1453,6 +1350,7 @@ fn has_surface(min: Vector3<f32>, size: f32) -> bool {
     has_neg && has_pos
 }
 
+#[allow(dead_code)]
 fn rebuild_octree_debug(state: &mut engine::State, camera_pos: &cgmath::Point3<f32>) {
     let size = PLANET_SIZE;
     let depth = OCTREE_DEBUG_DEPTH.load(Ordering::Relaxed);
