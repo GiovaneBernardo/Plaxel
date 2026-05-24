@@ -1,10 +1,10 @@
 use crate::{
     core::input::{InputState, KeyCode, MouseButton},
-    ecs::{commands::Commands, world::World},
+    ecs::{commands::Commands, system::SystemContext},
 };
 
-pub fn engine_input_system(world: &mut World, _commands: &mut Commands) {
-    let Some(input) = world.get_resource::<InputState>() else {
+pub fn engine_input_system(ctx: &mut SystemContext, _commands: &mut Commands) {
+    let Some(input) = ctx.world.get_resource::<InputState>() else {
         return;
     };
 

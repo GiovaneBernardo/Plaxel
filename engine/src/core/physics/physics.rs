@@ -9,7 +9,7 @@ use crate::{
             ColliderComponent, RapierColliderHandle, RapierRigidBodyHandle, RigidBodyComponent,
         },
     },
-    ecs::{commands::Commands, query::Query, world::World},
+    ecs::{commands::Commands, query::Query, system::SystemContext},
 };
 
 pub struct Physics {
@@ -109,7 +109,8 @@ impl Physics {
            let ball_rigid_body_handle = physics.add_rigid_body_dynamic();
            physics.add_sphere_collider(params.radius, ball_rigid_body_handle);
     */
-    pub fn create_missing_rapier_bodies_system(world: &mut World, commands: &mut Commands) {
+    pub fn create_missing_rapier_bodies_system(ctx: &mut SystemContext, commands: &mut Commands) {
+        let world = &mut ctx.world;
         let mut physics = world.get_resource_mut::<Physics>().unwrap();
         let Physics {
             rigid_body_set,

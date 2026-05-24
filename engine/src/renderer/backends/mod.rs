@@ -6,8 +6,7 @@ use crate::assets::manager::{AssetHeader, Handle};
 use crate::assets::material::Material;
 use crate::model::MeshAsset;
 use crate::renderer::core::{
-    BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode,
-    TextureHandle,
+    BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode, TextureHandle,
 };
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,

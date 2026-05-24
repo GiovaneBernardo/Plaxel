@@ -2,8 +2,8 @@ use std::any::Any;
 
 use cgmath::{EuclideanSpace, SquareMatrix, point3};
 
-use crate::renderer::core::*;
 use crate::camera;
+use crate::renderer::core::*;
 
 pub struct GeometryPassNode {
     pub render_data: Vec<RenderData>,

@@ -1,4 +1,7 @@
-use crate::ecs::{schedule::Schedule, world::World};
+use crate::{
+    ecs::{schedule::Schedule, system::SystemContext, world::World},
+    global_resources::GlobalResources,
+};
 
 pub struct Scene {
     world: World,
@@ -35,27 +38,51 @@ impl Scene {
         &mut self.update_schedule
     }
 
-    pub fn init(&mut self) {
-        self.init_schedule.run(&mut self.world);
+    pub fn init(&mut self, globals: &mut GlobalResources) {
+        let mut ctx = SystemContext {
+            world: &mut self.world,
+            globals,
+        };
+        self.init_schedule.run(&mut ctx);
     }
 
-    pub fn load(&mut self) {
-        self.load_schedule.run(&mut self.world);
+    pub fn load(&mut self, globals: &mut GlobalResources) {
+        let mut ctx = SystemContext {
+            world: &mut self.world,
+            globals,
+        };
+        self.load_schedule.run(&mut ctx);
     }
 
-    pub fn update(&mut self) {
-        self.update_schedule.run(&mut self.world);
+    pub fn update(&mut self, globals: &mut GlobalResources) {
+        let mut ctx = SystemContext {
+            world: &mut self.world,
+            globals,
+        };
+        self.update_schedule.run(&mut ctx);
     }
 
-    pub fn fixed_update(&mut self) {
-        self.fixed_update_schedule.run(&mut self.world);
+    pub fn fixed_update(&mut self, globals: &mut GlobalResources) {
+        let mut ctx = SystemContext {
+            world: &mut self.world,
+            globals,
+        };
+        self.fixed_update_schedule.run(&mut ctx);
     }
 
-    pub fn editor_update(&mut self) {
-        self.editor_update_schedule.run(&mut self.world);
+    pub fn editor_update(&mut self, globals: &mut GlobalResources) {
+        let mut ctx = SystemContext {
+            world: &mut self.world,
+            globals,
+        };
+        self.editor_update_schedule.run(&mut ctx);
     }
 
-    pub fn late_update(&mut self) {
-        self.late_update_schedule.run(&mut self.world);
+    pub fn late_update(&mut self, globals: &mut GlobalResources) {
+        let mut ctx = SystemContext {
+            world: &mut self.world,
+            globals,
+        };
+        self.late_update_schedule.run(&mut ctx);
     }
 }

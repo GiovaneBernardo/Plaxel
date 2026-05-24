@@ -3,19 +3,19 @@ use crate::{
         core::TransformComponent,
         physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
     },
-    ecs::{component::Component, entity::Entity, world::World},
+    ecs::{component::Component, entity::Entity, system::SystemContext},
 };
 
 pub trait Command {
-    fn apply(self: Box<Self>, world: &mut World);
+    fn apply(self: Box<Self>, ctx: &mut SystemContext);
 }
 
 impl<F> Command for F
 where
-    F: FnOnce(&mut World),
+    F: FnOnce(&mut SystemContext),
 {
-    fn apply(self: Box<Self>, world: &mut World) {
-        self(world);
+    fn apply(self: Box<Self>, ctx: &mut SystemContext) {
+        self(ctx);
     }
 }
 
@@ -34,25 +34,25 @@ impl Commands {
         Self { queue: Vec::new() }
     }
 
-    pub fn push(&mut self, command: impl FnOnce(&mut World) + 'static) {
+    pub fn push(&mut self, command: impl FnOnce(&mut SystemContext) + 'static) {
         self.queue.push(Box::new(command));
     }
 
     pub fn spawn(&mut self) {
-        self.push(|world: &mut World| {
-            world.spawn();
+        self.push(|ctx: &mut SystemContext| {
+            ctx.world.spawn();
         });
     }
 
     pub fn insert<T: Component>(&mut self, entity: Entity, component: T) {
-        self.push(move |world: &mut World| {
-            world.insert(entity, component);
+        self.push(move |ctx: &mut SystemContext| {
+            ctx.world.insert(entity, component);
         });
     }
 
-    pub fn apply(&mut self, world: &mut World) {
+    pub fn apply(&mut self, ctx: &mut SystemContext) {
         for command in self.queue.drain(..) {
-            command.apply(world);
+            command.apply(ctx);
         }
     }
 
@@ -65,9 +65,9 @@ impl Commands {
     }
 
     pub fn spawn_physical_sphere(&mut self, params: PhysicalSphereParams) {
-        self.push(move |world: &mut World| {
-            let entity = world.spawn();
-            world.insert(
+        self.push(move |ctx: &mut SystemContext| {
+            let entity = ctx.world.spawn();
+            ctx.world.insert(
                 entity,
                 TransformComponent {
                     position: params.position,
@@ -76,7 +76,7 @@ impl Commands {
                     velocity: cgmath::vec3(0.0, 0.0, 0.0),
                 },
             );
-            world.insert(
+            ctx.world.insert(
                 entity,
                 ColliderComponent {
                     shape: ColliderShape::Sphere {
@@ -86,7 +86,7 @@ impl Commands {
                     restitution: 0.5,
                 },
             );
-            world.insert(
+            ctx.world.insert(
                 entity,
                 RigidBodyComponent {
                     kind: BodyKind::Dynamic,

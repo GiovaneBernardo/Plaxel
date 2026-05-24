@@ -1,4 +1,3 @@
-
 // Currently leaving it as an example as I'll clearly forget how to expand the commands
 // This is a very good example on how to do so but it'll be moved to engine
 // TODO: Remember to delete as soon as this file has another command that can be used as an example

@@ -22,7 +22,12 @@ fn main() {
         .args(["--print", "sysroot"])
         .output()
         .expect("failed to invoke `rustc --print sysroot`");
-    let sysroot = PathBuf::from(String::from_utf8(sysroot_out.stdout).unwrap().trim().to_owned());
+    let sysroot = PathBuf::from(
+        String::from_utf8(sysroot_out.stdout)
+            .unwrap()
+            .trim()
+            .to_owned(),
+    );
     let bin_dir = sysroot.join("bin");
 
     // OUT_DIR is `<target>/<profile>/build/<crate>-<hash>/out`; climb 3 to
@@ -34,7 +39,10 @@ fn main() {
         .expect("unexpected OUT_DIR depth")
         .to_path_buf();
 
-    for entry in std::fs::read_dir(&bin_dir).expect("read sysroot bin dir").flatten() {
+    for entry in std::fs::read_dir(&bin_dir)
+        .expect("read sysroot bin dir")
+        .flatten()
+    {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let is_std_artifact = name_str.starts_with("std-")

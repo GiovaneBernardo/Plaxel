@@ -208,10 +208,8 @@ impl CameraController {
             roll_amount += 1.0;
         }
         if roll_amount != 0.0 {
-            let roll = Quaternion::from_axis_angle(
-                -Vector3::unit_z(),
-                cgmath::Rad(roll_amount * 0.02),
-            );
+            let roll =
+                Quaternion::from_axis_angle(-Vector3::unit_z(), cgmath::Rad(roll_amount * 0.02));
             camera.orientation = (camera.orientation * roll).normalize();
         }
 
@@ -245,4 +243,3 @@ impl CameraController {
         }
     }
 }
-

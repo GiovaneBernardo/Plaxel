@@ -1,4 +1,5 @@
 pub use crate::assets::loader;
+use crate::assets::server::AssetServer;
 use crate::renderer::RendererAPI;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -67,6 +68,7 @@ pub trait Asset {
 }
 
 pub struct AssetManager {
+    pub server: AssetServer,
     pub headers: HashMap<Uuid, AssetHeader>,
     pub assets: HashMap<Uuid, Box<dyn Asset>>,
 }
@@ -74,6 +76,7 @@ pub struct AssetManager {
 impl AssetManager {
     pub fn new() -> Self {
         Self {
+            server: AssetServer {},
             headers: HashMap::new(),
             assets: HashMap::new(),
         }

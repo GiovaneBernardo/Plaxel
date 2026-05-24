@@ -1,5 +1,3 @@
-
-
 use crate::renderer::texture;
 
 #[cfg(target_arch = "wasm32")]

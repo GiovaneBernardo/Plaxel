@@ -1,4 +1,5 @@
 use engine::core::input::KeyCode;
+use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
 #[cfg(feature = "dynamic_linking")]
 #[allow(unused_imports)]
@@ -320,7 +321,8 @@ pub fn update(state: &mut engine::State) {
     state.frame_index += 1;
 }
 
-fn camera_update_system(world: &mut World, _commands: &mut engine::ecs::commands::Commands) {
+fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
+    let world = &mut ctx.world;
     let Some(mut camera) = world.get_resource_mut::<GameCamera>() else {
         return;
     };
@@ -352,7 +354,8 @@ fn should_request_octree_rebuild(game_state: &GameState, camera_pos: Point3<f32>
     distance >= threshold
 }
 
-fn planet_lod_system(world: &mut World, _commands: &mut engine::ecs::commands::Commands) {
+fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
+    let world = &mut ctx.world;
     let camera_pos = {
         let Some(camera) = world.get_resource::<GameCamera>() else {
             return;

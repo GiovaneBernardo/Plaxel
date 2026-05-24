@@ -1,7 +1,7 @@
 use cgmath::point3;
 use egui::{Pos2, Response};
 use engine::{
-    ecs::{commands::PhysicalSphereParams, world::World},
+    ecs::{commands::PhysicalSphereParams, system::SystemContext},
     renderer::GeometryPassNode,
 };
 
@@ -10,8 +10,11 @@ pub struct EditorSpawnRequests {
     pub physical_spheres: Vec<PhysicalSphereParams>,
 }
 
-pub fn editor_spawn_system(world: &mut World, commands: &mut engine::ecs::commands::Commands) {
-    let Some(mut requests) = world.get_resource_mut::<EditorSpawnRequests>() else {
+pub fn editor_spawn_system(
+    ctx: &mut SystemContext,
+    commands: &mut engine::ecs::commands::Commands,
+) {
+    let Some(mut requests) = ctx.world.get_resource_mut::<EditorSpawnRequests>() else {
         return;
     };
 

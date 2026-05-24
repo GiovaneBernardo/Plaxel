@@ -1,8 +1,5 @@
 use cgmath::vec3;
-use engine::{
-    core::components::core::TransformComponent,
-    ecs::query::Query,
-};
+use engine::{core::components::core::TransformComponent, ecs::query::Query};
 
 #[unsafe(no_mangle)]
 pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {

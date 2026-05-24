@@ -10,9 +10,9 @@ use crate::assets::material::Material;
 pub use crate::core::camera;
 use crate::core::components::core::TransformComponent;
 use crate::core::components::renderer::MeshRendererComponent;
-use crate::ecs::commands::Commands;
 use crate::ecs::query::Query;
 use crate::ecs::world::World;
+use crate::ecs::{commands::Commands, system::SystemContext};
 use crate::model;
 use crate::model::MeshAsset;
 use crate::model::VertexLayout;
@@ -1077,7 +1077,8 @@ impl GeometryRenderQueue {
     }
 }
 
-pub fn get_render_data_system(world: &mut World, _commands: &mut Commands) {
+pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands) {
+    let world = &mut ctx.world;
     let render_data = {
         let mut items = Vec::new();
 

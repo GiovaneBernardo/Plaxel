@@ -2,7 +2,7 @@ use rand::Rng;
 
 use engine::core::input::{InputState, KeyCode};
 use engine::ecs::commands::{Commands, PhysicalSphereParams};
-use engine::ecs::world::World;
+use engine::ecs::system::SystemContext;
 use game_types::game_mode::{GameMode, GameModeState};
 
 #[allow(dead_code)]
@@ -52,7 +52,8 @@ impl InputMap {
     }
 }
 
-pub fn player_interaction_system(world: &mut World, commands: &mut Commands) {
+pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Commands) {
+    let world = &mut ctx.world;
     let Some(input) = world.get_resource::<InputState>() else {
         return;
     };
@@ -80,8 +81,8 @@ pub fn player_interaction_system(world: &mut World, commands: &mut Commands) {
             }
 
             if input_map.just_pressed(&input, Action::OpenMenu) {
-                commands.push(|world| {
-                    world.get_resource_mut::<GameModeState>().unwrap().mode = GameMode::Menu;
+                commands.push(|ctx| {
+                    ctx.world.get_resource_mut::<GameModeState>().unwrap().mode = GameMode::Menu;
                 });
             }
         }
@@ -95,8 +96,8 @@ pub fn player_interaction_system(world: &mut World, commands: &mut Commands) {
         GameMode::Menu => {
             println!("Menu");
             if input_map.just_pressed(&input, Action::OpenMenu) {
-                commands.push(|world| {
-                    world.get_resource_mut::<GameModeState>().unwrap().mode = GameMode::Walking;
+                commands.push(|ctx| {
+                    ctx.world.get_resource_mut::<GameModeState>().unwrap().mode = GameMode::Walking;
                 });
             }
         }

@@ -329,8 +329,10 @@ impl State {
     }
 
     fn update(&mut self) {
-        if let Some(scene) = self.active_scene_mut() {
-            scene.update();
+        if let Some(scene_index) = self.active_scene_index.map(|i| i as usize) {
+            if let Some(scene) = self.scenes.get_mut(scene_index) {
+                scene.update(&mut self.global_resources);
+            }
         }
 
         let world = self.active_scene_mut().unwrap().world_mut();
