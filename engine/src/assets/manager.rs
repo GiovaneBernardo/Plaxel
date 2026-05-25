@@ -1,9 +1,12 @@
 pub use crate::assets::loader;
 use crate::assets::server::AssetServer;
 use crate::renderer::RendererAPI;
+use std::any::Any;
+use std::any::TypeId;
 use std::hash::Hash;
 use std::hash::Hasher;
 pub use std::path::Path;
+use std::sync::Arc;
 use std::{collections::HashMap, fs};
 pub use uuid::Uuid;
 
@@ -43,7 +46,9 @@ impl<T> Hash for Handle<T> {
     }
 }
 
-#[derive(Copy, Clone, serde::Serialize, serde::Deserialize, std::fmt::Debug)]
+#[derive(
+    Copy, Clone, serde::Serialize, serde::Deserialize, std::fmt::Debug, PartialEq, Eq, Hash,
+)]
 pub enum AssetType {
     Material,
     Texture,
@@ -64,13 +69,36 @@ pub struct AssetHeader {
 }
 
 pub trait Asset {
+    const ASSET_TYPE: AssetType;
+
     fn uuid(&self) -> Uuid;
+}
+
+pub struct Assets<T> {
+    items: HashMap<Uuid, T>,
+}
+
+impl<T> Assets<T> {
+    pub fn get(&self, uuid: &Uuid) -> Option<&T> {
+        self.items.get(uuid)
+    }
+
+    pub fn get_mut(&mut self, uuid: &Uuid) -> Option<&mut T> {
+        self.items.get_mut(uuid)
+    }
+}
+
+pub struct UntypedHandle {
+    pub uuid: Uuid,
+    pub asset_type: AssetType,
+    pub type_id: TypeId,
 }
 
 pub struct AssetManager {
     pub server: AssetServer,
     pub headers: HashMap<Uuid, AssetHeader>,
-    pub assets: HashMap<Uuid, Box<dyn Asset>>,
+    pub storages: HashMap<TypeId, Box<dyn Any>>,
+    pub names: HashMap<(AssetType, String), UntypedHandle>,
 }
 
 impl AssetManager {
@@ -78,7 +106,8 @@ impl AssetManager {
         Self {
             server: AssetServer {},
             headers: HashMap::new(),
-            assets: HashMap::new(),
+            storages: HashMap::new(),
+            names: HashMap::new(),
         }
     }
 
@@ -99,6 +128,50 @@ impl AssetManager {
         for header in &headers {
             loader::load_asset(self, ctx, header);
         }
+    }
+
+    pub fn register_asset_type<T: 'static>(&mut self) {
+        self.storages.insert(
+            TypeId::of::<T>(),
+            Box::new(Assets::<T> {
+                items: HashMap::new(),
+            }),
+        );
+    }
+
+    pub fn assets<T: Asset + 'static>(&self) -> Option<&Assets<T>> {
+        self.storages
+            .get(&TypeId::of::<T>())?
+            .downcast_ref::<Assets<T>>()
+    }
+
+    pub fn assets_mut<T: Asset + 'static>(&mut self) -> Option<&mut Assets<T>> {
+        self.storages
+            .get_mut(&TypeId::of::<T>())?
+            .downcast_mut::<Assets<T>>()
+    }
+
+    pub fn get<T: Asset + 'static>(&self, handle: Handle<T>) -> Option<&T> {
+        self.assets::<T>()?.get(&handle.uuid)
+    }
+
+    pub fn get_mut<T: Asset + 'static>(&mut self, handle: Handle<T>) -> Option<&mut T> {
+        self.assets_mut::<T>()?.get_mut(&handle.uuid)
+    }
+
+    pub fn get_by_name<T: Asset + 'static>(&self, name: &str) -> Option<&T> {
+        let handle = self.handle::<T>(name)?;
+        self.get(handle)
+    }
+
+    pub fn handle<T: Asset + 'static>(&self, name: &str) -> Option<Handle<T>> {
+        let untyped = self.names.get(&(T::ASSET_TYPE, name.to_string()))?;
+
+        Some(Handle {
+            uuid: untyped.uuid,
+            asset_type: T::ASSET_TYPE,
+            _marker: std::marker::PhantomData,
+        })
     }
 }
 

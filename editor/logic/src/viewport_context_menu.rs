@@ -68,14 +68,19 @@ pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> cgmath::Poi
     };
 
     let mut world_pos = point3(0.0, 0.0, 0.0);
+    let pixels_per_point = state.window.scale_factor() as f32;
+    let physical_mouse_pos = Pos2::new(
+        mouse_pos.x * pixels_per_point,
+        mouse_pos.y * pixels_per_point,
+    );
 
     if let Some(geometry_pass_node) = node.as_any_mut().downcast_mut::<GeometryPassNode>() {
         world_pos = geometry_pass_node.get_world_position_from_depth(
             state.global_resources.renderer.renderer_api.as_mut(),
             &mut state.global_resources.renderer.render_graph.resources,
             &mut state.global_resources.renderer.render_resources,
-            mouse_pos.x,
-            mouse_pos.y,
+            physical_mouse_pos.x,
+            physical_mouse_pos.y,
         );
     }
 

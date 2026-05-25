@@ -94,7 +94,8 @@ impl EguiRenderNode {
 
                 let close_menu = ctx.input(|input| {
                     input.key_pressed(egui::Key::Escape)
-                        || (input.pointer.any_pressed()
+                        || (!open_viewport_menu
+                            && input.pointer.any_pressed()
                             && !response
                                 .rect
                                 .contains(input.pointer.latest_pos().unwrap_or_default()))

@@ -170,8 +170,11 @@ impl GeometryPassNode {
             return point3(0.0, 0.0, 0.0);
         };
 
-        let texture_width = api.get_texture_size(texture).x as f32;
-        let texture_height = api.get_texture_size(texture).y as f32;
+        let texture_size = api.get_texture_size(texture);
+        let texture_width = texture_size.x as f32;
+        let texture_height = texture_size.y as f32;
+        let x = x.clamp(0.0, (texture_width - 1.0).max(0.0));
+        let y = y.clamp(0.0, (texture_height - 1.0).max(0.0));
 
         let Some(camera_data) = render_resources.get::<CameraData>() else {
             return point3(0.0, 0.0, 0.0);

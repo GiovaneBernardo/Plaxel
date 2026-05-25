@@ -1,4 +1,5 @@
 use crate::assets::manager::Asset;
+use crate::assets::manager::AssetType;
 use crate::model::ModelVertex;
 use crate::model::Vertex;
 use crate::model::VertexLayout;
@@ -54,6 +55,7 @@ impl PipelineDescriptor {
 }
 
 impl Asset for Material {
+    const ASSET_TYPE: AssetType = AssetType::Material;
     fn uuid(&self) -> Uuid {
         self.uuid
     }

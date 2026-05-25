@@ -24,7 +24,10 @@ cgmath = "0.18"
 bytemuck = { version = "1.24", features = ["derive"] }
 rand = "0.8.5"
 pollster = "0.3"
-tobj = { version = "3.2", default-features = false, features = ["async"] }
+
+# Assets
+tobj = { version = "4.0.3", default-features = false, features = ["async"] }
+gltf = { version = "1.4.1" }
 
 # Physics
 rapier3d = { version = "0.29", features = ["simd-stable"] }

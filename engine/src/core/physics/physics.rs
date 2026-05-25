@@ -193,8 +193,8 @@ impl Physics {
         let mut query = Query::<(&mut RapierRigidBodyHandle,)>::new(world);
         query.for_each(|_entity, (handle,)| {
             let ball_body = &mut physics.rigid_body_set[handle.0];
-
-            ball_body.set_position(nalgebra::Isometry3::translation(1.0, 0.0, 50.0), true);
+            //ball_body.set_gravity_scale(1.0, true);
+            //ball_body.set_position(nalgebra::Isometry3::translation(1.0, 0.0, 50.0), true);
         });
     }
 }
