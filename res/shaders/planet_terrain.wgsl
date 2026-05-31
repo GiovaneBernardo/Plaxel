@@ -78,7 +78,7 @@ var my_textures: binding_array<texture_2d<f32>, 128>;
 var default_sampler: sampler;
 
 fn triplanar_sample(tex_index: u32, pos: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
-    let texture_scale = 0.0025;
+    let texture_scale = 1.0;//0.0025;
 
     let n = safe_normal(normal, pos);
     let an = abs(n);
