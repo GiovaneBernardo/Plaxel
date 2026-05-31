@@ -17,6 +17,8 @@ wgpu = "27.0.1"
 winit = { version = "0.30", features = ["android-native-activity"] }
 egui = "0.33.3"
 egui-wgpu = "0.33.3"
+eframe = "0.33"
+rfd = "0.15"
 offset-allocator = "0.2"
 
 # Math / utils

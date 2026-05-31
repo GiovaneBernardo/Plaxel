@@ -7,6 +7,9 @@ pub mod global_resources;
 pub mod logging;
 pub mod renderer;
 
+use cgmath::Point3;
+use cgmath::point3;
+use cgmath::vec3;
 pub use core::camera;
 pub use core::ecs;
 pub use renderer::model;
@@ -42,6 +45,45 @@ use crate::renderer::TextureFormat;
 use crate::renderer::TextureSize;
 use crate::renderer::TextureUsages;
 use crate::renderer::{FrameBindings, GeometryPassNode, GeometryRenderQueue};
+use cgmath::InnerSpace;
+
+fn cook_trimesh_indices(vertices: &[cgmath::Point3<f32>], indices: &[u32]) -> Vec<[u32; 3]> {
+    let vertex_count = vertices.len() as u32;
+    let mut triangles = Vec::with_capacity(indices.len() / 3);
+
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        if a >= vertex_count || b >= vertex_count || c >= vertex_count {
+            continue;
+        }
+
+        let pa = vertices[a as usize];
+        let pb = vertices[b as usize];
+        let pc = vertices[c as usize];
+        if !pa.x.is_finite()
+            || !pa.y.is_finite()
+            || !pa.z.is_finite()
+            || !pb.x.is_finite()
+            || !pb.y.is_finite()
+            || !pb.z.is_finite()
+            || !pc.x.is_finite()
+            || !pc.y.is_finite()
+            || !pc.z.is_finite()
+        {
+            continue;
+        }
+
+        let ab = pb - pa;
+        let ac = pc - pa;
+        if ab.cross(ac).magnitude2() <= f32::EPSILON {
+            continue;
+        }
+
+        triangles.push([a, b, c]);
+    }
+
+    triangles
+}
 
 // This will store the state of our game
 pub struct State {
@@ -180,12 +222,16 @@ impl State {
             return;
         }
 
-        if let Err(error) = self.spawn_dropped_obj(path) {
+        if let Err(error) = self.spawn_dropped_obj(path, &point3(0.0, 0.0, 0.0)) {
             log::error!("Unable to load dropped OBJ {:?}: {error}", path);
         }
     }
 
-    fn spawn_dropped_obj(&mut self, path: &Path) -> anyhow::Result<()> {
+    pub fn spawn_dropped_obj(
+        &mut self,
+        path: &Path,
+        spawn_position: &Point3<f32>,
+    ) -> anyhow::Result<()> {
         let (models, _) = tobj::load_obj(
             path,
             &tobj::LoadOptions {
@@ -219,6 +265,24 @@ impl State {
 
         if positions.is_empty() || indices.is_empty() {
             anyhow::bail!("OBJ has no triangle mesh data");
+        }
+
+        let mut center = (min + max) * 0.5;
+        center.y -= 10000.0;
+
+        let collider_vertices = positions
+            .iter()
+            .map(|position| {
+                cgmath::point3(
+                    position[0] - center.x + spawn_position.x,
+                    position[1] - center.y + spawn_position.y,
+                    position[2] - center.z + spawn_position.z,
+                )
+            })
+            .collect::<Vec<_>>();
+        let collider_indices = cook_trimesh_indices(&collider_vertices, &indices);
+        if collider_indices.is_empty() {
+            anyhow::bail!("OBJ has no valid collision triangles");
         }
 
         let vertex_layout = VertexLayout {
@@ -282,19 +346,12 @@ impl State {
             return Ok(());
         };
 
-        let mut center = (min + max) * 0.5;
-        center.y -= 10000.0;
-        let mut half_extents = (max - min) * 0.5;
-        half_extents.x = half_extents.x.max(0.01);
-        half_extents.y = half_extents.y.max(0.01);
-        half_extents.z = half_extents.z.max(0.01);
-
         let world = scene.world_mut();
         let entity = world.spawn();
         world.insert(
             entity,
             TransformComponent {
-                position: center,
+                position: vec3(spawn_position.x, spawn_position.y, spawn_position.z),
                 rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
                 scale: cgmath::vec3(1.0, 1.0, 1.0),
                 velocity: cgmath::vec3(0.0, 0.0, 0.0),
@@ -310,7 +367,10 @@ impl State {
         world.insert(
             entity,
             ColliderComponent {
-                shape: ColliderShape::Cuboid { half_extents },
+                shape: ColliderShape::Trimesh {
+                    vertices: collider_vertices,
+                    indices: collider_indices,
+                },
                 restitution: 0.2,
                 friction: 0.9,
             },

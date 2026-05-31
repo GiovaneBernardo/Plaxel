@@ -57,6 +57,15 @@ pub fn viewport_context_menu(
                         radius: 0.5,
                     });
                 }
+
+                if ui.button("Load 3D Model at mouse").clicked() {
+                    *viewport_menu_open = false;
+                    let world_pos = get_world_pos(state, &viewport_menu_pos);
+
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        state.spawn_dropped_obj(path.as_path(), &world_pos).ok();
+                    }
+                }
             });
         })
         .response
