@@ -5,10 +5,18 @@ pub enum BodyKind {
     Kinematic,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ColliderShape {
-    Sphere { radius: f32 },
-    Cuboid { half_extents: cgmath::Vector3<f32> },
+    Sphere {
+        radius: f32,
+    },
+    Cuboid {
+        half_extents: cgmath::Vector3<f32>,
+    },
+    Trimesh {
+        vertices: Vec<cgmath::Point3<f32>>,
+        indices: Vec<[u32; 3]>,
+    },
 }
 
 pub struct RigidBodyComponent {

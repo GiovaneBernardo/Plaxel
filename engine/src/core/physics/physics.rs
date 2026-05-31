@@ -1,4 +1,4 @@
-use cgmath::Vector3;
+use cgmath::{Point3, Vector3};
 use rapier3d::prelude::*;
 
 use crate::{
@@ -103,6 +103,31 @@ impl Physics {
         }
     }
 
+    pub fn add_trimesh_collider(
+        &mut self,
+        vertices: Vec<Point3<f32>>,
+        indices: Vec<[u32; 3]>,
+        restitution: f32,
+        friction: f32,
+    ) -> Option<ColliderHandle> {
+        let vertices = vertices
+            .into_iter()
+            .map(|p| point![p.x, p.y, p.z])
+            .collect();
+        let builder = ColliderBuilder::trimesh(vertices, indices).ok()?;
+        let collider = builder.restitution(restitution).friction(friction).build();
+        Some(self.collider_set.insert(collider))
+    }
+
+    pub fn remove_collider(&mut self, handle: ColliderHandle) {
+        self.collider_set.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.rigid_body_set,
+            true,
+        );
+    }
+
     /*/
                physics.add_cuboid_collider(100.0, -0.5, 100.0);
 
@@ -132,12 +157,22 @@ impl Physics {
                 return;
             };
 
-            let rapier_collider = match collider.shape {
+            let rapier_collider = match collider.shape.clone() {
                 components::physics::ColliderShape::Sphere { radius } => {
                     ColliderBuilder::ball(radius)
                 }
                 components::physics::ColliderShape::Cuboid { half_extents } => {
                     ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                }
+                components::physics::ColliderShape::Trimesh { vertices, indices } => {
+                    let vertices = vertices
+                        .into_iter()
+                        .map(|p| point![p.x, p.y, p.z])
+                        .collect();
+                    let Ok(builder) = ColliderBuilder::trimesh(vertices, indices) else {
+                        return;
+                    };
+                    builder
                 }
             }
             .restitution(collider.restitution)
