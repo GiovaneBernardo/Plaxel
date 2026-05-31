@@ -8,6 +8,7 @@ use engine_dylib;
 use cgmath::{self, EuclideanSpace, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
 use engine::assets::material::Material;
+use engine::core::components::physics::RapierColliderHandle;
 use engine::core::physics::physics::Physics;
 use engine::model::Vertex;
 use engine::renderer;
@@ -33,6 +34,7 @@ struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
     current_leaves: HashMap<NodeKey, ChunkInfo>,
     current_meshes: HashMap<NodeKey, RenderData>,
+    terrain_colliders: HashMap<NodeKey, RapierColliderHandle>,
     in_flight: HashSet<NodeKey>,
     // Keys whose worker finished but produced zero vertices. Remembered so
     // the scheduler never re-spawns a worker for them on subsequent frames.
@@ -54,6 +56,9 @@ struct GameCamera {
     camera: engine::camera::Camera,
     controller: engine::camera::CameraController,
     uniform: engine::camera::CameraUniform,
+    velocity_sample_pos: Point3<f32>,
+    velocity_sample_time: Instant,
+    velocity_sample_distance: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -259,16 +264,22 @@ pub fn register_systems(state: &mut engine::State) {
     });
     world.insert_resource(InputMap::default());
 
+    let velocity_sample_pos = camera.position;
+    let velocity_sample_time = Instant::now();
     world.insert_resource(GameCamera {
         camera,
         controller: engine::camera::CameraController::new(0.2),
         uniform,
+        velocity_sample_pos,
+        velocity_sample_time,
+        velocity_sample_distance: 0.0,
     });
 
     world.insert_resource(GameState {
         previous_leaves: HashMap::new(),
         current_leaves: HashMap::new(),
         current_meshes: HashMap::new(),
+        terrain_colliders: HashMap::new(),
         in_flight: HashSet::new(),
         empty_chunks: HashSet::new(),
         solid_material,
@@ -327,12 +338,14 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
         return;
     };
 
+    let previous_position = camera.camera.position;
     let mut controller = std::mem::replace(
         &mut camera.controller,
         engine::camera::CameraController::new(0.2),
     );
     controller.update_camera(&mut camera.camera);
     camera.controller = controller;
+    update_camera_velocity_log(&mut camera, previous_position);
     let camera_copy = engine::camera::Camera {
         position: camera.camera.position,
         orientation: camera.camera.orientation,
@@ -342,6 +355,37 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
         zfar: camera.camera.zfar,
     };
     camera.uniform.update_view_proj(&camera_copy);
+}
+
+fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Point3<f32>) {
+    let frame_distance = (camera.camera.position - previous_position).magnitude();
+    camera.velocity_sample_distance += frame_distance;
+
+    let now = Instant::now();
+    let elapsed = now
+        .duration_since(camera.velocity_sample_time)
+        .as_secs_f32();
+
+    if elapsed < 1.0 {
+        return;
+    }
+
+    let meters_per_second = camera.velocity_sample_distance / elapsed;
+    if meters_per_second > 0.01 {
+        tracing::info!(
+            target: "game",
+            "editor camera speed: {:.2} m/s ({:.2} km/h), position: ({:.2}, {:.2}, {:.2})",
+            meters_per_second,
+            meters_per_second * 3.6,
+            camera.camera.position.x,
+            camera.camera.position.y,
+            camera.camera.position.z,
+        );
+    }
+
+    camera.velocity_sample_pos = camera.camera.position;
+    camera.velocity_sample_time = now;
+    camera.velocity_sample_distance = 0.0;
 }
 
 fn should_request_octree_rebuild(game_state: &GameState, camera_pos: Point3<f32>) -> bool {
@@ -451,6 +495,11 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
 
         if all_covered {
             game_state.current_meshes.remove(&stale_key);
+            if let Some(handle) = game_state.terrain_colliders.remove(&stale_key) {
+                if let Some(mut physics) = world.get_resource_mut::<Physics>() {
+                    physics.remove_collider(handle.0);
+                }
+            }
         }
     }
 
@@ -521,6 +570,7 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
             continue;
         }
 
+        let collider_mesh = cook_terrain_collider_mesh(&chunk.vertices, &chunk.indices);
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
         let render_data = renderer.renderer_api.create_render_data(
             &vertex_bytes,
@@ -529,6 +579,15 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
             &PipelineHandle(0),
         );
         game_state.current_meshes.insert(chunk.key, render_data);
+        if let Some((vertices, indices)) = collider_mesh {
+            if let Some(mut physics) = world.get_resource_mut::<Physics>() {
+                if let Some(handle) = physics.add_trimesh_collider(vertices, indices, 0.0, 0.9) {
+                    game_state
+                        .terrain_colliders
+                        .insert(chunk.key, RapierColliderHandle(handle));
+                }
+            }
+        }
         uploaded += 1;
     }
 
@@ -614,6 +673,11 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
         }
 
         if pressed && key_code == KeyCode::KeyL {
+            if let Some(mut physics) = world.get_resource_mut::<Physics>() {
+                for (_, handle) in game_state.terrain_colliders.drain() {
+                    physics.remove_collider(handle.0);
+                }
+            }
             game_state.previous_leaves.clear();
             game_state.current_leaves.clear();
             game_state.current_meshes.clear();
@@ -630,6 +694,59 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
             game_state.debug_depth = game_state.debug_depth.saturating_sub(1);
         }
     }
+}
+
+fn cook_terrain_collider_mesh(
+    vertices: &[PlanetVertex],
+    indices: &[u32],
+) -> Option<(Vec<Point3<f32>>, Vec<[u32; 3]>)> {
+    if vertices.is_empty() || indices.len() < 3 {
+        return None;
+    }
+
+    let collider_vertices: Vec<Point3<f32>> = vertices
+        .iter()
+        .map(|vertex| Point3::new(vertex.position[0], vertex.position[1], vertex.position[2]))
+        .collect();
+    let vertex_count = collider_vertices.len() as u32;
+    let mut collider_indices = Vec::with_capacity(indices.len() / 3);
+
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        if a >= vertex_count || b >= vertex_count || c >= vertex_count {
+            continue;
+        }
+
+        let pa = collider_vertices[a as usize];
+        let pb = collider_vertices[b as usize];
+        let pc = collider_vertices[c as usize];
+        if !pa.x.is_finite()
+            || !pa.y.is_finite()
+            || !pa.z.is_finite()
+            || !pb.x.is_finite()
+            || !pb.y.is_finite()
+            || !pb.z.is_finite()
+            || !pc.x.is_finite()
+            || !pc.y.is_finite()
+            || !pc.z.is_finite()
+        {
+            continue;
+        }
+
+        let ab = pb - pa;
+        let ac = pc - pa;
+        if ab.cross(ac).magnitude2() <= f32::EPSILON {
+            continue;
+        }
+
+        collider_indices.push([a, b, c]);
+    }
+
+    if collider_indices.is_empty() {
+        return None;
+    }
+
+    Some((collider_vertices, collider_indices))
 }
 
 #[unsafe(no_mangle)]
@@ -1103,6 +1220,7 @@ impl PlanetExt for Planet {
     }
 }
 
+#[inline(always)]
 fn hash3(p: Vector3<f32>) -> f32 {
     let ix = (p.x.floor() as i32).wrapping_mul(1619);
     let iy = (p.y.floor() as i32).wrapping_mul(31337);
@@ -1112,37 +1230,60 @@ fn hash3(p: Vector3<f32>) -> f32 {
     (n as u32 as f32) / (u32::MAX as f32)
 }
 
+#[inline(always)]
+fn hash3i(x: i32, y: i32, z: i32) -> f32 {
+    let n = x
+        .wrapping_mul(1619)
+        .wrapping_add(y.wrapping_mul(31337))
+        .wrapping_add(z.wrapping_mul(6271));
+
+    let n = n.wrapping_mul(n.wrapping_mul(n).wrapping_mul(60493).wrapping_add(19990303));
+
+    (n as u32 as f32) * (1.0 / u32::MAX as f32)
+}
+
+#[inline(always)]
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline(always)]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + t * (b - a)
+}
+
+#[inline(always)]
 fn smooth_noise(p: Vector3<f32>) -> f32 {
-    let ix = p.x.floor();
-    let iy = p.y.floor();
-    let iz = p.z.floor();
-    let fx = p.x - ix;
-    let fy = p.y - iy;
-    let fz = p.z - iz;
+    let ix = p.x.floor() as i32;
+    let iy = p.y.floor() as i32;
+    let iz = p.z.floor() as i32;
 
-    let u = vec3(
-        fx * fx * (3.0 - 2.0 * fx),
-        fy * fy * (3.0 - 2.0 * fy),
-        fz * fz * (3.0 - 2.0 * fz),
-    );
+    let fx = p.x - ix as f32;
+    let fy = p.y - iy as f32;
+    let fz = p.z - iz as f32;
 
-    let i = vec3(ix, iy, iz);
-    let v000 = hash3(i + vec3(0.0, 0.0, 0.0));
-    let v100 = hash3(i + vec3(1.0, 0.0, 0.0));
-    let v010 = hash3(i + vec3(0.0, 1.0, 0.0));
-    let v110 = hash3(i + vec3(1.0, 1.0, 0.0));
-    let v001 = hash3(i + vec3(0.0, 0.0, 1.0));
-    let v101 = hash3(i + vec3(1.0, 0.0, 1.0));
-    let v011 = hash3(i + vec3(0.0, 1.0, 1.0));
-    let v111 = hash3(i + vec3(1.0, 1.0, 1.0));
+    let ux = smoothstep(fx);
+    let uy = smoothstep(fy);
+    let uz = smoothstep(fz);
 
-    let x00 = v000 + u.x * (v100 - v000);
-    let x10 = v010 + u.x * (v110 - v010);
-    let x01 = v001 + u.x * (v101 - v001);
-    let x11 = v011 + u.x * (v111 - v011);
-    let y0 = x00 + u.y * (x10 - x00);
-    let y1 = x01 + u.y * (x11 - x01);
-    y0 + u.z * (y1 - y0)
+    let v000 = hash3i(ix, iy, iz);
+    let v100 = hash3i(ix + 1, iy, iz);
+    let v010 = hash3i(ix, iy + 1, iz);
+    let v110 = hash3i(ix + 1, iy + 1, iz);
+    let v001 = hash3i(ix, iy, iz + 1);
+    let v101 = hash3i(ix + 1, iy, iz + 1);
+    let v011 = hash3i(ix, iy + 1, iz + 1);
+    let v111 = hash3i(ix + 1, iy + 1, iz + 1);
+
+    let x00 = lerp(v000, v100, ux);
+    let x10 = lerp(v010, v110, ux);
+    let x01 = lerp(v001, v101, ux);
+    let x11 = lerp(v011, v111, ux);
+
+    let y0 = lerp(x00, x10, uy);
+    let y1 = lerp(x01, x11, uy);
+
+    lerp(y0, y1, uz)
 }
 
 fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
