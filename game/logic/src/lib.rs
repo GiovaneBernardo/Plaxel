@@ -570,7 +570,7 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
             continue;
         }
 
-        let collider_mesh = cook_terrain_collider_mesh(&chunk.vertices, &chunk.indices);
+        //let collider_mesh = cook_terrain_collider_mesh(&chunk.vertices, &chunk.indices);
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
         let render_data = renderer.renderer_api.create_render_data(
             &vertex_bytes,
@@ -579,15 +579,15 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
             &PipelineHandle(0),
         );
         game_state.current_meshes.insert(chunk.key, render_data);
-        if let Some((vertices, indices)) = collider_mesh {
-            if let Some(mut physics) = world.get_resource_mut::<Physics>() {
-                if let Some(handle) = physics.add_trimesh_collider(vertices, indices, 0.0, 0.9) {
-                    game_state
-                        .terrain_colliders
-                        .insert(chunk.key, RapierColliderHandle(handle));
-                }
-            }
-        }
+        //if let Some((vertices, indices)) = collider_mesh {
+        //    if let Some(mut physics) = world.get_resource_mut::<Physics>() {
+        //        if let Some(handle) = physics.add_trimesh_collider(vertices, indices, 0.0, 0.9) {
+        //            game_state
+        //                .terrain_colliders
+        //                .insert(chunk.key, RapierColliderHandle(handle));
+        //        }
+        //    }
+        //}
         uploaded += 1;
     }
 
