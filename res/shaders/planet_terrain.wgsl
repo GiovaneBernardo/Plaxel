@@ -29,6 +29,7 @@ struct VertexOutput {
     @location(2) @interpolate(flat) mat_a: u32,
     @location(3) @interpolate(flat) mat_b: u32,
     @location(4) blend: f32,
+    @location(5) camera_position: vec3<f32>,
 };
 
 @vertex
@@ -45,6 +46,7 @@ fn vs_main(
     out.mat_a = u32(model.mats & 0xFFFFu);
     out.mat_b = u32(model.mats >> 16u);
     out.blend = f32(model.blend_packed & 0xFFu) / 255.0;
+    out.camera_position = camera.position;
 
     return out;
 }
@@ -122,5 +124,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = max(dot(normal, light_dir), 0.0);
     let lighting = 0.35 + 0.65 * diffuse;
 
-    return vec4<f32>(albedo.rgb * lighting, albedo.a);
+    let distance = length(in.world_position - in.camera_position);
+    let start = 5000.0;
+    let end = 15000.0;
+    var fog_factor = clamp((distance - start) / (end - start), 0.0, 1.0);
+
+    return vec4<f32>(mix(albedo.rgb * lighting, vec3f(0.1, 0.2, 0.3), fog_factor), albedo.a);
 }
