@@ -6,6 +6,7 @@ use std::any::TypeId;
 use std::hash::Hash;
 use std::hash::Hasher;
 pub use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::{collections::HashMap, fs};
 pub use uuid::Uuid;
@@ -63,8 +64,11 @@ pub struct AssetHeader {
     pub uuid: Uuid,
     pub name: String,
     pub asset_type: AssetType,
-    pub file_path: String,
+    #[serde(skip)]
+    pub file_path: PathBuf,
+    #[serde(skip)]
     pub content_offset: u32,
+    #[serde(skip)]
     pub content_size: u64,
 }
 
@@ -94,11 +98,14 @@ pub struct UntypedHandle {
     pub type_id: TypeId,
 }
 
+pub struct AssetRegistry {}
+
 pub struct AssetManager {
     pub server: AssetServer,
     pub headers: HashMap<Uuid, AssetHeader>,
     pub storages: HashMap<TypeId, Box<dyn Any>>,
     pub names: HashMap<(AssetType, String), UntypedHandle>,
+    pub paths: HashMap<PathBuf, Uuid>,
 }
 
 impl AssetManager {
@@ -108,14 +115,20 @@ impl AssetManager {
             headers: HashMap::new(),
             storages: HashMap::new(),
             names: HashMap::new(),
+            paths: HashMap::new(),
         }
     }
 
     pub fn scan_folder(&mut self, folder: &Path) -> anyhow::Result<()> {
         for entry in fs::read_dir(folder)? {
             let path = entry?.path();
-            if path.extension() == Some("plax".as_ref()) {
+            if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension == "plax" || extension.starts_with("plx"))
+            {
                 let header = loader::load_header(&path).unwrap();
+                self.paths.insert(path.to_path_buf(), header.uuid);
                 self.headers.insert(header.uuid, header);
             }
         }
@@ -172,6 +185,10 @@ impl AssetManager {
             asset_type: T::ASSET_TYPE,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    pub fn uuid_for_path(&self, path: &PathBuf) -> Option<&Uuid> {
+        self.paths.get(path)
     }
 }
 

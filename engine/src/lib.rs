@@ -8,7 +8,8 @@ pub mod logging;
 pub mod renderer;
 
 use cgmath::Point3;
-use cgmath::point3;
+use cgmath::Quaternion;
+use cgmath::Vector3;
 use cgmath::vec3;
 pub use core::camera;
 pub use core::ecs;
@@ -26,7 +27,14 @@ pub use winit::{
     window::Window,
 };
 
+use crate::assets::importer::AssetImporter;
+use crate::assets::importer::AssetPayload;
+use crate::assets::importer::ImportSettings;
+use crate::assets::importer::TargetPlatform;
+use crate::assets::importers::obj_importer::ObjImporter;
+use crate::assets::loader;
 use crate::assets::material::Material;
+use crate::assets::serializer;
 use crate::core::components::{
     core::TransformComponent,
     physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
@@ -39,6 +47,8 @@ use crate::core::physics::physics::Physics;
 use crate::core::time::Time;
 use crate::ecs::scene::Scene;
 use crate::global_resources::GlobalResources;
+use crate::model::TransformInstance;
+use crate::model::Vertex;
 use crate::model::{AttributeFormat, MeshAsset, StepMode, VertexAttribute, VertexLayout};
 use crate::renderer::TextureDimension;
 use crate::renderer::TextureFormat;
@@ -214,6 +224,81 @@ impl State {
             return;
         }
 
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("plxmesh"))
+        {
+            let header = loader::load_header(path).unwrap();
+            println!("Header: {header:?}");
+
+            let payload = loader::load_payload(path).unwrap();
+
+            if let AssetPayload::Mesh(mesh) = payload {
+                let handle = self
+                    .global_resources
+                    .renderer
+                    .renderer_api
+                    .upload_mesh(&mesh);
+                println!("Uploaded mesh: {:?}", handle);
+
+                let material =
+                    Material::new("shaders/cube.wgsl".to_string()).with_vertex_layouts(vec![
+                        mesh.vertex_layout.clone(),
+                        TransformInstance::layout(),
+                    ]);
+
+                let Some(camera_layout) = self
+                    .global_resources
+                    .renderer
+                    .render_graph
+                    .get_node_mut::<GeometryPassNode>(0)
+                    .and_then(|node| node.camera_bind_group_layout)
+                else {
+                    return;
+                };
+                let Some(materials_layout) = self
+                    .global_resources
+                    .renderer
+                    .render_resources
+                    .get_labeled::<FrameBindings>("frame_bindings")
+                    .map(|bindings| bindings.materials_layout)
+                else {
+                    return;
+                    //anyhow::bail!("Frame material bind group layout is not available");
+                };
+
+                self.global_resources
+                    .renderer
+                    .renderer_api
+                    .create_pipeline(&material, &[camera_layout, materials_layout]);
+
+                let world = self.active_scene_mut().unwrap().world_mut();
+                let entity = world.spawn();
+                world.insert(
+                    entity,
+                    TransformComponent {
+                        position: Vector3::new(0.0, 0.0, 0.0),
+                        rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+                        scale: Vector3::new(1.0, 1.0, 1.0),
+                        velocity: Vector3 {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 0.0,
+                        },
+                    },
+                );
+
+                world.insert(
+                    entity,
+                    MeshRendererComponent {
+                        mesh: handle,
+                        material: material,
+                    },
+                );
+            }
+        }
+
         if !path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -222,9 +307,47 @@ impl State {
             return;
         }
 
-        if let Err(error) = self.spawn_dropped_obj(path, &point3(0.0, 0.0, 0.0)) {
-            log::error!("Unable to load dropped OBJ {:?}: {error}", path);
+        let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let asset_root = project_root.join("res/imported");
+        let import_settings = ImportSettings {
+            force_reimport: false,
+            generate_mipmaps: false,
+            ignored_platform: TargetPlatform::None,
+        };
+        let import_context = assets::importer::ImportContext {
+            project_root: &project_root,
+            source_root: path.parent().unwrap_or_else(|| std::path::Path::new("")),
+            asset_root: &asset_root,
+            source_path: path,
+            manager: &self.global_resources.asset_manager,
+            settings: &import_settings,
+        };
+
+        let obj_importer = ObjImporter;
+        let imported_assets = match obj_importer.import(path, &import_context) {
+            Ok(imported_assets) => imported_assets,
+            Err(error) => {
+                log::error!("Unable to import dropped OBJ {:?}: {error}", path);
+                return;
+            }
+        };
+
+        for imported_asset in &imported_assets {
+            let output_path = serializer::output_path_for(imported_asset, &asset_root);
+            if let Err(error) = serializer::write_imported_asset(imported_asset, &output_path) {
+                log::error!(
+                    "Unable to serialize imported asset {:?}: {error}",
+                    output_path
+                );
+                continue;
+            }
+
+            log::info!("Serialized imported asset to {:?}", output_path);
         }
+
+        //if let Err(error) = self.spawn_dropped_obj(path, &point3(0.0, 0.0, 0.0)) {
+        //    log::error!("Unable to load dropped OBJ {:?}: {error}", path);
+        //}
     }
 
     pub fn spawn_dropped_obj(
@@ -307,8 +430,8 @@ impl State {
             vertex_layout: vertex_layout.clone(),
         };
 
-        let material =
-            Material::new("shaders/cube.wgsl".to_string()).with_vertex_layouts(vec![vertex_layout]);
+        let material = Material::new("shaders/cube.wgsl".to_string())
+            .with_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
 
         let Some(camera_layout) = self
             .global_resources

@@ -1,8 +1,9 @@
 use std::any::Any;
 
-use cgmath::{EuclideanSpace, SquareMatrix, point3};
+use cgmath::{EuclideanSpace, Matrix4, SquareMatrix, point3};
 
 use crate::camera;
+use crate::model::TransformInstance;
 use crate::renderer::core::*;
 
 pub struct GeometryPassNode {
@@ -11,6 +12,9 @@ pub struct GeometryPassNode {
     pub camera_bind_group: Option<BindGroupHandle>,
     pub camera_bind_group_layout: Option<BindGroupLayoutHandle>,
     pub pass_inputs_group: Option<BindGroupHandle>,
+    pub transforms: Vec<Matrix4<f32>>,
+    pub transform_buffer: Option<BufferHandle>,
+    pub transform_capacity: u32,
 }
 
 impl RenderNode for GeometryPassNode {
@@ -84,6 +88,12 @@ impl RenderNode for GeometryPassNode {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST | BufferUsages::VERTEX,
         });
 
+        let instance_buffer = ctx.create_buffer(&BufferDescriptor {
+            label: "geometry_transform_instances".to_string(),
+            size: self.transform_capacity.max(1) as u64 * size_of::<TransformInstance>() as u64,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        });
+
         let layout = ctx
             .api
             .create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -105,6 +115,8 @@ impl RenderNode for GeometryPassNode {
         self.camera_buffer = Some(buffer);
         self.camera_bind_group = Some(bind_group);
         self.camera_bind_group_layout = Some(layout);
+
+        self.transform_buffer = Some(instance_buffer);
     }
 
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI) {
@@ -112,6 +124,31 @@ impl RenderNode for GeometryPassNode {
             (self.camera_buffer, resources.get::<CameraData>())
         {
             api.write_buffer(buffer, bytemuck::cast_slice(&[camera_data.uniform]));
+        }
+
+        if self.transforms.is_empty() {
+            return;
+        }
+
+        if self.transforms.len() as u32 > self.transform_capacity || self.transform_buffer.is_none()
+        {
+            self.transform_capacity = (self.transforms.len() as u32).next_power_of_two().max(1);
+            self.transform_buffer = Some(api.create_buffer(&BufferDescriptor {
+                label: "geometry_transform_instances".to_string(),
+                size: self.transform_capacity as u64 * size_of::<TransformInstance>() as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            }));
+        }
+
+        if let (Some(buffer), transforms) = (self.transform_buffer, &self.transforms) {
+            let raw_transforms: Vec<TransformInstance> = transforms
+                .iter()
+                .map(|m| TransformInstance {
+                    model_matrix: (*m).into(),
+                })
+                .collect();
+
+            api.write_buffer(buffer, bytemuck::cast_slice(&raw_transforms));
         }
     }
 
@@ -136,8 +173,20 @@ impl RenderNode for GeometryPassNode {
             let index_buffer = ctx.get_mesh_index_buffer(&render_data.mesh);
             ctx.bind_index_buffer(index_buffer);
 
-            let instance_buffer = ctx.get_mesh_instance_buffer(&render_data.mesh);
-            ctx.bind_vertex_buffer(1, instance_buffer);
+            let Some(instance_buffer) = self.transform_buffer else {
+                continue;
+            };
+            let transform_index = render_data.transform_index as usize;
+            if transform_index >= self.transforms.len() {
+                continue;
+            }
+            let instance_size = size_of::<TransformInstance>() as u64;
+            ctx.bind_vertex_buffer_range(
+                1,
+                instance_buffer,
+                transform_index as u64 * instance_size,
+                instance_size,
+            );
 
             let range = ctx.get_mesh_draw_range(&render_data.mesh);
             ctx.draw_indexed(range.first_index, range.index_count, range.base_vertex, 1);
@@ -150,12 +199,15 @@ impl RenderNode for GeometryPassNode {
 }
 
 impl GeometryPassNode {
-    pub fn add_render_data(&mut self, new_render_data: RenderData) {
+    pub fn add_render_data(&mut self, mut new_render_data: RenderData) {
+        new_render_data.transform_index = self.transforms.len() as u32;
+        self.transforms.push(Matrix4::identity());
         self.render_data.push(new_render_data);
     }
 
     pub fn clear_render_data(&mut self) {
         self.render_data.clear();
+        self.transforms.clear();
     }
 
     pub fn get_world_position_from_depth(

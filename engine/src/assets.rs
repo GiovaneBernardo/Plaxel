@@ -1,4 +1,5 @@
 pub mod importer;
+pub mod importers;
 pub mod loader;
 pub mod manager;
 pub mod material;

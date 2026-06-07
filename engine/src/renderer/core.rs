@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
+use cgmath::Matrix4;
 use uuid::Uuid;
 
 use crate::Arc;
@@ -75,7 +76,7 @@ pub struct PassResources {
     pub output_buffers: Vec<Buffer>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TextureSize {
     FullRes,
     HalfRes,
@@ -83,7 +84,9 @@ pub enum TextureSize {
     Custom { width: u32, height: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum TextureDimension {
     #[default]
     D2,
@@ -92,7 +95,9 @@ pub enum TextureDimension {
     Cube,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum AddressMode {
     #[default]
     ClampToEdge = 0,
@@ -101,14 +106,18 @@ pub enum AddressMode {
     ClampToBorder = 3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum FilterMode {
     Nearest = 0,
     #[default]
     Linear = 1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum SamplerBorderColor {
     #[default]
     TransparentBlack,
@@ -117,7 +126,7 @@ pub enum SamplerBorderColor {
     Zero,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BufferUsages(u32);
 
 impl BufferUsages {
@@ -208,6 +217,7 @@ pub struct TextureDescriptor {
     pub sample_count: u32,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SamplerDescriptor {
     pub label: String,
     pub address_mode_u: AddressMode,
@@ -455,6 +465,30 @@ pub enum TextureFormat {
     Rgb10a2Uint,
     Rg11b10Float,
     Rgb9e5Ufloat,
+    Bc1RgbaUnorm,
+    Bc1RgbaUnormSrgb,
+    Bc2RgbaUnorm,
+    Bc2RgbaUnormSrgb,
+    Bc3RgbaUnorm,
+    Bc3RgbaUnormSrgb,
+    Bc4RUnorm,
+    Bc4RSnorm,
+    Bc5RgUnorm,
+    Bc5RgSnorm,
+    Bc6hRgbUfloat,
+    Bc6hRgbFloat,
+    Bc7RgbaUnorm,
+    Bc7RgbaUnormSrgb,
+    Etc2Rgb8Unorm,
+    Etc2Rgb8UnormSrgb,
+    Etc2Rgb8A1Unorm,
+    Etc2Rgb8A1UnormSrgb,
+    Etc2Rgba8Unorm,
+    Etc2Rgba8UnormSrgb,
+    EacR11Unorm,
+    EacR11Snorm,
+    EacRg11Unorm,
+    EacRg11Snorm,
 }
 
 impl TextureFormat {
@@ -611,9 +645,16 @@ impl Renderer {
             return;
         };
 
-        for item in &queue.items {
-            geometry_node.add_render_data(item.clone());
-        }
+        let transform_offset = geometry_node.transforms.len() as u32;
+        geometry_node
+            .transforms
+            .extend(queue.transforms.iter().copied());
+        geometry_node
+            .render_data
+            .extend(queue.items.iter().cloned().map(|mut item| {
+                item.transform_index += transform_offset;
+                item
+            }));
     }
 
     pub fn init_frame_bindings(&mut self) {
@@ -776,6 +817,9 @@ impl RenderGraph {
             camera_bind_group: None,
             camera_bind_group_layout: None,
             pass_inputs_group: None,
+            transform_buffer: None,
+            transform_capacity: 1024,
+            transforms: Vec::new(),
         };
         graph.nodes.push((0, Box::new(geometry_pass_node)));
 
@@ -1069,27 +1113,42 @@ impl dyn RenderNode {}
 
 pub struct GeometryRenderQueue {
     pub items: Vec<RenderData>,
+    pub transforms: Vec<cgmath::Matrix4<f32>>,
 }
 
 impl GeometryRenderQueue {
     pub fn new() -> Self {
-        Self { items: Vec::new() }
+        Self {
+            items: Vec::new(),
+            transforms: Vec::new(),
+        }
     }
 }
 
 pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands) {
     let world = &mut ctx.world;
+    let mut transforms = Vec::new();
     let render_data = {
         let mut items = Vec::new();
 
         let mut query = Query::<(&MeshRendererComponent, &TransformComponent)>::new(world);
-        query.for_each(|_entity, (mesh_renderer, _transform)| {
+        query.for_each(|_entity, (mesh_renderer, transform)| {
             items.push(RenderData {
                 mesh: mesh_renderer.mesh,
                 material: mesh_renderer.material.clone(),
-                transform_index: 0,
+                transform_index: transforms.len() as u32,
                 sort_key: 0,
             });
+
+            let rotation: Matrix4<f32> = Matrix4::from(transform.rotation);
+            let model_matrix: Matrix4<f32> = Matrix4::from_translation(transform.position)
+                * rotation
+                * Matrix4::from_nonuniform_scale(
+                    transform.scale.x,
+                    transform.scale.y,
+                    transform.scale.z,
+                );
+            transforms.push(model_matrix);
         });
 
         items
@@ -1100,5 +1159,7 @@ pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands)
     };
 
     queue.items.clear();
+    queue.transforms.clear();
     queue.items.extend(render_data);
+    queue.transforms.extend(transforms);
 }

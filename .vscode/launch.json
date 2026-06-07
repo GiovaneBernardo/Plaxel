@@ -5,7 +5,7 @@
             "name": "Debug Editor (MSVC)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/target/debug/editor-runner.exe",
+            "program": "${workspaceFolder}/target/debug/editor-runner-bin.exe",
             "args": [],
             "cwd": "${workspaceFolder}",
             "environment": [

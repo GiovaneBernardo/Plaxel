@@ -113,6 +113,30 @@ impl From<TextureFormat> for wgpu::TextureFormat {
             TextureFormat::Rgb10a2Uint => wgpu::TextureFormat::Rgb10a2Uint,
             TextureFormat::Rg11b10Float => wgpu::TextureFormat::Rg11b10Ufloat,
             TextureFormat::Rgb9e5Ufloat => wgpu::TextureFormat::Rgb9e5Ufloat,
+            TextureFormat::Bc1RgbaUnorm => wgpu::TextureFormat::Bc1RgbaUnorm,
+            TextureFormat::Bc1RgbaUnormSrgb => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
+            TextureFormat::Bc2RgbaUnorm => wgpu::TextureFormat::Bc2RgbaUnorm,
+            TextureFormat::Bc2RgbaUnormSrgb => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
+            TextureFormat::Bc3RgbaUnorm => wgpu::TextureFormat::Bc3RgbaUnorm,
+            TextureFormat::Bc3RgbaUnormSrgb => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
+            TextureFormat::Bc4RUnorm => wgpu::TextureFormat::Bc4RUnorm,
+            TextureFormat::Bc4RSnorm => wgpu::TextureFormat::Bc4RSnorm,
+            TextureFormat::Bc5RgUnorm => wgpu::TextureFormat::Bc5RgUnorm,
+            TextureFormat::Bc5RgSnorm => wgpu::TextureFormat::Bc5RgSnorm,
+            TextureFormat::Bc6hRgbUfloat => wgpu::TextureFormat::Bc6hRgbUfloat,
+            TextureFormat::Bc6hRgbFloat => wgpu::TextureFormat::Bc6hRgbFloat,
+            TextureFormat::Bc7RgbaUnorm => wgpu::TextureFormat::Bc7RgbaUnorm,
+            TextureFormat::Bc7RgbaUnormSrgb => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+            TextureFormat::Etc2Rgb8Unorm => wgpu::TextureFormat::Etc2Rgb8Unorm,
+            TextureFormat::Etc2Rgb8UnormSrgb => wgpu::TextureFormat::Etc2Rgb8UnormSrgb,
+            TextureFormat::Etc2Rgb8A1Unorm => wgpu::TextureFormat::Etc2Rgb8A1Unorm,
+            TextureFormat::Etc2Rgb8A1UnormSrgb => wgpu::TextureFormat::Etc2Rgb8A1UnormSrgb,
+            TextureFormat::Etc2Rgba8Unorm => wgpu::TextureFormat::Etc2Rgba8Unorm,
+            TextureFormat::Etc2Rgba8UnormSrgb => wgpu::TextureFormat::Etc2Rgba8UnormSrgb,
+            TextureFormat::EacR11Unorm => wgpu::TextureFormat::EacR11Unorm,
+            TextureFormat::EacR11Snorm => wgpu::TextureFormat::EacR11Snorm,
+            TextureFormat::EacRg11Unorm => wgpu::TextureFormat::EacRg11Unorm,
+            TextureFormat::EacRg11Snorm => wgpu::TextureFormat::EacRg11Snorm,
         }
     }
 }
@@ -445,6 +469,18 @@ impl<'a> RenderContext for WgpuRenderContext<'a> {
     fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle) {
         self.pass
             .set_vertex_buffer(slot, self.backend.get_buffer(buffer).unwrap().slice(..));
+    }
+
+    fn bind_vertex_buffer_range(
+        &mut self,
+        slot: u32,
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) {
+        let buffer = self.backend.get_buffer(buffer).unwrap();
+        self.pass
+            .set_vertex_buffer(slot, buffer.slice(offset..offset + size));
     }
 
     fn bind_index_buffer(&mut self, buffer: BufferHandle) {

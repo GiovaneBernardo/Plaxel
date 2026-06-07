@@ -2,7 +2,10 @@ use std::ops::Range;
 
 use uuid::Uuid;
 
-use crate::texture;
+use crate::{
+    assets::manager::{Asset, AssetType},
+    texture,
+};
 
 pub trait Vertex {
     fn layout() -> VertexLayout;
@@ -28,7 +31,7 @@ impl Vertex for ModelVertex {
         attributes.push(VertexAttribute {
             offset: mem::size_of::<[f32; 3]>() as u64,
             shader_location: 1,
-            format: AttributeFormat::Float32x3,
+            format: AttributeFormat::Float32x2,
         });
         attributes.push(VertexAttribute {
             offset: mem::size_of::<[f32; 5]>() as u64,
@@ -40,6 +43,45 @@ impl Vertex for ModelVertex {
             stride: mem::size_of::<ModelVertex>() as u64,
             step_mode: StepMode::Vertex,
             attributes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TransformInstance {
+    pub model_matrix: [[f32; 4]; 4],
+}
+
+impl Vertex for TransformInstance {
+    fn layout() -> VertexLayout {
+        use std::mem;
+
+        VertexLayout {
+            stride: mem::size_of::<TransformInstance>() as u64,
+            step_mode: StepMode::Instance,
+            attributes: vec![
+                VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as u64,
+                    shader_location: 6,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as u64,
+                    shader_location: 7,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as u64,
+                    shader_location: 8,
+                    format: AttributeFormat::Float32x4,
+                },
+            ],
         }
     }
 }
@@ -92,13 +134,20 @@ pub enum AttributeFormat {
     // add as needed
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MeshAsset {
     pub name: String,
     pub uuid: Uuid,
     pub vertices: Vec<u8>,
     pub indices: Vec<u32>,
     pub vertex_layout: VertexLayout,
+}
+
+impl Asset for MeshAsset {
+    const ASSET_TYPE: AssetType = AssetType::Mesh;
+    fn uuid(&self) -> Uuid {
+        self.uuid
+    }
 }
 
 pub trait DrawModel<'a> {

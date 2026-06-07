@@ -1,6 +1,7 @@
 use crate::assets::manager::Asset;
 use crate::assets::manager::AssetType;
 use crate::model::ModelVertex;
+use crate::model::TransformInstance;
 use crate::model::Vertex;
 use crate::model::VertexLayout;
 use crate::renderer::BlendMode;
@@ -10,6 +11,8 @@ use crate::renderer::DepthState;
 use crate::renderer::FrontFace;
 use crate::renderer::MultisampleState;
 use crate::renderer::PolygonMode;
+use crate::renderer::SamplerDescriptor;
+use crate::renderer::TextureFormat;
 use crate::renderer::Topology;
 use uuid::Uuid;
 
@@ -17,7 +20,48 @@ use uuid::Uuid;
 pub struct Material {
     pub uuid: Uuid,
     pub pipeline_descriptor: PipelineDescriptor,
-    pub pipeline_uuid: Uuid,
+    pub bindings: Vec<MaterialBinding>,     // For bound resources
+    pub parameters: Vec<MaterialParameter>, // For when not using textures, e.g. diffuse_color as float4 instead of texture
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MaterialBinding {
+    pub name: String, // "albedo_texture", "normal_map", "terrain_textures"
+    pub binding: u32, // shader binding index
+    pub group: u32,   // usually material group
+    pub resource: MaterialResource,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum MaterialResource {
+    Texture(Uuid),
+    TextureArray(Vec<Uuid>),
+    Sampler(SamplerDescriptor),
+    Buffer(Uuid),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MaterialParameter {
+    pub name: String,
+    pub value: MaterialValue,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum MaterialValue {
+    Float(f32),
+    Vec2([f32; 2]),
+    Vec3([f32; 3]),
+    Vec4([f32; 4]),
+    Int(i32),
+    Uint(u32),
+    Bool(bool),
+}
+
+impl Asset for Material {
+    const ASSET_TYPE: AssetType = AssetType::Material;
+    fn uuid(&self) -> Uuid {
+        self.uuid
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -39,7 +83,7 @@ impl PipelineDescriptor {
         Self {
             uuid: Uuid::new_v4(),
             shader,
-            vertex_layouts: vec![ModelVertex::layout()],
+            vertex_layouts: vec![ModelVertex::layout(), TransformInstance::layout()],
             blend_mode: BlendMode::Replace,
             cull_mode: CullMode::None,
             topology: Topology::TriangleList,
@@ -54,21 +98,15 @@ impl PipelineDescriptor {
     }
 }
 
-impl Asset for Material {
-    const ASSET_TYPE: AssetType = AssetType::Material;
-    fn uuid(&self) -> Uuid {
-        self.uuid
-    }
-}
-
 impl Material {
     pub fn new(shader: String) -> Self {
         let pipeline_descriptor = PipelineDescriptor::new(shader);
 
         Self {
             uuid: Uuid::new_v4(),
-            pipeline_uuid: pipeline_descriptor.uuid,
             pipeline_descriptor,
+            bindings: Vec::new(),
+            parameters: Vec::new(),
         }
     }
 
@@ -116,5 +154,38 @@ impl Material {
 impl Default for Material {
     fn default() -> Self {
         Self::new("shaders/cube.wgsl".to_string())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TextureAsset {
+    pub uuid: Uuid,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub mip_levels: Vec<TextureMip>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TextureMip {
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum TextureCompression {
+    None,
+    Bc1,
+    Bc3,
+    Bc7,
+    Astc,
+}
+
+impl Asset for TextureAsset {
+    const ASSET_TYPE: AssetType = AssetType::Texture;
+    fn uuid(&self) -> Uuid {
+        self.uuid
     }
 }

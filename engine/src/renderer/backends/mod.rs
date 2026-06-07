@@ -94,6 +94,7 @@ pub trait RenderContext {
     fn api(&mut self) -> &mut dyn RendererAPI;
     fn bind_pipeline(&mut self, pipeline: PipelineHandle);
     fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle);
+    fn bind_vertex_buffer_range(&mut self, slot: u32, buffer: BufferHandle, offset: u64, size: u64);
     fn bind_index_buffer(&mut self, buffer: BufferHandle);
     fn bind_bind_group(&mut self, index: u32, bind_group: BindGroupHandle);
     fn draw(&mut self, vertices: u32, instances: u32);
