@@ -22,11 +22,13 @@ pub struct Material {
     pub pipeline_descriptor: PipelineDescriptor,
     pub bindings: Vec<MaterialBinding>,     // For bound resources
     pub parameters: Vec<MaterialParameter>, // For when not using textures, e.g. diffuse_color as float4 instead of texture
+    #[serde(skip)]
+    pub material_index: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MaterialBinding {
-    pub name: String, // "albedo_texture", "normal_map", "terrain_textures"
+    pub name: String, // "diffuse_texture", "normal_map", "terrain_textures"
     pub binding: u32, // shader binding index
     pub group: u32,   // usually material group
     pub resource: MaterialResource,
@@ -107,6 +109,7 @@ impl Material {
             pipeline_descriptor,
             bindings: Vec::new(),
             parameters: Vec::new(),
+            material_index: 0,
         }
     }
 

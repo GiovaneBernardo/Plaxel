@@ -233,12 +233,12 @@ pub fn register_systems(state: &mut engine::State) {
         .get_node_mut::<GeometryPassNode>(0)
         .and_then(|node| node.camera_bind_group_layout)
         .expect("GeometryPassNode must be compiled before creating planet pipelines");
-    let materials_layout = state
+    let textures_layout = state
         .global_resources
         .renderer
         .render_resources
         .get_labeled::<FrameBindings>("frame_bindings")
-        .map(|bindings| bindings.materials_layout)
+        .map(|bindings| bindings.textures_layout)
         .expect(
             "Frame material bind group layout must be initialized before creating planet pipelines",
         );
@@ -247,12 +247,12 @@ pub fn register_systems(state: &mut engine::State) {
         .global_resources
         .renderer
         .renderer_api
-        .create_pipeline(&solid_material, &[camera_layout, materials_layout]);
+        .create_pipeline(&solid_material, &[camera_layout, textures_layout]);
     state
         .global_resources
         .renderer
         .renderer_api
-        .create_pipeline(&line_material, &[camera_layout, materials_layout]);
+        .create_pipeline(&line_material, &[camera_layout, textures_layout]);
 
     let (chunk_tx, chunk_rx) = mpsc::channel();
     let (octree_tx, octree_rx) = mpsc::channel();

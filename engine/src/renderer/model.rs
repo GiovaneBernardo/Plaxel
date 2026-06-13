@@ -51,6 +51,7 @@ impl Vertex for ModelVertex {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TransformInstance {
     pub model_matrix: [[f32; 4]; 4],
+    pub material_index: u32,
 }
 
 impl Vertex for TransformInstance {
@@ -80,6 +81,11 @@ impl Vertex for TransformInstance {
                     offset: mem::size_of::<[f32; 12]>() as u64,
                     shader_location: 8,
                     format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[[f32; 4]; 4]>() as u64,
+                    shader_location: 9,
+                    format: AttributeFormat::Uint32,
                 },
             ],
         }
@@ -140,6 +146,8 @@ pub struct MeshAsset {
     pub uuid: Uuid,
     pub vertices: Vec<u8>,
     pub indices: Vec<u32>,
+    #[serde(default)]
+    pub material_uuid: Option<Uuid>,
     pub vertex_layout: VertexLayout,
 }
 

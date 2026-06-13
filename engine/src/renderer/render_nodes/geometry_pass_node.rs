@@ -12,7 +12,7 @@ pub struct GeometryPassNode {
     pub camera_bind_group: Option<BindGroupHandle>,
     pub camera_bind_group_layout: Option<BindGroupLayoutHandle>,
     pub pass_inputs_group: Option<BindGroupHandle>,
-    pub transforms: Vec<Matrix4<f32>>,
+    pub transforms: Vec<TransformInstance>,
     pub transform_buffer: Option<BufferHandle>,
     pub transform_capacity: u32,
 }
@@ -141,14 +141,7 @@ impl RenderNode for GeometryPassNode {
         }
 
         if let (Some(buffer), transforms) = (self.transform_buffer, &self.transforms) {
-            let raw_transforms: Vec<TransformInstance> = transforms
-                .iter()
-                .map(|m| TransformInstance {
-                    model_matrix: (*m).into(),
-                })
-                .collect();
-
-            api.write_buffer(buffer, bytemuck::cast_slice(&raw_transforms));
+            api.write_buffer(buffer, bytemuck::cast_slice(&transforms));
         }
     }
 
@@ -201,7 +194,10 @@ impl RenderNode for GeometryPassNode {
 impl GeometryPassNode {
     pub fn add_render_data(&mut self, mut new_render_data: RenderData) {
         new_render_data.transform_index = self.transforms.len() as u32;
-        self.transforms.push(Matrix4::identity());
+        self.transforms.push(TransformInstance {
+            model_matrix: Matrix4::identity().into(),
+            material_index: new_render_data.material.material_index,
+        });
         self.render_data.push(new_render_data);
     }
 

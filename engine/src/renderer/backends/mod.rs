@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 pub use crate::State;
 use crate::assets::manager::{AssetHeader, Handle};
-use crate::assets::material::Material;
+use crate::assets::material::{Material, TextureAsset};
 use crate::model::MeshAsset;
 use crate::renderer::core::{
     BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode, TextureHandle,
@@ -40,6 +40,10 @@ pub trait RendererAPI {
     fn get_default_sampler(&self) -> SamplerHandle;
 
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
+    fn upload_texture_asset(&mut self, texture: &TextureAsset, index: Option<u32>)
+    -> TextureHandle;
+    fn is_texture_asset_uploaded(&self, uuid: Uuid) -> bool;
+    fn upload_material_asset(&mut self, material: &Material, index: Option<u32>) -> u32;
     fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor);
     fn load_material(&mut self, header: &AssetHeader) -> Material;
     fn create_pipeline(

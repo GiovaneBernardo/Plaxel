@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
+use bytemuck::{Pod, Zeroable};
 use cgmath::Matrix4;
 use uuid::Uuid;
 
@@ -14,9 +15,9 @@ use crate::core::components::renderer::MeshRendererComponent;
 use crate::ecs::query::Query;
 use crate::ecs::world::World;
 use crate::ecs::{commands::Commands, system::SystemContext};
-use crate::model;
 use crate::model::MeshAsset;
 use crate::model::VertexLayout;
+use crate::model::{self, TransformInstance};
 pub use crate::renderer::backends::*;
 pub use crate::renderer::render_nodes::*;
 use crate::renderer::wgpu_backend::WgpuBackend;
@@ -543,14 +544,36 @@ impl PipelineKey {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GpuMaterialData {
+    pub diffuse_texture_index: u32,
+    pub normal_texture_index: u32,
+    pub roughness_texture_index: u32,
+    pub flags: u32,
+    pub base_color: [f32; 4],
+}
+
+impl Default for GpuMaterialData {
+    fn default() -> Self {
+        Self {
+            diffuse_texture_index: 0,
+            normal_texture_index: 0,
+            roughness_texture_index: 0,
+            flags: 0,
+            base_color: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+}
+
 pub struct FrameBindings {
     pub camera_buffer: BufferHandle,
     pub camera_layout: BindGroupLayoutHandle,
     pub camera_bind_group: BindGroupHandle,
 
-    pub materials_buffer: BufferHandle,
-    pub materials_layout: BindGroupLayoutHandle,
+    pub textures_layout: BindGroupLayoutHandle,
     pub materials_bind_group: BindGroupHandle,
+    pub materials_ssbo_buffer: BufferHandle,
 }
 
 pub struct RenderResources {
@@ -684,16 +707,10 @@ impl Renderer {
         });
 
         // Global Materials (group 1)
-        let materials_buffer = self.renderer_api.create_buffer(&BufferDescriptor {
-            label: "materials_uniform".to_string(),
-            size: size_of::<camera::CameraUniform>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
-        let materials_layout =
+        let textures_layout =
             self.renderer_api
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: "materials_layout".to_string(),
+                    label: "textures_layout".to_string(),
                     entries: vec![
                         BindGroupLayoutEntry {
                             binding: 0,
@@ -702,7 +719,7 @@ impl Renderer {
                                 dimension: TextureDimension::D2,
                                 multisampled: false,
                             },
-                            count: Some(128),
+                            count: Some(512),
                         },
                         BindGroupLayoutEntry {
                             binding: 1,
@@ -710,23 +727,36 @@ impl Renderer {
                             entry_type: BindingType::Sampler,
                             count: None,
                         },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: ShaderStages::Fragment,
+                            entry_type: BindingType::StorageBuffer { read_only: true },
+                            count: None,
+                        },
                     ],
                 });
 
         let white = self.renderer_api.get_white_texture();
 
-        let textures = vec![white; 128];
+        let textures = vec![white; 512];
         let texture_refs: Vec<&TextureHandle> = textures.iter().collect();
+
+        let materials_ssbo_buffer = self.renderer_api.create_buffer(&BufferDescriptor {
+            label: "materials_ssbo".to_string(),
+            size: 1024 * size_of::<GpuMaterialData>() as u64,
+            usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        });
 
         let materials_bind_group = self.renderer_api.create_bind_group(&BindGroupDescriptor {
             label: "materials_bind_group".to_string(),
-            layout: materials_layout,
+            layout: textures_layout,
             entries: vec![
                 (0, BindGroupEntry::TextureArray(&texture_refs)),
                 (
                     1,
                     BindGroupEntry::Sampler(self.renderer_api.get_default_sampler()),
                 ),
+                (2, BindGroupEntry::Buffer(materials_ssbo_buffer)),
             ],
         });
 
@@ -736,9 +766,11 @@ impl Renderer {
                 camera_buffer,
                 camera_layout,
                 camera_bind_group,
-                materials_buffer,
-                materials_layout,
+
+                textures_layout,
                 materials_bind_group,
+
+                materials_ssbo_buffer,
             },
         );
     }
@@ -828,6 +860,7 @@ impl RenderGraph {
             uuid: Uuid::new_v4(),
             vertices: Vec::new(),
             indices: Vec::new(),
+            material_uuid: None,
             vertex_layout: VertexLayout {
                 stride: std::mem::size_of::<[f32; 3]>() as u64,
                 step_mode: model::StepMode::Vertex,
@@ -865,6 +898,7 @@ impl RenderGraph {
             uuid: Uuid::new_v4(),
             vertices: vertex_bytes.clone(),
             indices: bytemuck::cast_slice(&indices).to_vec(),
+            material_uuid: None,
             vertex_layout: VertexLayout {
                 stride: std::mem::size_of::<[f32; 3]>() as u64,
                 step_mode: model::StepMode::Vertex,
@@ -909,6 +943,7 @@ impl RenderGraph {
             uuid: Uuid::new_v4(),
             vertices: sphere_vertex_bytes,
             indices: bytemuck::cast_slice(&sphere_indices).to_vec(),
+            material_uuid: None,
             vertex_layout: VertexLayout {
                 stride: std::mem::size_of::<[f32; 3]>() as u64,
                 step_mode: model::StepMode::Vertex,
@@ -928,6 +963,7 @@ impl RenderGraph {
             uuid: Uuid::new_v4(),
             vertices: vertex_bytes,
             indices: bytemuck::cast_slice(&wire_indices).to_vec(),
+            material_uuid: None,
             vertex_layout: VertexLayout {
                 stride: std::mem::size_of::<[f32; 3]>() as u64,
                 step_mode: model::StepMode::Vertex,
@@ -1113,7 +1149,7 @@ impl dyn RenderNode {}
 
 pub struct GeometryRenderQueue {
     pub items: Vec<RenderData>,
-    pub transforms: Vec<cgmath::Matrix4<f32>>,
+    pub transforms: Vec<TransformInstance>,
 }
 
 impl GeometryRenderQueue {
@@ -1127,15 +1163,21 @@ impl GeometryRenderQueue {
 
 pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands) {
     let world = &mut ctx.world;
+    let asset_manager = &ctx.globals.asset_manager;
     let mut transforms = Vec::new();
     let render_data = {
         let mut items = Vec::new();
 
         let mut query = Query::<(&MeshRendererComponent, &TransformComponent)>::new(world);
         query.for_each(|_entity, (mesh_renderer, transform)| {
+            let Some(material) = asset_manager.get_by_uuid::<Material>(mesh_renderer.material)
+            else {
+                return;
+            };
+
             items.push(RenderData {
                 mesh: mesh_renderer.mesh,
-                material: mesh_renderer.material.clone(),
+                material: material.clone(),
                 transform_index: transforms.len() as u32,
                 sort_key: 0,
             });
@@ -1148,7 +1190,10 @@ pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands)
                     transform.scale.y,
                     transform.scale.z,
                 );
-            transforms.push(model_matrix);
+            transforms.push(TransformInstance {
+                model_matrix: model_matrix.into(),
+                material_index: material.material_index,
+            });
         });
 
         items

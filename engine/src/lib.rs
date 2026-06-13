@@ -34,6 +34,7 @@ use crate::assets::importer::TargetPlatform;
 use crate::assets::importers::obj_importer::ObjImporter;
 use crate::assets::loader;
 use crate::assets::material::Material;
+use crate::assets::material::MaterialResource;
 use crate::assets::serializer;
 use crate::core::components::{
     core::TransformComponent,
@@ -93,6 +94,35 @@ fn cook_trimesh_indices(vertices: &[cgmath::Point3<f32>], indices: &[u32]) -> Ve
     }
 
     triangles
+}
+
+fn find_sibling_asset_by_uuid(
+    asset_path: &Path,
+    uuid: assets::manager::Uuid,
+    extension: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = asset_path.parent()?;
+    let entries = std::fs::read_dir(dir).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
+        {
+            continue;
+        }
+
+        let Ok(header) = loader::load_header(&path) else {
+            continue;
+        };
+        if header.uuid == uuid {
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 // This will store the state of our game
@@ -227,6 +257,64 @@ impl State {
         if path
             .extension()
             .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("plxtex"))
+        {
+            let payload = match loader::load_payload(path) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    log::error!("Unable to load texture asset {:?}: {error}", path);
+                    return;
+                }
+            };
+
+            let AssetPayload::Texture(texture) = payload else {
+                log::error!("Imported asset {:?} is not a texture", path);
+                return;
+            };
+
+            let handle = self
+                .global_resources
+                .renderer
+                .renderer_api
+                .upload_texture_asset(&texture, None);
+            log::info!("Uploaded texture asset {:?} as {:?}", path, handle);
+            return;
+        }
+
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("plxmat"))
+        {
+            let payload = match loader::load_payload(path) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    log::error!("Unable to load material asset {:?}: {error}", path);
+                    return;
+                }
+            };
+
+            let AssetPayload::Material(mut material) = payload else {
+                log::error!("Imported asset {:?} is not a material", path);
+                return;
+            };
+
+            self.upload_material_textures(path, &mut material);
+            let uuid = material.uuid;
+            self.global_resources
+                .asset_manager
+                .paths
+                .insert(path.to_path_buf(), uuid);
+            self.global_resources
+                .asset_manager
+                .add_asset::<Material>(material);
+            log::info!("Loaded material asset {:?}", path);
+            return;
+        }
+
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("plxmesh"))
         {
             let header = loader::load_header(path).unwrap();
@@ -242,11 +330,9 @@ impl State {
                     .upload_mesh(&mesh);
                 println!("Uploaded mesh: {:?}", handle);
 
-                let material =
-                    Material::new("shaders/cube.wgsl".to_string()).with_vertex_layouts(vec![
-                        mesh.vertex_layout.clone(),
-                        TransformInstance::layout(),
-                    ]);
+                let material_uuid = self
+                    .load_sibling_material_uuid(path, &mesh)
+                    .unwrap_or_else(|| self.add_fallback_material(mesh.vertex_layout.clone()));
 
                 let Some(camera_layout) = self
                     .global_resources
@@ -257,21 +343,27 @@ impl State {
                 else {
                     return;
                 };
-                let Some(materials_layout) = self
+                let Some(textures_layout) = self
                     .global_resources
                     .renderer
                     .render_resources
                     .get_labeled::<FrameBindings>("frame_bindings")
-                    .map(|bindings| bindings.materials_layout)
+                    .map(|bindings| bindings.textures_layout)
                 else {
                     return;
                     //anyhow::bail!("Frame material bind group layout is not available");
                 };
 
-                self.global_resources
-                    .renderer
-                    .renderer_api
-                    .create_pipeline(&material, &[camera_layout, materials_layout]);
+                if let Some(material) = self
+                    .global_resources
+                    .asset_manager
+                    .get_by_uuid::<Material>(material_uuid)
+                {
+                    self.global_resources
+                        .renderer
+                        .renderer_api
+                        .create_pipeline(material, &[camera_layout, textures_layout]);
+                }
 
                 let world = self.active_scene_mut().unwrap().world_mut();
                 let entity = world.spawn();
@@ -293,7 +385,7 @@ impl State {
                     entity,
                     MeshRendererComponent {
                         mesh: handle,
-                        material: material,
+                        material: material_uuid,
                     },
                 );
             }
@@ -348,6 +440,166 @@ impl State {
         //if let Err(error) = self.spawn_dropped_obj(path, &point3(0.0, 0.0, 0.0)) {
         //    log::error!("Unable to load dropped OBJ {:?}: {error}", path);
         //}
+    }
+
+    fn load_sibling_material_uuid(
+        &mut self,
+        mesh_path: &Path,
+        mesh: &MeshAsset,
+    ) -> Option<assets::manager::Uuid> {
+        if let Some(material_uuid) = mesh.material_uuid {
+            if self
+                .prepare_loaded_material(material_uuid, mesh.vertex_layout.clone())
+                .is_some()
+            {
+                return Some(material_uuid);
+            }
+
+            let Some(material_path) =
+                find_sibling_asset_by_uuid(mesh_path, material_uuid, "plxmat")
+            else {
+                log::warn!(
+                    "Unable to find material {:?} for mesh {:?}",
+                    material_uuid,
+                    mesh_path
+                );
+                return None;
+            };
+
+            return self.load_material_from_path(&material_path, mesh.vertex_layout.clone());
+        }
+
+        let dir = mesh_path.parent()?;
+        let mut material_paths = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("plxmat"))
+            })
+            .collect::<Vec<_>>();
+        material_paths.sort();
+
+        for material_path in material_paths {
+            if let Some(material_uuid) =
+                self.load_material_from_path(&material_path, mesh.vertex_layout.clone())
+            {
+                return Some(material_uuid);
+            }
+        }
+
+        None
+    }
+
+    fn prepare_loaded_material(
+        &mut self,
+        material_uuid: assets::manager::Uuid,
+        vertex_layout: VertexLayout,
+    ) -> Option<assets::manager::Uuid> {
+        let material =
+            self.global_resources
+                .asset_manager
+                .get_mut::<Material>(assets::manager::Handle {
+                    uuid: material_uuid,
+                    asset_type: assets::manager::AssetType::Material,
+                    _marker: std::marker::PhantomData,
+                })?;
+        material.pipeline_descriptor.vertex_layouts =
+            vec![vertex_layout, TransformInstance::layout()];
+        Some(material_uuid)
+    }
+
+    fn load_material_from_path(
+        &mut self,
+        material_path: &Path,
+        vertex_layout: VertexLayout,
+    ) -> Option<assets::manager::Uuid> {
+        let found_uuid = self
+            .global_resources
+            .asset_manager
+            .uuid_for_path(&material_path.to_path_buf())
+            .copied();
+        if let Some(found_uuid) = found_uuid {
+            if self
+                .prepare_loaded_material(found_uuid, vertex_layout.clone())
+                .is_some()
+            {
+                return Some(found_uuid);
+            }
+        }
+
+        let Ok(payload) = loader::load_payload(material_path) else {
+            return None;
+        };
+        let AssetPayload::Material(mut material) = payload else {
+            return None;
+        };
+
+        material = material.with_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
+        let uuid = material.uuid;
+        self.upload_material_textures(material_path, &mut material);
+        self.global_resources
+            .asset_manager
+            .add_asset::<Material>(material);
+
+        Some(uuid)
+    }
+
+    fn add_fallback_material(&mut self, vertex_layout: VertexLayout) -> assets::manager::Uuid {
+        let material = Material::new("shaders/cube.wgsl".to_string())
+            .with_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
+        let uuid = material.uuid;
+        self.global_resources
+            .asset_manager
+            .add_asset::<Material>(material);
+        uuid
+    }
+
+    fn upload_material_textures(&mut self, material_path: &Path, material: &mut Material) {
+        for binding in &material.bindings {
+            let MaterialResource::Texture(texture_uuid) = &binding.resource else {
+                continue;
+            };
+            if self
+                .global_resources
+                .renderer
+                .renderer_api
+                .is_texture_asset_uploaded(*texture_uuid)
+            {
+                continue;
+            }
+
+            let Some(texture_path) =
+                find_sibling_asset_by_uuid(material_path, *texture_uuid, "plxtex")
+            else {
+                log::warn!(
+                    "Unable to find texture {:?} for material {:?}",
+                    texture_uuid,
+                    material_path
+                );
+                continue;
+            };
+            let Ok(payload) = loader::load_payload(&texture_path) else {
+                log::warn!("Unable to load texture asset {:?}", texture_path);
+                continue;
+            };
+            let AssetPayload::Texture(texture) = payload else {
+                log::warn!("Asset {:?} is not a texture", texture_path);
+                continue;
+            };
+
+            self.global_resources
+                .renderer
+                .renderer_api
+                .upload_texture_asset(&texture, None);
+        }
+
+        material.material_index = self
+            .global_resources
+            .renderer
+            .renderer_api
+            .upload_material_asset(material, None);
     }
 
     pub fn spawn_dropped_obj(
@@ -427,11 +679,13 @@ impl State {
             uuid: assets::manager::Uuid::new_v4(),
             vertices: bytemuck::cast_slice(&positions).to_vec(),
             indices,
+            material_uuid: None,
             vertex_layout: vertex_layout.clone(),
         };
 
         let material = Material::new("shaders/cube.wgsl".to_string())
             .with_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
+        let material_uuid = material.uuid;
 
         let Some(camera_layout) = self
             .global_resources
@@ -442,12 +696,12 @@ impl State {
         else {
             anyhow::bail!("GeometryPassNode camera bind group layout is not available");
         };
-        let Some(materials_layout) = self
+        let Some(textures_layout) = self
             .global_resources
             .renderer
             .render_resources
             .get_labeled::<FrameBindings>("frame_bindings")
-            .map(|bindings| bindings.materials_layout)
+            .map(|bindings| bindings.textures_layout)
         else {
             anyhow::bail!("Frame material bind group layout is not available");
         };
@@ -455,7 +709,10 @@ impl State {
         self.global_resources
             .renderer
             .renderer_api
-            .create_pipeline(&material, &[camera_layout, materials_layout]);
+            .create_pipeline(&material, &[camera_layout, textures_layout]);
+        self.global_resources
+            .asset_manager
+            .add_asset::<Material>(material);
         let mesh_handle = self
             .global_resources
             .renderer
@@ -484,7 +741,7 @@ impl State {
             entity,
             MeshRendererComponent {
                 mesh: mesh_handle,
-                material,
+                material: material_uuid,
             },
         );
         world.insert(

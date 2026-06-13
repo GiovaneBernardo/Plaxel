@@ -6,14 +6,31 @@ use crate::assets::manager::AssetHeader;
 use crate::assets::manager::AssetManager;
 use crate::assets::manager::AssetType;
 use crate::assets::serializer::{BINARY_DELIMITER, MAGIC};
+use std::io::Read;
 use std::path::Path;
 
 pub fn load_header(path: &Path) -> anyhow::Result<AssetHeader> {
-    let bytes = std::fs::read(path)?;
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 4096];
+
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+
+        bytes.extend_from_slice(&chunk[..read]);
+        if find_bytes(&bytes, BINARY_DELIMITER).is_some() {
+            break;
+        }
+    }
+
     let (mut header, content_offset) = parse_text_header(&bytes)?;
+    let file_len = file.metadata()?.len();
     header.file_path = path.to_path_buf();
     header.content_offset = content_offset as u32;
-    header.content_size = (bytes.len() - content_offset) as u64;
+    header.content_size = file_len.saturating_sub(content_offset as u64);
 
     Ok(header)
 }

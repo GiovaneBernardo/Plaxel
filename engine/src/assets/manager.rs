@@ -82,7 +82,13 @@ pub struct Assets<T> {
     items: HashMap<Uuid, T>,
 }
 
-impl<T> Assets<T> {
+impl<T: Asset> Assets<T> {
+    pub fn add(&mut self, asset: T) -> Option<&T> {
+        let uuid = asset.uuid();
+        self.items.insert(asset.uuid(), asset);
+        return self.items.get(&uuid);
+    }
+
     pub fn get(&self, uuid: &Uuid) -> Option<&T> {
         self.items.get(uuid)
     }
@@ -162,6 +168,17 @@ impl AssetManager {
         self.storages
             .get_mut(&TypeId::of::<T>())?
             .downcast_mut::<Assets<T>>()
+    }
+
+    pub fn add_asset<T: Asset + 'static>(&mut self, asset: T) -> Option<&T> {
+        if !self.storages.contains_key(&TypeId::of::<T>()) {
+            self.register_asset_type::<T>();
+        }
+        self.assets_mut::<T>().unwrap().add(asset)
+    }
+
+    pub fn get_by_uuid<T: Asset + 'static>(&self, uuid: Uuid) -> Option<&T> {
+        self.assets::<T>()?.get(&uuid)
     }
 
     pub fn get<T: Asset + 'static>(&self, handle: Handle<T>) -> Option<&T> {

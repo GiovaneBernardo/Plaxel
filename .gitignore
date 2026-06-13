@@ -1,5 +1,6 @@
 # Compiled output
 /target/
+/res/imported
 
 # Rust package manager lock file
 Cargo.lock

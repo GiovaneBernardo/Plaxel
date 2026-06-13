@@ -6,7 +6,7 @@
 [ext_resource type="Texture2D" uid="uid://acg_0dr7k2fl" id="Roughness" path="./Rock061_2K-JPG_Roughness.jpg"]
 [ext_resource type="Texture2D" uid="uid://acg_sb6qhiz7" id="NormalGL" path="./Rock061_2K-JPG_NormalGL.jpg"]
 [resource]
-albedo_texture = ExtResource("Color")
+diffuse_texture = ExtResource("Color")
 ao_enabled = true
 ao_texture = ExtResource("AmbientOcclusion")
 ao_texture_channel = 4

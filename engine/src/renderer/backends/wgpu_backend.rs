@@ -3,14 +3,18 @@ use crate::Window;
 use crate::assets;
 use crate::assets::manager::AssetType;
 use crate::assets::manager::Handle;
+use crate::assets::material::MaterialResource;
 use crate::assets::material::PipelineDescriptor;
+use crate::assets::material::TextureAsset;
 use crate::engine_info;
 use crate::model::MeshAsset;
 use crate::renderer::BindGroupHandle;
 use crate::renderer::BufferDescriptor;
 use crate::renderer::FrameBindings;
+use crate::renderer::GpuMaterialData;
 use crate::renderer::GraphResources;
 use crate::renderer::OutputTexture;
+use crate::renderer::PipelineKey;
 use crate::renderer::SamplerDescriptor;
 use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
@@ -23,10 +27,14 @@ use crate::texture;
 use cgmath::point2;
 use offset_allocator::Allocation;
 use wgpu::IndexFormat;
+use wgpu::PipelineCache;
+use wgpu::PipelineCacheDescriptor;
 use wgpu::util::DeviceExt;
 use wgpu::wgt::TextureDataOrder;
 
-use super::{BufferHandle, PipelineHandle, RenderGraph, RenderNode, TextureHandle};
+use super::{
+    BindGroupLayoutHandle, BufferHandle, PipelineHandle, RenderGraph, RenderNode, TextureHandle,
+};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
@@ -408,6 +416,12 @@ struct ShaderHotReloadData {
     pipeline_handle: PipelineHandle,
 }
 
+#[derive(Eq, Hash, PartialEq)]
+struct WgpuPipelineKey {
+    pipeline: PipelineKey,
+    bind_group_layouts: Vec<BindGroupLayoutHandle>,
+}
+
 pub struct WgpuBackend {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -417,11 +431,14 @@ pub struct WgpuBackend {
     depth_texture: texture::Texture,
     pipelines: HashMap<PipelineHandle, wgpu::RenderPipeline>,
     pipelines_by_uuid: HashMap<Uuid, PipelineHandle>,
+    pipelines_by_key: HashMap<WgpuPipelineKey, PipelineHandle>,
     buffers: HashMap<BufferHandle, wgpu::Buffer>,
     bind_groups: HashMap<BindGroupHandle, wgpu::BindGroup>,
     bind_group_layouts: HashMap<BindGroupLayoutHandle, wgpu::BindGroupLayout>,
     textures: HashMap<TextureHandle, wgpu::Texture>,
     texture_views: HashMap<TextureHandle, wgpu::TextureView>,
+    textures_by_uuid: HashMap<Uuid, TextureHandle>,
+    materials_by_uuid: HashMap<Uuid, u32>,
     samplers: HashMap<SamplerHandle, wgpu::Sampler>,
     pool_manager: PoolManager,
     gpu_meshes: HashMap<Handle<MeshAsset>, GpuMesh>,
@@ -429,8 +446,11 @@ pub struct WgpuBackend {
     white_texture: Option<TextureHandle>,
     default_sampler: Option<SamplerHandle>,
     dirty_global_textures: bool,
+    dirty_global_materials: bool,
     uploaded_textures: Vec<TextureHandle>,
     uploaded_textures_last_available_index: u32,
+    uploaded_materials: Vec<GpuMaterialData>,
+    pipeline_cache: PipelineCache,
 }
 
 pub struct WgpuRenderContext<'a> {
@@ -529,7 +549,7 @@ impl RendererAPI for WgpuBackend {
             mipmap_filter: FilterMode::default(),
         }));
 
-        self.uploaded_textures = vec![self.get_white_texture(); 128];
+        self.uploaded_textures = vec![self.get_white_texture(); 512];
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -616,6 +636,10 @@ impl RendererAPI for WgpuBackend {
         // Check if the global textures arrays are dirty to update them
         if self.dirty_global_textures {
             self.update_global_textures(render_resources);
+        }
+
+        if self.dirty_global_materials {
+            self.update_global_materials(render_resources);
         }
 
         for (i, (_, node)) in render_graph.nodes.iter_mut().enumerate() {
@@ -778,13 +802,29 @@ impl RendererAPI for WgpuBackend {
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
     ) {
+        if self
+            .pipelines_by_uuid
+            .contains_key(&material.pipeline_descriptor.uuid)
+        {
+            return;
+        }
+
+        let pipeline_key =
+            WgpuBackend::pipeline_key(&material.pipeline_descriptor, bind_group_layouts);
+        if let Some(handle) = self.pipelines_by_key.get(&pipeline_key).copied() {
+            self.pipelines_by_uuid
+                .insert(material.pipeline_descriptor.uuid, handle);
+            return;
+        }
+
         let render_pipeline =
             self.create_render_pipeline(&material.pipeline_descriptor, bind_group_layouts);
-        self.add_render_pipeline(
+        let handle = self.add_render_pipeline(
             render_pipeline,
             &material.pipeline_descriptor,
             bind_group_layouts,
         );
+        self.pipelines_by_key.insert(pipeline_key, handle);
     }
 
     fn create_render_data(
@@ -799,6 +839,7 @@ impl RendererAPI for WgpuBackend {
             uuid: Uuid::new_v4(),
             vertices: vertex_bytes.clone(),
             indices: bytemuck::cast_slice(&indices).to_vec(),
+            material_uuid: None,
             vertex_layout: material.pipeline_descriptor.vertex_layouts[0].clone(),
             //vertex_layout: VertexLayout {
             //    stride: std::mem::size_of::<[f32; 3]>() as u64,
@@ -979,6 +1020,132 @@ impl RendererAPI for WgpuBackend {
 
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
         self.load_mesh_with_data(mesh)
+    }
+
+    fn upload_texture_asset(
+        &mut self,
+        texture: &TextureAsset,
+        index: Option<u32>,
+    ) -> TextureHandle {
+        if index.is_none() {
+            if let Some(handle) = self.textures_by_uuid.get(&texture.uuid).copied() {
+                return handle;
+            }
+        }
+
+        let mip = texture
+            .mip_levels
+            .first()
+            .expect("TextureAsset must contain at least one mip level");
+        let format: wgpu::TextureFormat = texture.format.into();
+        let bytes_per_pixel =
+            WgpuBackend::bytes_per_pixel(format).expect("unsupported texture format");
+
+        let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(texture.name.as_str()),
+            size: wgpu::Extent3d {
+                width: texture.width,
+                height: texture.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: texture.mip_levels.len().max(1) as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &wgpu_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &mip.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_pixel * mip.width),
+                rows_per_image: Some(mip.height),
+            },
+            wgpu::Extent3d {
+                width: mip.width,
+                height: mip.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let handle = self.add_texture(wgpu_texture);
+        self.upload_texture(&handle, index);
+        self.textures_by_uuid.insert(texture.uuid, handle);
+        handle
+    }
+
+    fn is_texture_asset_uploaded(&self, uuid: Uuid) -> bool {
+        self.textures_by_uuid.contains_key(&uuid)
+    }
+
+    fn upload_material_asset(&mut self, material: &Material, index: Option<u32>) -> u32 {
+        let index = index.or_else(|| self.materials_by_uuid.get(&material.uuid).copied());
+
+        let mut gpu_material = GpuMaterialData {
+            diffuse_texture_index: 0,
+            normal_texture_index: 0,
+            roughness_texture_index: 0,
+            flags: 0,
+            base_color: [1.0, 0.0, 0.0, 1.0],
+        };
+
+        for binding in &material.bindings {
+            let MaterialResource::Texture(uuid) = &binding.resource else {
+                continue;
+            };
+            let Some(texture_index) = self.texture_index_for_uuid(*uuid) else {
+                engine_info!(
+                    "Material {:?} references texture {:?}, but it is not uploaded",
+                    material.uuid,
+                    uuid
+                );
+                continue;
+            };
+
+            match binding.name.as_str() {
+                "diffuse" | "diffuse_texture" | "albedo" | "albedo_texture" => {
+                    gpu_material.diffuse_texture_index = texture_index;
+                }
+                "normal" | "normal_map" | "normal_texture" => {
+                    gpu_material.normal_texture_index = texture_index;
+                    gpu_material.flags |= 1 << 0;
+                }
+                "roughness" | "roughness_texture" => {
+                    gpu_material.roughness_texture_index = texture_index;
+                    gpu_material.flags |= 1 << 1;
+                }
+                _ => {
+                    gpu_material.diffuse_texture_index = texture_index;
+                }
+            }
+        }
+
+        let material_index = if let Some(index) = index {
+            let material_index = index;
+            let index = material_index as usize;
+            if index >= self.uploaded_materials.len() {
+                self.uploaded_materials
+                    .resize(index + 1, GpuMaterialData::default());
+            }
+            self.uploaded_materials[index] = gpu_material;
+            material_index
+        } else {
+            let material_index = self.uploaded_materials.len() as u32;
+            self.uploaded_materials.push(gpu_material);
+            material_index
+        };
+
+        self.dirty_global_materials = true;
+        self.materials_by_uuid.insert(material.uuid, material_index);
+        material_index
     }
 
     fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureHandle {
@@ -1232,6 +1399,28 @@ impl WgpuBackend {
 }
 
 impl WgpuBackend {
+    fn pipeline_key(
+        pipeline_descriptor: &PipelineDescriptor,
+        bind_group_layouts: &[BindGroupLayoutHandle],
+    ) -> WgpuPipelineKey {
+        WgpuPipelineKey {
+            pipeline: PipelineKey {
+                shader: pipeline_descriptor.shader.clone(),
+                blend_mode: pipeline_descriptor.blend_mode,
+                cull_mode: pipeline_descriptor.cull_mode,
+                topology: pipeline_descriptor.topology,
+                front_face: pipeline_descriptor.front_face,
+                polygon_mode: pipeline_descriptor.polygon_mode,
+                depth_state: pipeline_descriptor.depth_state,
+                multisample_count: pipeline_descriptor.multisample.count,
+                vertex_layouts: pipeline_descriptor.vertex_layouts.clone(),
+                color_format: TextureFormat::None,
+                depth_format: TextureFormat::None,
+            },
+            bind_group_layouts: bind_group_layouts.to_vec(),
+        }
+    }
+
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
@@ -1274,7 +1463,8 @@ impl WgpuBackend {
         let supported_features = adapter.features();
         let wanted_features = wgpu::Features::TEXTURE_BINDING_ARRAY
             | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
-            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            | wgpu::Features::PIPELINE_CACHE;
         let enabled_features = wanted_features & supported_features;
 
         let _has_texture_binding_array =
@@ -1288,7 +1478,7 @@ impl WgpuBackend {
         let mut required_limits = wgpu::Limits::default();
         required_limits.max_binding_array_elements_per_shader_stage = adapter_limits
             .max_binding_array_elements_per_shader_stage
-            .min(128);
+            .min(512);
 
         unsafe {
             let (device, queue) = adapter
@@ -1306,7 +1496,7 @@ impl WgpuBackend {
                 })
                 .await?;
 
-            let wanted_texture_slots = 128;
+            let wanted_texture_slots = 512;
             let adapter_limits = adapter.limits();
 
             let max_supported = adapter_limits.max_binding_array_elements_per_shader_stage;
@@ -1342,6 +1532,12 @@ impl WgpuBackend {
             let depth_texture =
                 texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
+            let pipeline_cache = device.create_pipeline_cache(&PipelineCacheDescriptor {
+                label: Some("pipeline_cache"),
+                data: None,
+                fallback: true,
+            });
+
             Ok(Self {
                 window,
                 device,
@@ -1351,11 +1547,14 @@ impl WgpuBackend {
                 depth_texture,
                 pipelines: HashMap::new(),
                 pipelines_by_uuid: HashMap::new(),
+                pipelines_by_key: HashMap::new(),
                 buffers: HashMap::new(),
                 bind_groups: HashMap::new(),
                 bind_group_layouts: HashMap::new(),
                 textures: HashMap::new(),
                 texture_views: HashMap::new(),
+                textures_by_uuid: HashMap::new(),
+                materials_by_uuid: HashMap::new(),
                 samplers: HashMap::new(),
                 pool_manager: PoolManager::new(),
                 gpu_meshes: HashMap::new(),
@@ -1363,8 +1562,11 @@ impl WgpuBackend {
                 white_texture: None,
                 default_sampler: None,
                 dirty_global_textures: true,
+                dirty_global_materials: true,
                 uploaded_textures: Vec::new(),
                 uploaded_textures_last_available_index: 0,
+                uploaded_materials: Vec::new(),
+                pipeline_cache,
             })
         }
     }
@@ -1501,12 +1703,30 @@ impl WgpuBackend {
         let sampler = self.get_default_sampler();
         frame_bindings.materials_bind_group = self.create_bind_group(&BindGroupDescriptor {
             label: "materials_bind_group".to_string(),
-            layout: frame_bindings.materials_layout.clone(),
+            layout: frame_bindings.textures_layout.clone(),
             entries: vec![
                 (0, BindGroupEntry::TextureArray(&texture_refs)),
                 (1, BindGroupEntry::Sampler(sampler)),
+                (
+                    2,
+                    BindGroupEntry::Buffer(frame_bindings.materials_ssbo_buffer),
+                ),
             ],
         });
+        self.dirty_global_textures = false;
+    }
+
+    pub fn update_global_materials(&mut self, render_resources: &mut RenderResources) {
+        let frame_bindings = render_resources
+            .get_labeled_mut::<FrameBindings>("frame_bindings")
+            .unwrap();
+
+        let clone = self.uploaded_materials.clone();
+        self.write_buffer(
+            frame_bindings.materials_ssbo_buffer,
+            &bytemuck::cast_slice(clone.as_slice()),
+        );
+        self.dirty_global_materials = false;
     }
 
     pub fn find_first_empty_uploaded_texture_index(&self, start_index: u32) -> Option<u32> {
@@ -1523,6 +1743,14 @@ impl WgpuBackend {
                     None
                 }
             })
+    }
+
+    fn texture_index_for_uuid(&self, uuid: Uuid) -> Option<u32> {
+        let handle = self.textures_by_uuid.get(&uuid)?;
+        self.uploaded_textures
+            .iter()
+            .position(|uploaded| uploaded == handle)
+            .map(|index| index as u32)
     }
 
     fn create_render_pipeline(
@@ -1633,7 +1861,7 @@ impl WgpuBackend {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview: None,
-                cache: None,
+                cache: Some(&self.pipeline_cache),
             })
     }
 

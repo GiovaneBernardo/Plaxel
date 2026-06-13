@@ -13,6 +13,14 @@ pub struct InstanceRaw {
     pub color: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceRawMaterial {
+    pub model: [[f32; 4]; 4],
+    pub color: [f32; 4],
+    pub material_index: u32,
+}
+
 pub struct DebugCube {
     pub position: cgmath::Point3<f32>,
     pub scale: f32,

@@ -41,8 +41,13 @@ impl AssetImporter for ObjImporter {
         println!("Number of materials       = {}", materials.len());
 
         let mut imported_assets = Vec::new();
+        let material_uuids = materials.iter().map(|_| Uuid::new_v4()).collect::<Vec<_>>();
         for model in models {
             let uuid = Uuid::new_v4();
+            let material_uuid = model
+                .mesh
+                .material_id
+                .and_then(|material_id| material_uuids.get(material_id).copied());
             let vertex_count = model.mesh.positions.len() / 3;
             let mut vertices = Vec::with_capacity(vertex_count);
 
@@ -82,6 +87,7 @@ impl AssetImporter for ObjImporter {
                 uuid,
                 vertices: bytemuck::cast_slice(&vertices).to_vec(),
                 indices: model.mesh.indices,
+                material_uuid,
                 vertex_layout: ModelVertex::layout(),
             };
 
@@ -100,10 +106,12 @@ impl AssetImporter for ObjImporter {
         }
 
         // Import materials
-        for material in materials {
-            let uuid = Uuid::new_v4();
+        for (material_index, material) in materials.into_iter().enumerate() {
+            let uuid = material_uuids[material_index];
 
             let mut my_material = Material::new("shaders/opaque.wgsl".into());
+            my_material.uuid = uuid;
+            //my_material.with_vertex_layouts(layouts);
 
             if let Some(diffuse_texture) = material.diffuse_texture.as_ref() {
                 let texture_path = source.parent().unwrap().join(diffuse_texture);
