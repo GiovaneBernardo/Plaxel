@@ -75,7 +75,7 @@ fn get_material_color(index: u32) -> vec4<f32> {
 }
 
 @group(1) @binding(0)
-var my_textures: binding_array<texture_2d<f32>, 128>;
+var my_textures: binding_array<texture_2d<f32>, 512>;
 @group(1) @binding(1)
 var default_sampler: sampler;
 

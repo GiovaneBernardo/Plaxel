@@ -40,6 +40,21 @@ fn vs_main(
     return out;
 }
 
+struct MaterialData {
+    diffuse_texture_index: u32,
+    normal_texture_index: u32,
+    roughness_texture_index: u32,
+    flags: u32,
+    base_color: vec4<f32>,
+};
+
+@group(1) @binding(0)
+var textures: binding_array<texture_2d<f32>, 512>;
+@group(1) @binding(1)
+var default_sampler: sampler;
+@group(1) @binding(2)
+var<storage, read> materials: array<MaterialData>;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.color;
