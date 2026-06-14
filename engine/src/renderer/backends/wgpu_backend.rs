@@ -655,7 +655,11 @@ impl RendererAPI for WgpuBackend {
             self.update_global_materials(render_resources);
         }
 
-        for (_, node) in render_graph.nodes.iter_mut() {
+        let disabled_nodes = render_graph.disabled_nodes.clone();
+        for (index, node) in render_graph.nodes.iter_mut() {
+            if disabled_nodes.contains(index) {
+                continue;
+            }
             self.render_node(
                 node.as_mut(),
                 &render_graph.resources,

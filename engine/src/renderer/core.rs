@@ -1,5 +1,5 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bytemuck::{Pod, Zeroable};
 use cgmath::{Matrix4, SquareMatrix};
@@ -23,6 +23,8 @@ pub use crate::renderer::render_nodes::*;
 use crate::renderer::wgpu_backend::WgpuBackend;
 use crate::texture;
 use wgpu;
+
+pub use engine_inspector_derive::Inspector;
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct PipelineHandle(pub u32);
@@ -68,6 +70,7 @@ pub struct RenderGraph {
     pub nodes: Vec<(i8, Box<dyn RenderNode>)>,
     pub resources: GraphResources,
     pub compiled: bool,
+    pub(crate) disabled_nodes: HashSet<i8>,
 }
 
 pub struct PassResources {
@@ -348,6 +351,18 @@ pub enum AttachmentLoadOp {
     ClearDepth(f32),
 }
 
+pub trait Inspector {
+    fn inspect(&mut self, visitor: &mut dyn InspectorVisitor);
+}
+
+pub trait InspectorVisitor {
+    fn field_f32(&mut self, name: &'static str, value: &mut f32);
+    fn field_i32(&mut self, name: &'static str, value: &mut i32);
+    fn field_u32(&mut self, name: &'static str, value: &mut u32);
+    fn field_bool(&mut self, name: &'static str, value: &mut bool);
+    fn field_f32_array(&mut self, name: &'static str, value: &mut [f32]);
+}
+
 pub trait RenderNode {
     fn describe_pass(&self) -> RenderNodeDescriptor;
     fn compile(&mut self, ctx: &mut NodeCompileContext);
@@ -356,6 +371,9 @@ pub trait RenderNode {
     fn should_render_to_swapchain(&self) -> bool;
     fn needs_depth(&self) -> bool {
         true
+    }
+    fn inspect(&mut self, _visitor: &mut dyn InspectorVisitor) -> bool {
+        false
     }
     fn resize(
         &mut self,
@@ -660,6 +678,7 @@ impl Renderer {
                 nodes: Vec::new(),
                 resources: GraphResources::new(),
                 compiled: false,
+                disabled_nodes: HashSet::new(),
             },
             pipelines: Vec::new(),
             textures: Vec::new(),
@@ -680,7 +699,11 @@ impl Renderer {
     }
 
     pub fn prepare(&mut self) {
-        for (_, node) in &mut self.render_graph.nodes {
+        let disabled_nodes = self.render_graph.disabled_nodes.clone();
+        for (index, node) in &mut self.render_graph.nodes {
+            if disabled_nodes.contains(index) {
+                continue;
+            }
             node.prepare(&mut self.render_resources, self.renderer_api.as_mut());
         }
     }
@@ -902,6 +925,7 @@ impl RenderGraph {
             nodes: Vec::new(),
             resources: GraphResources::new(),
             compiled: false,
+            disabled_nodes: HashSet::new(),
         };
 
         let geometry_pass_node = GeometryPassNode {
@@ -1217,6 +1241,18 @@ impl RenderGraph {
     pub fn return_node(&mut self, index: i8, node: Box<dyn RenderNode>) {
         self.nodes.push((index, node));
         self.nodes.sort_by_key(|(i, _)| *i);
+    }
+
+    pub fn is_node_enabled(&self, index: i8) -> bool {
+        !self.disabled_nodes.contains(&index)
+    }
+
+    pub fn set_node_enabled(&mut self, index: i8, enabled: bool) {
+        if enabled {
+            self.disabled_nodes.remove(&index);
+        } else {
+            self.disabled_nodes.insert(index);
+        }
     }
 }
 

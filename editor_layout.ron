@@ -1,5 +1,5 @@
 (
-    version: 2,
+    version: 3,
     dock_state: (
         surfaces: [
             Main((
@@ -119,8 +119,9 @@
                             Profiler,
                             Timeline,
                             Physics,
+                            RenderGraph,
                         ],
-                        active: (0),
+                        active: (5),
                         scroll: 0.0,
                         collapsed: false,
                     )),
@@ -231,7 +232,7 @@
                     Empty,
                     Empty,
                 ],
-                focused_node: Some((6)),
+                focused_node: Some((3)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),
@@ -257,7 +258,7 @@
             ),
         ),
     ),
-    maximize_viewport: true,
+    maximize_viewport: false,
     floating_hierarchy: true,
     floating_inspector: true,
 )

@@ -8,6 +8,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 anyhow = { workspace = true }
+engine-inspector-derive = { path = "../engine_inspector_derive" }
 winit = { workspace = true }
 log = { workspace = true }
 wgpu = { workspace = true }

@@ -22,7 +22,7 @@ use std::{
 };
 
 const EDITOR_LAYOUT_PATH: &str = "editor_layout.ron";
-const EDITOR_LAYOUT_VERSION: u32 = 2;
+const EDITOR_LAYOUT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 enum EditorTab {
@@ -32,6 +32,7 @@ enum EditorTab {
     Console,
     Assets,
     Textures,
+    RenderGraph,
     Profiler,
     Timeline,
     Physics,
@@ -43,6 +44,7 @@ pub struct EditorUi {
     maximize_viewport: bool,
     floating_hierarchy: bool,
     floating_inspector: bool,
+    selected_render_node: Option<i8>,
     style_applied: bool,
     last_layout_text: Option<String>,
     last_layout_save_time: f64,
@@ -59,6 +61,11 @@ impl EditorUi {
                 if !dock_has_tab(&layout.dock_state, EditorTab::Textures) {
                     layout.dock_state.push_to_focused_leaf(EditorTab::Textures);
                 }
+                if !dock_has_tab(&layout.dock_state, EditorTab::RenderGraph) {
+                    layout
+                        .dock_state
+                        .push_to_focused_leaf(EditorTab::RenderGraph);
+                }
                 layout.version = EDITOR_LAYOUT_VERSION;
             }
             let last_layout_text = layout.to_ron();
@@ -68,6 +75,7 @@ impl EditorUi {
                 maximize_viewport: layout.maximize_viewport,
                 floating_hierarchy: layout.floating_hierarchy,
                 floating_inspector: layout.floating_inspector,
+                selected_render_node: None,
                 style_applied: false,
                 last_layout_text,
                 last_layout_save_time: 0.0,
@@ -88,6 +96,7 @@ impl EditorUi {
                 EditorTab::Console,
                 EditorTab::Assets,
                 EditorTab::Textures,
+                EditorTab::RenderGraph,
                 EditorTab::Profiler,
                 EditorTab::Timeline,
                 EditorTab::Physics,
@@ -104,6 +113,7 @@ impl EditorUi {
             maximize_viewport: false,
             floating_hierarchy: true,
             floating_inspector: true,
+            selected_render_node: None,
             style_applied: false,
             last_layout_text: None,
             last_layout_save_time: 0.0,
@@ -133,6 +143,7 @@ impl EditorUi {
                 let mut viewer = EditorTabViewer {
                     state,
                     selected_entity: &mut self.selected_entity,
+                    selected_render_node: &mut self.selected_render_node,
                     assets: &mut self.assets,
                 };
                 let style = Style::from_egui(ui.style().as_ref());
@@ -199,6 +210,7 @@ impl EditorUi {
                 EditorTab::Console,
                 EditorTab::Assets,
                 EditorTab::Textures,
+                EditorTab::RenderGraph,
                 EditorTab::Profiler,
                 EditorTab::Timeline,
                 EditorTab::Physics,
@@ -383,6 +395,7 @@ impl EditorTab {
             EditorTab::Console => "Console",
             EditorTab::Assets => "Assets",
             EditorTab::Textures => "Textures",
+            EditorTab::RenderGraph => "Render Graph",
             EditorTab::Profiler => "Profiler",
             EditorTab::Timeline => "Timeline",
             EditorTab::Physics => "Physics",
@@ -529,6 +542,7 @@ impl MaterialEditor {
 struct EditorTabViewer<'a> {
     state: &'a mut engine::State,
     selected_entity: &'a mut Option<Entity>,
+    selected_render_node: &'a mut Option<i8>,
     assets: &'a mut AssetEditorState,
 }
 
@@ -547,6 +561,7 @@ impl TabViewer for EditorTabViewer<'_> {
             EditorTab::Console => draw_console(ui),
             EditorTab::Assets => draw_asset_browser(ui, self.state, self.assets),
             EditorTab::Textures => draw_texture_explorer(ui, self.state, self.assets),
+            EditorTab::RenderGraph => draw_render_graph(ui, self.state, self.selected_render_node),
             EditorTab::Profiler => draw_profiler(ui, self.state),
             EditorTab::Timeline => draw_timeline(ui),
             EditorTab::Physics => draw_physics(ui),
@@ -911,6 +926,250 @@ fn draw_texture_explorer(ui: &mut Ui, state: &mut engine::State, assets: &mut As
     });
 }
 
+struct RenderNodeSummary {
+    index: i8,
+    name: &'static str,
+    enabled: bool,
+    input_textures: Vec<&'static str>,
+    output_textures: Vec<String>,
+    color_attachments: Vec<&'static str>,
+    depth_attachment: Option<&'static str>,
+}
+
+fn draw_render_graph(
+    ui: &mut Ui,
+    state: &mut engine::State,
+    selected_render_node: &mut Option<i8>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Render Graph").strong());
+        ui.separator();
+        let graph = &state.global_resources.renderer.render_graph;
+        ui.label(format!("{} nodes", graph.nodes.len()));
+        if !graph.compiled {
+            ui.colored_label(Color32::from_rgb(230, 180, 90), "not compiled");
+        }
+    });
+    ui.separator();
+
+    let summaries = render_node_summaries(state);
+    if summaries.is_empty() {
+        ui.label("No render nodes.");
+        return;
+    }
+
+    if selected_render_node
+        .is_none_or(|selected| !summaries.iter().any(|summary| summary.index == selected))
+    {
+        *selected_render_node = summaries.first().map(|summary| summary.index);
+    }
+
+    ui.columns(2, |columns| {
+        columns[0].vertical(|ui| {
+            ui.label(RichText::new("Nodes").strong());
+            ui.separator();
+            for summary in &summaries {
+                ui.horizontal(|ui| {
+                    let can_disable = summary.index != crate::EGUI_NODE_INDEX;
+                    let mut enabled = summary.enabled;
+                    let checkbox =
+                        ui.add_enabled(can_disable, egui::Checkbox::new(&mut enabled, ""));
+                    if checkbox.changed() {
+                        state
+                            .global_resources
+                            .renderer
+                            .render_graph
+                            .set_node_enabled(summary.index, enabled);
+                    }
+                    checkbox.on_disabled_hover_text("The editor UI node must stay enabled.");
+
+                    let selected = *selected_render_node == Some(summary.index);
+                    let label = format!("#{} {}", summary.index, summary.name);
+                    if ui.selectable_label(selected, label).clicked() {
+                        *selected_render_node = Some(summary.index);
+                    }
+                });
+            }
+        });
+
+        columns[1].vertical(|ui| {
+            if let Some(index) = *selected_render_node {
+                draw_render_node_inspector(ui, state, index, &summaries);
+            }
+        });
+    });
+}
+
+fn render_node_summaries(state: &engine::State) -> Vec<RenderNodeSummary> {
+    let graph = &state.global_resources.renderer.render_graph;
+    graph
+        .nodes
+        .iter()
+        .map(|(index, node)| {
+            let descriptor = node.describe_pass();
+            RenderNodeSummary {
+                index: *index,
+                name: descriptor.name,
+                enabled: graph.is_node_enabled(*index),
+                input_textures: descriptor.input_textures,
+                output_textures: descriptor
+                    .output_textures
+                    .into_iter()
+                    .map(output_texture_label)
+                    .collect(),
+                color_attachments: descriptor
+                    .color_attachments
+                    .iter()
+                    .map(|attachment| attachment.name)
+                    .collect(),
+                depth_attachment: descriptor
+                    .depth_attachment
+                    .map(|attachment| attachment.name),
+            }
+        })
+        .collect()
+}
+
+fn draw_render_node_inspector(
+    ui: &mut Ui,
+    state: &mut engine::State,
+    index: i8,
+    summaries: &[RenderNodeSummary],
+) {
+    let Some(summary) = summaries.iter().find(|summary| summary.index == index) else {
+        ui.label("Select a render node.");
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(summary.name).strong());
+        ui.label(format!("node {}", summary.index));
+    });
+    ui.separator();
+
+    inspector_grid(ui, format!("render_node_core_{index}"), |ui| {
+        readonly_row(
+            ui,
+            "Enabled",
+            if summary.enabled { "true" } else { "false" },
+        );
+        readonly_row(
+            ui,
+            "Inputs",
+            &comma_list(summary.input_textures.iter().copied()),
+        );
+        readonly_row(
+            ui,
+            "Outputs",
+            &comma_list(summary.output_textures.iter().map(String::as_str)),
+        );
+        readonly_row(
+            ui,
+            "Color",
+            &comma_list(summary.color_attachments.iter().copied()),
+        );
+        readonly_row(ui, "Depth", summary.depth_attachment.unwrap_or("none"));
+    });
+
+    ui.separator();
+    let graph = &mut state.global_resources.renderer.render_graph;
+    let Some((_, node)) = graph
+        .nodes
+        .iter_mut()
+        .find(|(node_index, _)| *node_index == index)
+    else {
+        return;
+    };
+
+    component_header(ui, "Editable Fields");
+    let inspected = inspector_grid(ui, format!("render_node_inspector_{index}"), |ui| {
+        let mut visitor = EguiInspectorVisitor { ui };
+        node.inspect(&mut visitor)
+    })
+    .inner;
+
+    if !inspected {
+        ui.label("This node does not expose editable uniforms yet.");
+    }
+}
+
+struct EguiInspectorVisitor<'a> {
+    ui: &'a mut Ui,
+}
+
+impl engine::renderer::InspectorVisitor for EguiInspectorVisitor<'_> {
+    fn field_f32(&mut self, name: &'static str, value: &mut f32) {
+        field_label(self.ui, &inspector_field_name(name));
+        drag_value(self.ui, value, 0.01, "");
+        self.ui.end_row();
+    }
+
+    fn field_i32(&mut self, name: &'static str, value: &mut i32) {
+        field_label(self.ui, &inspector_field_name(name));
+        self.ui
+            .add_sized([72.0, 20.0], egui::DragValue::new(value).speed(1.0));
+        self.ui.end_row();
+    }
+
+    fn field_u32(&mut self, name: &'static str, value: &mut u32) {
+        field_label(self.ui, &inspector_field_name(name));
+        self.ui
+            .add_sized([72.0, 20.0], egui::DragValue::new(value).speed(1.0));
+        self.ui.end_row();
+    }
+
+    fn field_bool(&mut self, name: &'static str, value: &mut bool) {
+        field_label(self.ui, &inspector_field_name(name));
+        self.ui.checkbox(value, "");
+        self.ui.end_row();
+    }
+
+    fn field_f32_array(&mut self, name: &'static str, value: &mut [f32]) {
+        field_label(self.ui, &inspector_field_name(name));
+        self.ui.horizontal(|ui| {
+            for item in value {
+                drag_value(ui, item, 0.01, "");
+            }
+        });
+        self.ui.end_row();
+    }
+}
+
+fn inspector_field_name(name: &str) -> String {
+    let mut result = String::new();
+    for (index, part) in name.split('_').filter(|part| !part.is_empty()).enumerate() {
+        if index > 0 {
+            result.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            result.push(first.to_ascii_uppercase());
+            result.extend(chars);
+        }
+    }
+    if result.is_empty() {
+        name.to_string()
+    } else {
+        result
+    }
+}
+
+fn output_texture_label(output: engine::renderer::OutputTexture) -> String {
+    match output {
+        engine::renderer::OutputTexture::Create(slot) => format!("create {}", slot.name),
+        engine::renderer::OutputTexture::WriteTo(name) => format!("write {name}"),
+    }
+}
+
+fn comma_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
+    let text = items.into_iter().collect::<Vec<_>>().join(", ");
+    if text.is_empty() {
+        "none".to_string()
+    } else {
+        text
+    }
+}
+
 fn draw_profiler(ui: &mut Ui, state: &engine::State) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Profiler").strong());
@@ -946,12 +1205,16 @@ fn component_header(ui: &mut Ui, title: &str) {
     );
 }
 
-fn inspector_grid(ui: &mut Ui, id: impl std::hash::Hash, add_rows: impl FnOnce(&mut Ui)) {
+fn inspector_grid<R>(
+    ui: &mut Ui,
+    id: impl std::hash::Hash,
+    add_rows: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
     egui::Grid::new(id)
         .num_columns(2)
         .spacing(egui::vec2(12.0, 6.0))
         .striped(false)
-        .show(ui, add_rows);
+        .show(ui, add_rows)
 }
 
 fn field_label(ui: &mut Ui, label: &str) {

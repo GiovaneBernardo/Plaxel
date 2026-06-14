@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "engine",
+    "engine_inspector_derive",
     "engine_dylib",
     "editor/runner",
     "editor/logic",

@@ -8,6 +8,7 @@ pub struct AtmospherePassNode {
     uniform_buffer: Option<BufferHandle>,
     bind_group_layout: Option<BindGroupLayoutHandle>,
     bind_group: Option<BindGroupHandle>,
+    pub settings: AtmosphereSettings,
 }
 
 impl AtmospherePassNode {
@@ -22,6 +23,7 @@ impl AtmospherePassNode {
             uniform_buffer: None,
             bind_group_layout: None,
             bind_group: None,
+            settings: AtmosphereSettings::default(),
         }
     }
 
@@ -80,6 +82,11 @@ impl RenderNode for AtmospherePassNode {
 
     fn needs_depth(&self) -> bool {
         false
+    }
+
+    fn inspect(&mut self, visitor: &mut dyn InspectorVisitor) -> bool {
+        self.settings.inspect(visitor);
+        true
     }
 
     fn describe_pass(&self) -> RenderNodeDescriptor {
@@ -150,9 +157,9 @@ impl RenderNode for AtmospherePassNode {
         };
         let surface_size = api.get_surface_size();
 
-        let terrain_radius = 65536.0 / 8.0;
-        let planet_radius = terrain_radius * 1.05;
-        let atmosphere_radius = planet_radius + 2000.0;
+        let planet_radius = self.settings.planet_radius.max(1.0);
+        let atmosphere_radius =
+            (planet_radius + self.settings.atmosphere_height).max(planet_radius + 1.0);
 
         let uniform = AtmosphereUniform {
             camera_position: [
@@ -161,8 +168,18 @@ impl RenderNode for AtmospherePassNode {
                 camera_data.uniform.position[2],
                 0.0,
             ],
-            sun_direction: [0.3, 0.6, 0.4, 0.0],
-            planet_center: [0.0, 0.0, 0.0, 0.0],
+            sun_direction: [
+                self.settings.sun_direction[0],
+                self.settings.sun_direction[1],
+                self.settings.sun_direction[2],
+                0.0,
+            ],
+            planet_center: [
+                self.settings.planet_center[0],
+                self.settings.planet_center[1],
+                self.settings.planet_center[2],
+                0.0,
+            ],
             params: [planet_radius, atmosphere_radius, 0.0, 0.0],
             screen_size: [surface_size.x as f32, surface_size.y as f32],
             _padding: [0.0, 0.0],
@@ -197,6 +214,26 @@ impl RenderNode for AtmospherePassNode {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Inspector)]
+pub struct AtmosphereSettings {
+    pub sun_direction: [f32; 3],
+    pub planet_center: [f32; 3],
+    pub planet_radius: f32,
+    pub atmosphere_height: f32,
+}
+
+impl Default for AtmosphereSettings {
+    fn default() -> Self {
+        let terrain_radius = 65536.0 / 8.0;
+        Self {
+            sun_direction: [0.3, 0.6, 0.4],
+            planet_center: [0.0, 0.0, 0.0],
+            planet_radius: terrain_radius * 1.05,
+            atmosphere_height: 2000.0,
+        }
     }
 }
 
