@@ -16,6 +16,7 @@ resolver = "2"
 wgpu = "27.0.1"
 winit = { version = "0.30", features = ["android-native-activity"] }
 egui = "0.33.3"
+egui_dock = { version = "0.18.0", features = ["serde"] }
 egui-wgpu = "0.33.3"
 eframe = "0.33"
 rfd = "0.15"

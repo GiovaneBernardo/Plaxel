@@ -7,7 +7,7 @@ use engine::renderer::backends::RendererAPI;
 use engine::renderer::wgpu_backend::WgpuBackend;
 use engine::renderer::{OutputTexture, RenderNode, RenderNodeDescriptor, RenderResources};
 
-use crate::hierarchy::hierarchy_draw;
+use crate::editor_ui::EditorUi;
 use crate::viewport_context_menu::viewport_context_menu;
 
 pub struct EguiRenderNode {
@@ -17,6 +17,7 @@ pub struct EguiRenderNode {
     clipped_primitives: Vec<egui::ClippedPrimitive>,
     textures_delta: egui::TexturesDelta,
     screen_descriptor: egui_wgpu::ScreenDescriptor,
+    editor_ui: EditorUi,
     viewport_menu_open: bool,
     viewport_menu_pos: egui::Pos2,
 }
@@ -33,6 +34,7 @@ impl EguiRenderNode {
                 size_in_pixels: [1, 1],
                 pixels_per_point: 1.0,
             },
+            editor_ui: EditorUi::new(),
             viewport_menu_open: false,
             viewport_menu_pos: egui::Pos2::ZERO,
         }
@@ -75,14 +77,7 @@ impl EguiRenderNode {
                     .unwrap_or_default();
             }
 
-            egui::Window::new("Editor")
-                .resizable([true, true])
-                .show(ctx, |ui| {
-                    ui.label("Hello from egui!");
-                    if ui.button("Click me").clicked() {}
-                });
-
-            hierarchy_draw(state, ctx);
+            self.editor_ui.show(ctx, state);
 
             if self.viewport_menu_open {
                 let response = viewport_context_menu(
