@@ -5,7 +5,10 @@ use engine::renderer::backends::NodeCompileContext;
 use engine::renderer::backends::RenderContext;
 use engine::renderer::backends::RendererAPI;
 use engine::renderer::wgpu_backend::WgpuBackend;
-use engine::renderer::{OutputTexture, RenderNode, RenderNodeDescriptor, RenderResources};
+use engine::renderer::{
+    AttachmentLoadOp, ColorAttachmentDescriptor, OutputTexture, RenderNode, RenderNodeDescriptor,
+    RenderResources,
+};
 
 use crate::editor_ui::EditorUi;
 use crate::viewport_context_menu::viewport_context_menu;
@@ -121,6 +124,12 @@ impl RenderNode for EguiRenderNode {
     fn describe_pass(&self) -> RenderNodeDescriptor {
         RenderNodeDescriptor {
             name: "egui",
+            color_attachments: vec![ColorAttachmentDescriptor {
+                name: "swapchain_image",
+                load_op: AttachmentLoadOp::Load,
+                store: true,
+            }],
+            depth_attachment: None,
             input_textures: Vec::new(),
             output_textures: vec![OutputTexture::WriteTo("swapchain_image")],
             input_buffers: Vec::new(),

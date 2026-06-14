@@ -1,4 +1,5 @@
 (
+    version: 2,
     dock_state: (
         surfaces: [
             Main((
@@ -14,7 +15,7 @@
                                 y: 1341.3438,
                             ),
                         ),
-                        fraction: 0.73600155,
+                        fraction: 0.62603337,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
@@ -26,43 +27,27 @@
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 998.6667,
+                                y: 856.0,
                             ),
                         ),
-                        fraction: 0.73177105,
+                        fraction: 0.67188144,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
-                    Leaf((
+                    Horizontal((
                         rect: (
                             min: (
                                 x: 0.0,
-                                y: 1000.0,
+                                y: 857.3333,
                             ),
                             max: (
                                 x: 2560.0,
                                 y: 1341.3438,
                             ),
                         ),
-                        viewport: (
-                            min: (
-                                x: 0.0,
-                                y: 1024.0,
-                            ),
-                            max: (
-                                x: 2560.0,
-                                y: 1341.3438,
-                            ),
-                        ),
-                        tabs: [
-                            Console,
-                            Profiler,
-                            Timeline,
-                            Physics,
-                        ],
-                        active: (3),
-                        scroll: 0.0,
-                        collapsed: false,
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
                     )),
                     Leaf((
                         rect: (
@@ -71,8 +56,8 @@
                                 y: 44.0,
                             ),
                             max: (
-                                x: 1872.6666,
-                                y: 998.6667,
+                                x: 1719.3334,
+                                y: 856.0,
                             ),
                         ),
                         viewport: (
@@ -81,8 +66,8 @@
                                 y: 68.0,
                             ),
                             max: (
-                                x: 1872.6563,
-                                y: 998.65625,
+                                x: 1719.3438,
+                                y: 856.0,
                             ),
                         ),
                         tabs: [
@@ -95,41 +80,99 @@
                     Horizontal((
                         rect: (
                             min: (
-                                x: 1874.0,
+                                x: 1720.6666,
                                 y: 44.0,
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 998.6667,
+                                y: 856.0,
                             ),
                         ),
                         fraction: 0.37607455,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
-                    Empty,
-                    Empty,
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 0.0,
+                                y: 857.3333,
+                            ),
+                            max: (
+                                x: 1279.3334,
+                                y: 1341.3438,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 0.0,
+                                y: 881.34375,
+                            ),
+                            max: (
+                                x: 1279.3438,
+                                y: 1341.3438,
+                            ),
+                        ),
+                        tabs: [
+                            Assets,
+                            Console,
+                            Profiler,
+                            Timeline,
+                            Physics,
+                        ],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 1280.6666,
+                                y: 857.3333,
+                            ),
+                            max: (
+                                x: 2560.0,
+                                y: 1341.3438,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 1280.6563,
+                                y: 881.34375,
+                            ),
+                            max: (
+                                x: 2560.0,
+                                y: 1341.3438,
+                            ),
+                        ),
+                        tabs: [
+                            Textures,
+                        ],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
                     Empty,
                     Empty,
                     Leaf((
                         rect: (
                             min: (
-                                x: 1874.0,
+                                x: 1720.6666,
                                 y: 44.0,
                             ),
                             max: (
-                                x: 2131.3333,
-                                y: 998.6667,
+                                x: 2036.0,
+                                y: 856.0,
                             ),
                         ),
                         viewport: (
                             min: (
-                                x: 1874.0,
+                                x: 1720.6563,
                                 y: 68.0,
                             ),
                             max: (
-                                x: 2131.3438,
-                                y: 998.65625,
+                                x: 2036.0,
+                                y: 856.0,
                             ),
                         ),
                         tabs: [
@@ -142,22 +185,22 @@
                     Leaf((
                         rect: (
                             min: (
-                                x: 2132.6667,
+                                x: 2036.6666,
                                 y: 44.0,
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 998.6667,
+                                y: 856.0,
                             ),
                         ),
                         viewport: (
                             min: (
-                                x: 2132.6563,
+                                x: 2036.6563,
                                 y: 68.0,
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 998.65625,
+                                y: 856.0,
                             ),
                         ),
                         tabs: [
@@ -171,8 +214,24 @@
                     Empty,
                     Empty,
                     Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
                 ],
-                focused_node: Some((3)),
+                focused_node: Some((6)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),
@@ -198,7 +257,7 @@
             ),
         ),
     ),
-    maximize_viewport: false,
+    maximize_viewport: true,
     floating_hierarchy: true,
     floating_inspector: true,
 )
