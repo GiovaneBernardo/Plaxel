@@ -60,8 +60,6 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
             query.for_each(|_entity, (transform,)| {
                 ui.add(egui::Label::new("Position"));
 
-                transform.position.y += 1.0;
-
                 ui.add(egui::widgets::DragValue::new(&mut transform.position.x));
                 ui.add(egui::widgets::DragValue::new(&mut transform.position.y));
                 ui.add(egui::widgets::DragValue::new(&mut transform.position.z));
