@@ -34,6 +34,7 @@ struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
     current_leaves: HashMap<NodeKey, ChunkInfo>,
     current_meshes: HashMap<NodeKey, RenderData>,
+    mesh_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     terrain_colliders: HashMap<NodeKey, RapierColliderHandle>,
     in_flight: HashSet<NodeKey>,
     // Keys whose worker finished but produced zero vertices. Remembered so
@@ -41,6 +42,7 @@ struct GameState {
     // Pruned by retain() when the key leaves the current octree, so a fresh
     // NodeKey (different position or size) always gets a clean attempt.
     empty_chunks: HashSet<NodeKey>,
+    empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     solid_material: Material,
     update_octree: bool,
     debug_nodes: Vec<(Point3<f32>, f32, u32)>,
@@ -67,12 +69,22 @@ struct ChunkInfo {
     size: f32,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord)]
 struct NodeKey {
     x: i32,
     y: i32,
     z: i32,
     size: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NeighborSignature(Vec<NodeKey>);
+
+#[derive(Clone, Copy, Debug)]
+struct ChunkNeighbor {
+    key: NodeKey,
+    center: Point3<f32>,
+    size: f32,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
@@ -86,6 +98,7 @@ struct ChunkState {
 
 struct ReadyChunk {
     key: NodeKey,
+    neighbor_signature: NeighborSignature,
     vertices: Vec<PlanetVertex>,
     indices: Vec<u32>,
 }
@@ -124,33 +137,311 @@ fn spawn_octree_worker(camera_pos: Point3<f32>, tx: mpsc::Sender<OctreeBuildResu
     });
 }
 
-fn spawn_chunk_worker(center: Point3<f32>, size: f32, key: NodeKey, tx: mpsc::Sender<ReadyChunk>) {
+fn spawn_chunk_worker(
+    center: Point3<f32>,
+    size: f32,
+    key: NodeKey,
+    neighbors: Vec<ChunkNeighbor>,
+    neighbor_signature: NeighborSignature,
+    tx: mpsc::Sender<ReadyChunk>,
+) {
     #[cfg(target_arch = "wasm32")]
     {
-        let chunk = build_chunk(center, size, key);
+        let chunk = build_chunk(center, size, key, neighbors, neighbor_signature);
         let _ = tx.send(chunk);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     rayon::spawn(move || {
-        let chunk = build_chunk(center, size, key);
+        let chunk = build_chunk(center, size, key, neighbors, neighbor_signature);
         let _ = tx.send(chunk);
     });
 }
 
-fn build_chunk(center: Point3<f32>, size: f32, key: NodeKey) -> ReadyChunk {
+fn build_chunk(
+    center: Point3<f32>,
+    size: f32,
+    key: NodeKey,
+    neighbors: Vec<ChunkNeighbor>,
+    neighbor_signature: NeighborSignature,
+) -> ReadyChunk {
     let resolution = size / CHUNK_SIZE as f32;
     let min_corner = Point3::new(
-        center.x - 16.0 * resolution,
-        center.y - 16.0 * resolution,
-        center.z - 16.0 * resolution,
+        center.x - size * 0.5,
+        center.y - size * 0.5,
+        center.z - size * 0.5,
     );
-    let grid = Planet::generate_grid(34, 34, 34, resolution, center);
+    let grid = generate_grid_from_min(34, 34, 34, resolution, min_corner.to_vec());
     let (vertices, indices) = Planet::dual_contour_grid(&grid, min_corner, resolution);
+    let (vertices, indices) = add_lod_boundary_skirts(vertices, indices, center, size, &neighbors);
     ReadyChunk {
         key,
+        neighbor_signature,
         vertices,
         indices,
+    }
+}
+
+fn chunk_neighbors(
+    leaves: &HashMap<NodeKey, ChunkInfo>,
+    key: NodeKey,
+    info: ChunkInfo,
+) -> Vec<ChunkNeighbor> {
+    let half = info.size * 0.5;
+    let min = vec3(
+        info.center.x - half,
+        info.center.y - half,
+        info.center.z - half,
+    );
+    let max = vec3(
+        info.center.x + half,
+        info.center.y + half,
+        info.center.z + half,
+    );
+    let mut neighbors = Vec::new();
+
+    for (other_key, other) in leaves {
+        if *other_key == key {
+            continue;
+        }
+
+        let other_half = other.size * 0.5;
+        let other_min = vec3(
+            other.center.x - other_half,
+            other.center.y - other_half,
+            other.center.z - other_half,
+        );
+        let other_max = vec3(
+            other.center.x + other_half,
+            other.center.y + other_half,
+            other.center.z + other_half,
+        );
+        let eps = info.size.min(other.size) * 0.001;
+
+        let touches_x =
+            nearly_equal(max.x, other_min.x, eps) || nearly_equal(min.x, other_max.x, eps);
+        let touches_y =
+            nearly_equal(max.y, other_min.y, eps) || nearly_equal(min.y, other_max.y, eps);
+        let touches_z =
+            nearly_equal(max.z, other_min.z, eps) || nearly_equal(min.z, other_max.z, eps);
+
+        let overlaps_x = ranges_overlap(min.x, max.x, other_min.x, other_max.x, eps);
+        let overlaps_y = ranges_overlap(min.y, max.y, other_min.y, other_max.y, eps);
+        let overlaps_z = ranges_overlap(min.z, max.z, other_min.z, other_max.z, eps);
+
+        if (touches_x && overlaps_y && overlaps_z)
+            || (touches_y && overlaps_x && overlaps_z)
+            || (touches_z && overlaps_x && overlaps_y)
+        {
+            neighbors.push(ChunkNeighbor {
+                key: *other_key,
+                center: other.center,
+                size: other.size,
+            });
+        }
+    }
+
+    neighbors.sort_by_key(|neighbor| neighbor.key);
+    neighbors
+}
+
+fn neighbor_signature(neighbors: &[ChunkNeighbor]) -> NeighborSignature {
+    NeighborSignature(neighbors.iter().map(|neighbor| neighbor.key).collect())
+}
+
+fn nearly_equal(a: f32, b: f32, eps: f32) -> bool {
+    (a - b).abs() <= eps
+}
+
+fn ranges_overlap(a_min: f32, a_max: f32, b_min: f32, b_max: f32, eps: f32) -> bool {
+    a_min < b_max - eps && b_min < a_max - eps
+}
+
+fn generate_grid_from_min(
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    resolution: f32,
+    min: Vector3<f32>,
+) -> Vec<Vec<Vec<f32>>> {
+    let mut grid = Vec::new();
+    for xi in 0..nx {
+        let mut plane = Vec::new();
+        for yi in 0..ny {
+            let mut row = Vec::new();
+            for zi in 0..nz {
+                let position = vec3(
+                    min.x + xi as f32 * resolution,
+                    min.y + yi as f32 * resolution,
+                    min.z + zi as f32 * resolution,
+                );
+                row.push(sdf(position));
+            }
+            plane.push(row);
+        }
+        grid.push(plane);
+    }
+    grid
+}
+
+fn add_lod_boundary_skirts(
+    mut vertices: Vec<PlanetVertex>,
+    mut indices: Vec<u32>,
+    center: Point3<f32>,
+    size: f32,
+    neighbors: &[ChunkNeighbor],
+) -> (Vec<PlanetVertex>, Vec<u32>) {
+    if vertices.is_empty() || indices.is_empty() {
+        return (vertices, indices);
+    }
+
+    let half = size * 0.5;
+    let local_min = vec3(center.x - half, center.y - half, center.z - half);
+    let local_max = vec3(center.x + half, center.y + half, center.z + half);
+    let local_resolution = size / CHUNK_SIZE as f32;
+
+    let mut lod_faces = Vec::new();
+    for neighbor in neighbors {
+        if (neighbor.size - size).abs() <= f32::EPSILON {
+            continue;
+        }
+
+        let neighbor_half = neighbor.size * 0.5;
+        let neighbor_min = vec3(
+            neighbor.center.x - neighbor_half,
+            neighbor.center.y - neighbor_half,
+            neighbor.center.z - neighbor_half,
+        );
+        let neighbor_max = vec3(
+            neighbor.center.x + neighbor_half,
+            neighbor.center.y + neighbor_half,
+            neighbor.center.z + neighbor_half,
+        );
+        let eps = local_resolution.min(neighbor.size / CHUNK_SIZE as f32) * 0.25;
+
+        for axis in 0..3 {
+            if nearly_equal(
+                axis_value(local_max, axis),
+                axis_value(neighbor_min, axis),
+                eps,
+            ) {
+                lod_faces.push((
+                    axis,
+                    axis_value(local_max, axis),
+                    neighbor_min,
+                    neighbor_max,
+                ));
+            } else if nearly_equal(
+                axis_value(local_min, axis),
+                axis_value(neighbor_max, axis),
+                eps,
+            ) {
+                lod_faces.push((
+                    axis,
+                    axis_value(local_min, axis),
+                    neighbor_min,
+                    neighbor_max,
+                ));
+            }
+        }
+    }
+
+    if lod_faces.is_empty() {
+        return (vertices, indices);
+    }
+
+    let original_indices = indices.clone();
+    let mut emitted_edges = HashSet::new();
+    for tri in original_indices.chunks_exact(3) {
+        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let edge_key = if a < b { (a, b) } else { (b, a) };
+            if !emitted_edges.insert(edge_key) {
+                continue;
+            }
+
+            let Some(pa) = vertices
+                .get(a as usize)
+                .map(|v| vec3(v.position[0], v.position[1], v.position[2]))
+            else {
+                continue;
+            };
+            let Some(pb) = vertices
+                .get(b as usize)
+                .map(|v| vec3(v.position[0], v.position[1], v.position[2]))
+            else {
+                continue;
+            };
+
+            let mut on_lod_face = false;
+            for (axis, boundary, neighbor_min, neighbor_max) in &lod_faces {
+                if !nearly_equal(axis_value(pa, *axis), *boundary, local_resolution * 0.75)
+                    || !nearly_equal(axis_value(pb, *axis), *boundary, local_resolution * 0.75)
+                {
+                    continue;
+                }
+
+                let u_axis = (*axis + 1) % 3;
+                let v_axis = (*axis + 2) % 3;
+                let a_in_overlap = axis_value(pa, u_axis)
+                    >= axis_value(*neighbor_min, u_axis) - local_resolution
+                    && axis_value(pa, u_axis)
+                        <= axis_value(*neighbor_max, u_axis) + local_resolution
+                    && axis_value(pa, v_axis)
+                        >= axis_value(*neighbor_min, v_axis) - local_resolution
+                    && axis_value(pa, v_axis)
+                        <= axis_value(*neighbor_max, v_axis) + local_resolution;
+                let b_in_overlap = axis_value(pb, u_axis)
+                    >= axis_value(*neighbor_min, u_axis) - local_resolution
+                    && axis_value(pb, u_axis)
+                        <= axis_value(*neighbor_max, u_axis) + local_resolution
+                    && axis_value(pb, v_axis)
+                        >= axis_value(*neighbor_min, v_axis) - local_resolution
+                    && axis_value(pb, v_axis)
+                        <= axis_value(*neighbor_max, v_axis) + local_resolution;
+
+                if a_in_overlap && b_in_overlap {
+                    on_lod_face = true;
+                    break;
+                }
+            }
+
+            if !on_lod_face {
+                continue;
+            }
+
+            let skirt_depth = local_resolution * 3.0;
+            let va = vertices[a as usize];
+            let vb = vertices[b as usize];
+            let skirt_a = extruded_skirt_vertex(va, skirt_depth);
+            let skirt_b = extruded_skirt_vertex(vb, skirt_depth);
+            let skirt_ai = vertices.len() as u32;
+            vertices.push(skirt_a);
+            let skirt_bi = vertices.len() as u32;
+            vertices.push(skirt_b);
+
+            indices.extend_from_slice(&[a, b, skirt_ai]);
+            indices.extend_from_slice(&[skirt_ai, b, skirt_bi]);
+            indices.extend_from_slice(&[a, skirt_ai, b]);
+            indices.extend_from_slice(&[skirt_ai, skirt_bi, b]);
+        }
+    }
+
+    (vertices, indices)
+}
+
+fn extruded_skirt_vertex(mut vertex: PlanetVertex, depth: f32) -> PlanetVertex {
+    vertex.position[0] -= vertex.normal[0] * depth;
+    vertex.position[1] -= vertex.normal[1] * depth;
+    vertex.position[2] -= vertex.normal[2] * depth;
+    vertex
+}
+
+fn axis_value(v: Vector3<f32>, axis: usize) -> f32 {
+    match axis {
+        0 => v.x,
+        1 => v.y,
+        2 => v.z,
+        _ => unreachable!(),
     }
 }
 
@@ -163,7 +454,7 @@ struct PlanetWorkerCoord {
 
 const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
-const PLANET_SIZE: usize = 65536 * 16;
+const PLANET_SIZE: usize = 65536; //* 16;
 const CHUNK_SIZE: usize = 32;
 
 #[allow(dead_code)]
@@ -279,9 +570,11 @@ pub fn register_systems(state: &mut engine::State) {
         previous_leaves: HashMap::new(),
         current_leaves: HashMap::new(),
         current_meshes: HashMap::new(),
+        mesh_neighbor_signatures: HashMap::new(),
         terrain_colliders: HashMap::new(),
         in_flight: HashSet::new(),
         empty_chunks: HashSet::new(),
+        empty_neighbor_signatures: HashMap::new(),
         solid_material,
         update_octree: true,
         debug_nodes: Vec::new(),
@@ -471,6 +764,9 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
     game_state
         .empty_chunks
         .retain(|key| current_leaves.contains_key(key));
+    game_state
+        .empty_neighbor_signatures
+        .retain(|key, _| current_leaves.contains_key(key));
 
     let stale_keys: Vec<NodeKey> = game_state
         .current_meshes
@@ -495,6 +791,8 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
 
         if all_covered {
             game_state.current_meshes.remove(&stale_key);
+            game_state.mesh_neighbor_signatures.remove(&stale_key);
+            game_state.empty_neighbor_signatures.remove(&stale_key);
             if let Some(handle) = game_state.terrain_colliders.remove(&stale_key) {
                 if let Some(mut physics) = world.get_resource_mut::<Physics>() {
                     physics.remove_collider(handle.0);
@@ -505,15 +803,38 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
 
     let mut scheduled = 0usize;
     for (key, info) in &current_leaves {
-        if game_state.current_meshes.contains_key(key)
-            || game_state.in_flight.contains(key)
-            || game_state.empty_chunks.contains(key)
-        {
+        let neighbors = chunk_neighbors(&current_leaves, *key, *info);
+        let neighbor_signature = neighbor_signature(&neighbors);
+        let mesh_is_current = game_state
+            .mesh_neighbor_signatures
+            .get(key)
+            .is_some_and(|signature| signature == &neighbor_signature);
+        let empty_is_current = game_state
+            .empty_neighbor_signatures
+            .get(key)
+            .is_some_and(|signature| signature == &neighbor_signature);
+
+        if game_state.current_meshes.contains_key(key) && mesh_is_current {
+            continue;
+        }
+        if game_state.empty_chunks.contains(key) && empty_is_current {
+            continue;
+        }
+        if game_state.in_flight.contains(key) {
             continue;
         }
 
+        game_state.empty_chunks.remove(key);
+        game_state.empty_neighbor_signatures.remove(key);
         game_state.in_flight.insert(*key);
-        spawn_chunk_worker(info.center, info.size, *key, tx.clone());
+        spawn_chunk_worker(
+            info.center,
+            info.size,
+            *key,
+            neighbors,
+            neighbor_signature,
+            tx.clone(),
+        );
         scheduled += 1;
     }
 
@@ -566,7 +887,12 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
         game_state.in_flight.remove(&chunk.key);
 
         if chunk.vertices.is_empty() {
+            game_state.current_meshes.remove(&chunk.key);
+            game_state.mesh_neighbor_signatures.remove(&chunk.key);
             game_state.empty_chunks.insert(chunk.key);
+            game_state
+                .empty_neighbor_signatures
+                .insert(chunk.key, chunk.neighbor_signature);
             continue;
         }
 
@@ -579,6 +905,11 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
             &PipelineHandle(0),
         );
         game_state.current_meshes.insert(chunk.key, render_data);
+        game_state
+            .mesh_neighbor_signatures
+            .insert(chunk.key, chunk.neighbor_signature);
+        game_state.empty_chunks.remove(&chunk.key);
+        game_state.empty_neighbor_signatures.remove(&chunk.key);
         //if let Some((vertices, indices)) = collider_mesh {
         //    if let Some(mut physics) = world.get_resource_mut::<Physics>() {
         //        if let Some(handle) = physics.add_trimesh_collider(vertices, indices, 0.0, 0.9) {
@@ -681,8 +1012,10 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
             game_state.previous_leaves.clear();
             game_state.current_leaves.clear();
             game_state.current_meshes.clear();
+            game_state.mesh_neighbor_signatures.clear();
             game_state.in_flight.clear();
             game_state.empty_chunks.clear();
+            game_state.empty_neighbor_signatures.clear();
             game_state.debug_nodes.clear();
             game_state.octree_job_in_flight = false;
         }
@@ -830,13 +1163,6 @@ trait PlanetExt {
         solid_material: &Material,
         line_material: &Material,
     );
-    fn generate_grid(
-        x: u32,
-        y: u32,
-        z: u32,
-        resolution: f32,
-        center: Point3<f32>,
-    ) -> Vec<Vec<Vec<f32>>>;
     fn dual_contour_grid(
         grid: &Vec<Vec<Vec<f32>>>,
         offset: Point3<f32>,
@@ -899,12 +1225,12 @@ impl PlanetExt for Planet {
         for (center, node_size, _node_depth) in &octree_nodes {
             let resolution = node_size / CHUNK_SIZE as f32;
             let min_corner = Point3::new(
-                center.x - 16.0 * resolution,
-                center.y - 16.0 * resolution,
-                center.z - 16.0 * resolution,
+                center.x - node_size * 0.5,
+                center.y - node_size * 0.5,
+                center.z - node_size * 0.5,
             );
             let (positions, indices) = Planet::dual_contour_grid(
-                &Planet::generate_grid(34, 34, 34, resolution, *center),
+                &generate_grid_from_min(34, 34, 34, resolution, min_corner.to_vec()),
                 min_corner,
                 resolution,
             );
@@ -953,36 +1279,6 @@ impl PlanetExt for Planet {
             }
         }
         println!("Added meshes: {}", meshes_count);
-    }
-
-    fn generate_grid(
-        nx: u32,
-        ny: u32,
-        nz: u32,
-        resolution: f32,
-        center: Point3<f32>,
-    ) -> Vec<Vec<Vec<f32>>> {
-        let half = (nx - 1) as f32 * resolution / 2.0;
-        let min = cgmath::Vector3::new(center.x - half, center.y - half, center.z - half);
-
-        let mut grid = Vec::new();
-        for xi in 0..nx {
-            let mut plane = Vec::new();
-            for yi in 0..ny {
-                let mut row = Vec::new();
-                for zi in 0..nz {
-                    let position = cgmath::Vector3::new(
-                        min.x + xi as f32 * resolution,
-                        min.y + yi as f32 * resolution,
-                        min.z + zi as f32 * resolution,
-                    );
-                    row.push(sdf(position));
-                }
-                plane.push(row);
-            }
-            grid.push(plane);
-        }
-        grid
     }
 
     fn dual_contour_grid(
