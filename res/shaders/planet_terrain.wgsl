@@ -129,5 +129,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let end = 15000.0;
     var fog_factor = clamp((distance - start) / (end - start), 0.0, 1.0);
 
-    return vec4<f32>(mix(albedo.rgb * lighting, vec3f(0.1, 0.2, 0.3), fog_factor), albedo.a);
+    return vec4<f32>(mix(albedo.rgb * lighting, vec3f(0.1, 0.2, 0.3), 0.0), albedo.a);
 }

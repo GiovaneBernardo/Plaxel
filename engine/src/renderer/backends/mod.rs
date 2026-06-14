@@ -90,6 +90,7 @@ pub trait RendererAPI {
     fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
 
     fn get_texture_size(&self, handle: &TextureHandle) -> Point2<u32>;
+    fn get_surface_size(&self) -> Point2<u32>;
 
     // Temporary
     fn set_texture(&mut self, texture: &texture::Texture);

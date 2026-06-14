@@ -509,7 +509,7 @@ pub fn register_systems(state: &mut engine::State) {
         .global_resources
         .renderer
         .render_resources
-        .insert(CameraData { uniform });
+        .insert(CameraData::from_camera(&camera, uniform));
 
     let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
@@ -910,9 +910,9 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
         return;
     };
 
-    renderer.render_resources.insert(CameraData {
-        uniform: camera.uniform,
-    });
+    renderer
+        .render_resources
+        .insert(CameraData::from_camera(&camera.camera, camera.uniform));
 }
 
 fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut World) {

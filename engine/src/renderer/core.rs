@@ -2,7 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use cgmath::Matrix4;
+use cgmath::{Matrix4, SquareMatrix};
 use uuid::Uuid;
 
 use crate::Arc;
@@ -819,6 +819,26 @@ impl Renderer {
 
 pub struct CameraData {
     pub uniform: camera::CameraUniform,
+    pub inverse_projection: [[f32; 4]; 4],
+    pub inverse_view: [[f32; 4]; 4],
+}
+
+impl CameraData {
+    pub fn from_camera(camera: &camera::Camera, uniform: camera::CameraUniform) -> Self {
+        let inverse_projection = (camera::OPENGL_TO_WGPU_MATRIX * camera.build_projection_matrix())
+            .invert()
+            .unwrap_or_else(Matrix4::identity);
+        let inverse_view = camera
+            .build_view_matrix()
+            .invert()
+            .unwrap_or_else(Matrix4::identity);
+
+        Self {
+            uniform,
+            inverse_projection: inverse_projection.into(),
+            inverse_view: inverse_view.into(),
+        }
+    }
 }
 pub struct GraphResources {
     textures: HashMap<&'static str, TextureHandle>,

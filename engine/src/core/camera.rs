@@ -13,6 +13,15 @@ pub struct Camera {
 }
 
 impl Camera {
+    pub fn build_view_matrix(&self) -> cgmath::Matrix4<f32> {
+        cgmath::Matrix4::from(self.orientation.invert())
+            * cgmath::Matrix4::from_translation(-self.position.to_vec())
+    }
+
+    pub fn build_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+        cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar)
+    }
+
     pub fn forward(&self) -> Vector3<f32> {
         self.orientation * Vector3::new(0.0, 0.0, -1.0)
     }
@@ -37,10 +46,7 @@ impl Camera {
     }
 
     pub fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        let view = cgmath::Matrix4::from(self.orientation.invert())
-            * cgmath::Matrix4::from_translation(-self.position.to_vec());
-        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-        OPENGL_TO_WGPU_MATRIX * proj * view
+        OPENGL_TO_WGPU_MATRIX * self.build_projection_matrix() * self.build_view_matrix()
     }
 }
 

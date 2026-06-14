@@ -19,14 +19,18 @@ pub struct GeometryPassNode {
 
 impl GeometryPassNode {
     pub fn pass_descriptor() -> RenderNodeDescriptor {
-        const MAIN_DEPTH_USAGE: TextureUsages =
-            TextureUsages::RENDER_ATTACHMENT.union(TextureUsages::COPY_SRC);
+        const MAIN_COLOR_USAGE: TextureUsages = TextureUsages::RENDER_ATTACHMENT
+            .union(TextureUsages::COPY_SRC)
+            .union(TextureUsages::TEXTURE_BINDING);
+        const MAIN_DEPTH_USAGE: TextureUsages = TextureUsages::RENDER_ATTACHMENT
+            .union(TextureUsages::COPY_SRC)
+            .union(TextureUsages::TEXTURE_BINDING);
 
         RenderNodeDescriptor {
             name: "geometry_pass",
             color_attachments: vec![ColorAttachmentDescriptor {
-                name: "swapchain_image",
-                load_op: AttachmentLoadOp::ClearColor([0.1, 0.2, 0.3, 1.0]),
+                name: "main_color",
+                load_op: AttachmentLoadOp::ClearColor([0.0, 0.0, 0.0, 1.0]),
                 store: true,
             }],
             depth_attachment: Some(DepthAttachmentDescriptor {
@@ -37,20 +41,18 @@ impl GeometryPassNode {
             }),
             input_textures: Vec::new(),
             output_textures: vec![
-                // Later when the renderer have post processes, uncomment the create path and rename all other nodes to use the main_color
-                //OutputTexture::Create(TextureSlot {
-                //    name: "main_color",
-                //    texture_descriptor: TextureDescriptor {
-                //        label: "main_color".to_string(),
-                //        size: TextureSize::FullRes,
-                //        format: TextureFormat::Bgra8UnormSrgb,
-                //        dimension: TextureDimension::D2,
-                //        usage: TextureUsages::RENDER_ATTACHMENT,
-                //        mip_levels: 1,
-                //        sample_count: 1,
-                //    },
-                //}),
-                OutputTexture::WriteTo("swapchain_image"),
+                OutputTexture::Create(TextureSlot {
+                    name: "main_color",
+                    texture_descriptor: TextureDescriptor {
+                        label: "main_color".to_string(),
+                        size: TextureSize::FullRes,
+                        format: TextureFormat::Bgra8UnormSrgb,
+                        dimension: TextureDimension::D2,
+                        usage: MAIN_COLOR_USAGE,
+                        mip_levels: 1,
+                        sample_count: 1,
+                    },
+                }),
                 OutputTexture::Create(TextureSlot {
                     name: "main_depth",
                     texture_descriptor: TextureDescriptor {
@@ -72,7 +74,7 @@ impl GeometryPassNode {
 
 impl RenderNode for GeometryPassNode {
     fn should_render_to_swapchain(&self) -> bool {
-        true
+        false
     }
 
     fn describe_pass(&self) -> RenderNodeDescriptor {

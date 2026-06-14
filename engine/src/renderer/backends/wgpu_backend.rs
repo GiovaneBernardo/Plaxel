@@ -1064,6 +1064,10 @@ impl RendererAPI for WgpuBackend {
         point2(texture.size().width, texture.size().height)
     }
 
+    fn get_surface_size(&self) -> Point2<u32> {
+        point2(self.surface_config.width, self.surface_config.height)
+    }
+
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
         self.load_mesh_with_data(mesh)
     }
