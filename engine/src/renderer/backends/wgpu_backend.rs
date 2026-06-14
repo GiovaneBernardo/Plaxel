@@ -1561,6 +1561,16 @@ impl WgpuBackend {
         required_limits.max_binding_array_elements_per_shader_stage = adapter_limits
             .max_binding_array_elements_per_shader_stage
             .min(512);
+        if !cfg!(target_arch = "wasm32") {
+            // Native-only escape hatch for very large procedural worlds. This
+            // may not be portable to browser WebGPU; the mesh pool should
+            // eventually free old chunk meshes and cap pages per target.
+            required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+            log::warn!(
+                "requesting native adapter max_buffer_size={} bytes; large mesh pools may not work on web",
+                required_limits.max_buffer_size
+            );
+        }
 
         unsafe {
             let (device, queue) = adapter
@@ -1568,11 +1578,7 @@ impl WgpuBackend {
                     label: None,
                     required_features: enabled_features,
                     experimental_features: wgpu::ExperimentalFeatures::enabled(),
-                    required_limits: if cfg!(target_arch = "wasm32") {
-                        required_limits
-                    } else {
-                        required_limits
-                    },
+                    required_limits,
                     memory_hints: Default::default(),
                     trace: wgpu::Trace::Off,
                 })

@@ -260,6 +260,88 @@ fn ranges_overlap(a_min: f32, a_max: f32, b_min: f32, b_max: f32, eps: f32) -> b
     a_min < b_max - eps && b_min < a_max - eps
 }
 
+#[derive(Clone, Copy)]
+struct ChunkBounds {
+    key: NodeKey,
+    info: ChunkInfo,
+    min: [i32; 3],
+    max: [i32; 3],
+}
+
+fn bounds_for(key: NodeKey, info: ChunkInfo) -> ChunkBounds {
+    let half = key.size / 2;
+    ChunkBounds {
+        key,
+        info,
+        min: [key.x - half, key.y - half, key.z - half],
+        max: [key.x + half, key.y + half, key.z + half],
+    }
+}
+
+fn overlap_1d(a_min: i32, a_max: i32, b_min: i32, b_max: i32) -> bool {
+    a_min < b_max && b_min < a_max
+}
+
+fn build_neighbor_map(
+    leaves: &HashMap<NodeKey, ChunkInfo>,
+) -> HashMap<NodeKey, Vec<ChunkNeighbor>> {
+    let bounds: Vec<_> = leaves
+        .iter()
+        .map(|(&key, &info)| bounds_for(key, info))
+        .collect();
+
+    let mut face_min: [HashMap<i32, Vec<usize>>; 3] = Default::default();
+    let mut face_max: [HashMap<i32, Vec<usize>>; 3] = Default::default();
+
+    for (i, b) in bounds.iter().enumerate() {
+        for axis in 0..3 {
+            face_min[axis].entry(b.min[axis]).or_default().push(i);
+            face_max[axis].entry(b.max[axis]).or_default().push(i);
+        }
+    }
+
+    let mut result: HashMap<NodeKey, Vec<ChunkNeighbor>> = HashMap::new();
+
+    for (i, a) in bounds.iter().enumerate() {
+        let mut neighbors = Vec::new();
+
+        for axis in 0..3 {
+            let candidates = face_min[axis]
+                .get(&a.max[axis])
+                .into_iter()
+                .chain(face_max[axis].get(&a.min[axis]).into_iter())
+                .flatten();
+
+            for &j in candidates {
+                if i == j {
+                    continue;
+                }
+
+                let b = bounds[j];
+
+                let u = (axis + 1) % 3;
+                let v = (axis + 2) % 3;
+
+                if overlap_1d(a.min[u], a.max[u], b.min[u], b.max[u])
+                    && overlap_1d(a.min[v], a.max[v], b.min[v], b.max[v])
+                {
+                    neighbors.push(ChunkNeighbor {
+                        key: b.key,
+                        center: b.info.center,
+                        size: b.info.size,
+                    });
+                }
+            }
+        }
+
+        neighbors.sort_by_key(|n| n.key);
+        neighbors.dedup_by_key(|n| n.key);
+        result.insert(a.key, neighbors);
+    }
+
+    result
+}
+
 fn generate_grid_from_min(
     nx: u32,
     ny: u32,
@@ -581,7 +663,7 @@ pub fn register_systems(state: &mut engine::State) {
     world.insert(
         camera_entity,
         TransformComponent {
-            position: cgmath::vec3(0.0, 0.0, 0.0),
+            position: cgmath::vec3(0.0, 8573.0, 0.0),
             rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
             scale: cgmath::vec3(1.0, 1.0, 1.0),
             velocity: cgmath::vec3(0.0, 0.0, 0.0),
@@ -856,8 +938,10 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
     }
 
     let mut scheduled = 0usize;
+    let neighbor_map = build_neighbor_map(&current_leaves);
+
     for (key, info) in &current_leaves {
-        let neighbors = chunk_neighbors(&current_leaves, *key, *info);
+        let neighbors = neighbor_map.get(key).cloned().unwrap_or_default();
         let neighbor_signature = neighbor_signature(&neighbors);
         let mesh_is_current = game_state
             .mesh_neighbor_signatures
@@ -983,7 +1067,7 @@ fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
     let Some(game_state) = world.get_resource::<GameState>() else {
         return;
     };
-    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(1) else {
+    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(2) else {
         return;
     };
 
@@ -1004,7 +1088,7 @@ fn sync_physics_debug(renderer: &mut engine::renderer::Renderer, world: &World) 
     let Some(physics) = world.get_resource::<Physics>() else {
         return;
     };
-    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(1) else {
+    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(2) else {
         return;
     };
 
@@ -1238,7 +1322,7 @@ impl PlanetExt for Planet {
             .global_resources
             .renderer
             .render_graph
-            .get_node_mut::<DebugPassNode>(1)
+            .get_node_mut::<DebugPassNode>(2)
             .unwrap();
 
         println!(
@@ -1268,7 +1352,7 @@ impl PlanetExt for Planet {
             .global_resources
             .renderer
             .render_graph
-            .get_node_mut::<DebugPassNode>(1)
+            .get_node_mut::<DebugPassNode>(2)
             .unwrap();
 
         let mut octree_nodes = Vec::new();
@@ -1444,7 +1528,12 @@ impl PlanetExt for Planet {
                     };
 
                     let avg_norm = normal_at(Vector3::new(avg_pos.x, avg_pos.y, avg_pos.z));
-                    let up = vec3(0.0, 1.0, 0.0);
+                    let avg_vec = avg_pos.to_vec();
+                    let up = if avg_vec.magnitude2() > 1e-6 {
+                        avg_vec.normalize()
+                    } else {
+                        vec3(0.0, 1.0, 0.0)
+                    };
                     let slope = avg_norm[0] * up.x + avg_norm[1] * up.y + avg_norm[2] * up.z;
 
                     let (mat_a, mat_b, blend) = if slope > 0.7 {
@@ -1665,21 +1754,16 @@ fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
 //}
 
 pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
-    let planet_r = PLANET_SIZE as f32 / 8.0;
+    let planet_r = planet_radius();
     let dist_from_center = p.magnitude();
-    let sphere = dist_from_center - planet_r;
     let dir = if dist_from_center > 1e-6 {
         p / dist_from_center
     } else {
         vec3(0.0, 1.0, 0.0)
     };
 
-    let noise_freq = 15.0;
-    let mountain_height = planet_r * 0.05;
-    let raw = fbm(dir * noise_freq, 6);
-    let ridged = 1.0 - (raw * 2.0 - 1.0).abs();
-    let mountain = ridged * mountain_height;
-    let terrain = sphere - mountain;
+    let height = spherical_terrain_height(dir, planet_r);
+    let terrain = dist_from_center - (planet_r + height);
     return terrain;
 
     // let depth_below_surface = -terrain;
@@ -1692,6 +1776,33 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
     // } else {
     //     terrain
     // }
+}
+
+fn planet_radius() -> f32 {
+    PLANET_SIZE as f32 / 8.0
+}
+
+fn spherical_terrain_height(dir: Vector3<f32>, planet_r: f32) -> f32 {
+    let warp = vec3(
+        fbm(dir * 3.0 + vec3(17.1, 3.7, 11.5), 4),
+        fbm(dir * 3.0 + vec3(5.3, 19.1, 2.8), 4),
+        fbm(dir * 3.0 + vec3(13.8, 7.4, 23.6), 4),
+    ) * 2.0
+        - vec3(1.0, 1.0, 1.0);
+    let warped_dir = (dir + warp * 0.18).normalize();
+
+    let continent = fbm(warped_dir * 2.2, 5);
+    let continent_height = (continent - 0.45) * planet_r * 0.018;
+    let mountain_mask = ((continent - 0.38) / 0.34).clamp(0.0, 1.0);
+    let mountain_mask = smoothstep(mountain_mask);
+
+    let mountain_raw = fbm(warped_dir * 18.0, 6);
+    let mountains = (1.0 - (mountain_raw * 2.0 - 1.0).abs()).powf(1.6);
+    let mountain_height = mountains * mountain_mask * planet_r * 0.032;
+
+    let detail = (fbm(warped_dir * 72.0, 3) - 0.5) * planet_r * 0.004;
+
+    continent_height + mountain_height + detail * mountain_mask
 }
 
 const THRESHOLD: f32 = 0.3;
@@ -1854,7 +1965,7 @@ fn rebuild_octree_debug(state: &mut engine::State, camera_pos: &cgmath::Point3<f
         .global_resources
         .renderer
         .render_graph
-        .get_node_mut::<DebugPassNode>(1)
+        .get_node_mut::<DebugPassNode>(2)
         .unwrap();
 
     debug_pass_node.clear_wire_cubes();

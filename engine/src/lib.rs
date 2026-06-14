@@ -1016,6 +1016,11 @@ impl ApplicationHandler<State> for App {
         #[allow(unused_mut)]
         let mut window_attributes = Window::default_attributes();
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            window_attributes = window_attributes.with_maximized(true);
+        }
+
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;
