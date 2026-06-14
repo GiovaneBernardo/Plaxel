@@ -47,13 +47,12 @@ struct GameState {
     empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     solid_material: Material,
     update_octree: bool,
+    terrain_physics_enabled: bool,
     debug_nodes: Vec<(Point3<f32>, f32, u32)>,
     debug_depth: u32,
     max_depth: u32,
     octree_job_in_flight: bool,
     last_requested_camera_pos: Point3<f32>,
-    octree_tx: mpsc::Sender<OctreeBuildResult>,
-    octree_rx: Mutex<mpsc::Receiver<OctreeBuildResult>>,
 }
 
 struct GameCamera {
@@ -70,6 +69,14 @@ struct GameCamera {
 struct ChunkInfo {
     center: Point3<f32>,
     size: f32,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord)]
+struct BrickCoord {
+    level: u8,
+    x: i32,
+    y: i32,
+    z: i32,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord)]
@@ -104,40 +111,6 @@ struct ReadyChunk {
     neighbor_signature: NeighborSignature,
     vertices: Vec<PlanetVertex>,
     indices: Vec<u32>,
-}
-
-struct OctreeBuildResult {
-    camera_pos: Point3<f32>,
-    max_depth: u32,
-    leaves: Vec<(Point3<f32>, f32, u32)>,
-}
-
-fn spawn_octree_worker(camera_pos: Point3<f32>, tx: mpsc::Sender<OctreeBuildResult>) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
-        let max_depth = octree_max_depth(&octree, 0);
-        let mut leaves = Vec::new();
-        Planet::collect_leaf_nodes(&octree, 0, &mut leaves);
-        let _ = tx.send(OctreeBuildResult {
-            camera_pos,
-            max_depth,
-            leaves,
-        });
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    rayon::spawn(move || {
-        let octree = Planet::create_octree(PLANET_SIZE as u32 / 2, &camera_pos);
-        let max_depth = octree_max_depth(&octree, 0);
-        let mut leaves = Vec::new();
-        Planet::collect_leaf_nodes(&octree, 0, &mut leaves);
-        let _ = tx.send(OctreeBuildResult {
-            camera_pos,
-            max_depth,
-            leaves,
-        });
-    });
 }
 
 fn spawn_chunk_worker(
@@ -185,79 +158,12 @@ fn build_chunk(
     }
 }
 
-fn chunk_neighbors(
-    leaves: &HashMap<NodeKey, ChunkInfo>,
-    key: NodeKey,
-    info: ChunkInfo,
-) -> Vec<ChunkNeighbor> {
-    let half = info.size * 0.5;
-    let min = vec3(
-        info.center.x - half,
-        info.center.y - half,
-        info.center.z - half,
-    );
-    let max = vec3(
-        info.center.x + half,
-        info.center.y + half,
-        info.center.z + half,
-    );
-    let mut neighbors = Vec::new();
-
-    for (other_key, other) in leaves {
-        if *other_key == key {
-            continue;
-        }
-
-        let other_half = other.size * 0.5;
-        let other_min = vec3(
-            other.center.x - other_half,
-            other.center.y - other_half,
-            other.center.z - other_half,
-        );
-        let other_max = vec3(
-            other.center.x + other_half,
-            other.center.y + other_half,
-            other.center.z + other_half,
-        );
-        let eps = info.size.min(other.size) * 0.001;
-
-        let touches_x =
-            nearly_equal(max.x, other_min.x, eps) || nearly_equal(min.x, other_max.x, eps);
-        let touches_y =
-            nearly_equal(max.y, other_min.y, eps) || nearly_equal(min.y, other_max.y, eps);
-        let touches_z =
-            nearly_equal(max.z, other_min.z, eps) || nearly_equal(min.z, other_max.z, eps);
-
-        let overlaps_x = ranges_overlap(min.x, max.x, other_min.x, other_max.x, eps);
-        let overlaps_y = ranges_overlap(min.y, max.y, other_min.y, other_max.y, eps);
-        let overlaps_z = ranges_overlap(min.z, max.z, other_min.z, other_max.z, eps);
-
-        if (touches_x && overlaps_y && overlaps_z)
-            || (touches_y && overlaps_x && overlaps_z)
-            || (touches_z && overlaps_x && overlaps_y)
-        {
-            neighbors.push(ChunkNeighbor {
-                key: *other_key,
-                center: other.center,
-                size: other.size,
-            });
-        }
-    }
-
-    neighbors.sort_by_key(|neighbor| neighbor.key);
-    neighbors
-}
-
 fn neighbor_signature(neighbors: &[ChunkNeighbor]) -> NeighborSignature {
     NeighborSignature(neighbors.iter().map(|neighbor| neighbor.key).collect())
 }
 
 fn nearly_equal(a: f32, b: f32, eps: f32) -> bool {
     (a - b).abs() <= eps
-}
-
-fn ranges_overlap(a_min: f32, a_max: f32, b_min: f32, b_max: f32, eps: f32) -> bool {
-    a_min < b_max - eps && b_min < a_max - eps
 }
 
 #[derive(Clone, Copy)]
@@ -340,6 +246,197 @@ fn build_neighbor_map(
     }
 
     result
+}
+
+fn brick_cell_size(level: u8) -> f32 {
+    2.0f32.powi(level as i32)
+}
+
+fn brick_world_size(level: u8) -> f32 {
+    CHUNK_SIZE as f32 * brick_cell_size(level)
+}
+
+fn brick_min(coord: BrickCoord) -> Vector3<f32> {
+    let size = brick_world_size(coord.level);
+    vec3(
+        coord.x as f32 * size,
+        coord.y as f32 * size,
+        coord.z as f32 * size,
+    )
+}
+
+fn brick_info(coord: BrickCoord) -> ChunkInfo {
+    let size = brick_world_size(coord.level);
+    let min = brick_min(coord);
+    ChunkInfo {
+        center: Point3::from_vec(min + vec3(size * 0.5, size * 0.5, size * 0.5)),
+        size,
+    }
+}
+
+fn brick_key(coord: BrickCoord) -> NodeKey {
+    let info = brick_info(coord);
+    NodeKey {
+        x: info.center.x.round() as i32,
+        y: info.center.y.round() as i32,
+        z: info.center.z.round() as i32,
+        size: info.size.round() as i32,
+    }
+}
+
+fn aabb_radius_range(min: Vector3<f32>, max: Vector3<f32>) -> (f32, f32) {
+    let closest_axis_distance = |min: f32, max: f32| {
+        if min > 0.0 {
+            min
+        } else if max < 0.0 {
+            max
+        } else {
+            0.0
+        }
+    };
+
+    let closest = vec3(
+        closest_axis_distance(min.x, max.x),
+        closest_axis_distance(min.y, max.y),
+        closest_axis_distance(min.z, max.z),
+    );
+    let farthest = vec3(
+        min.x.abs().max(max.x.abs()),
+        min.y.abs().max(max.y.abs()),
+        min.z.abs().max(max.z.abs()),
+    );
+
+    (closest.magnitude(), farthest.magnitude())
+}
+
+fn brick_may_contain_surface(coord: BrickCoord) -> bool {
+    let size = brick_world_size(coord.level);
+    let min = brick_min(coord);
+    let max = min + vec3(size, size, size);
+    let (min_radius, max_radius) = aabb_radius_range(min, max);
+    let surface_min_radius = planet_radius() + min_terrain_height();
+    let surface_max_radius = planet_radius() + max_terrain_height();
+
+    min_radius <= surface_max_radius && max_radius >= surface_min_radius
+}
+
+fn distance_to_brick(camera_pos: Point3<f32>, info: ChunkInfo) -> f32 {
+    let half = info.size * 0.5;
+    let min = vec3(
+        info.center.x - half,
+        info.center.y - half,
+        info.center.z - half,
+    );
+    let max = vec3(
+        info.center.x + half,
+        info.center.y + half,
+        info.center.z + half,
+    );
+    let p = camera_pos.to_vec();
+    let dx = if p.x < min.x {
+        min.x - p.x
+    } else if p.x > max.x {
+        p.x - max.x
+    } else {
+        0.0
+    };
+    let dy = if p.y < min.y {
+        min.y - p.y
+    } else if p.y > max.y {
+        p.y - max.y
+    } else {
+        0.0
+    };
+    let dz = if p.z < min.z {
+        min.z - p.z
+    } else if p.z > max.z {
+        p.z - max.z
+    } else {
+        0.0
+    };
+
+    vec3(dx, dy, dz).magnitude()
+}
+
+fn brick_level_for_distance(distance: f32) -> u8 {
+    for (level, radius) in BRICK_LOD_RADII.iter().enumerate() {
+        if distance <= *radius {
+            return level as u8;
+        }
+    }
+
+    (BRICK_LOD_RADII.len() - 1) as u8
+}
+
+fn should_refine_brick(coord: BrickCoord, camera_pos: Point3<f32>) -> bool {
+    if coord.level == 0 {
+        return false;
+    }
+
+    let info = brick_info(coord);
+    let distance = distance_to_brick(camera_pos, info);
+    let desired_level = brick_level_for_distance(distance);
+    coord.level > desired_level
+}
+
+fn collect_brick_hierarchy(
+    coord: BrickCoord,
+    camera_pos: Point3<f32>,
+    bricks: &mut HashMap<NodeKey, ChunkInfo>,
+) {
+    if !brick_may_contain_surface(coord) {
+        return;
+    }
+
+    if should_refine_brick(coord, camera_pos) {
+        let child_level = coord.level - 1;
+        for dx in 0..2 {
+            for dy in 0..2 {
+                for dz in 0..2 {
+                    collect_brick_hierarchy(
+                        BrickCoord {
+                            level: child_level,
+                            x: coord.x * 2 + dx,
+                            y: coord.y * 2 + dy,
+                            z: coord.z * 2 + dz,
+                        },
+                        camera_pos,
+                        bricks,
+                    );
+                }
+            }
+        }
+    } else {
+        bricks.insert(brick_key(coord), brick_info(coord));
+    }
+}
+
+fn collect_active_bricks(camera_pos: Point3<f32>) -> HashMap<NodeKey, ChunkInfo> {
+    let mut bricks = HashMap::new();
+
+    let root_size = brick_world_size(COARSE_PLANET_BRICK_LEVEL);
+    let surface_radius = planet_radius() + max_terrain_height();
+    let coord_min = (-(surface_radius / root_size).ceil() as i32) - 1;
+    let coord_max = ((surface_radius / root_size).ceil() as i32) + 1;
+
+    for x in coord_min..=coord_max {
+        for y in coord_min..=coord_max {
+            for z in coord_min..=coord_max {
+                collect_brick_hierarchy(
+                    BrickCoord {
+                        level: COARSE_PLANET_BRICK_LEVEL,
+                        x,
+                        y,
+                        z,
+                    },
+                    camera_pos,
+                    &mut bricks,
+                );
+            }
+        }
+    }
+
+    bricks
 }
 
 fn generate_grid_from_min(
@@ -541,6 +638,13 @@ const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
 const PLANET_SIZE: usize = 65536; //* 16;
 const CHUNK_SIZE: usize = 32;
+const BRICK_LOD_RADII: [f32; 7] = [160.0, 448.0, 1024.0, 2048.0, 4096.0, 8192.0, f32::MAX];
+const MAX_DEBUG_BRICKS: usize = 512;
+const BRICK_REBUILD_DISTANCE: f32 = 64.0;
+const MAX_CHUNK_WORKER_SPAWNS_PER_FRAME: usize = 12;
+const TERRAIN_PHYSICS_RADIUS: f32 = 384.0;
+const MAX_TERRAIN_PHYSICS_BRICK_SIZE: f32 = 64.0;
+const COARSE_PLANET_BRICK_LEVEL: u8 = 6;
 
 #[allow(dead_code)]
 static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -647,7 +751,6 @@ pub fn register_systems(state: &mut engine::State) {
         );
 
     let (chunk_tx, chunk_rx) = mpsc::channel();
-    let (octree_tx, octree_rx) = mpsc::channel();
     let scene = state.active_scene_mut().unwrap();
     let world = scene.world_mut();
 
@@ -700,13 +803,12 @@ pub fn register_systems(state: &mut engine::State) {
         empty_neighbor_signatures: HashMap::new(),
         solid_material,
         update_octree: true,
+        terrain_physics_enabled: false,
         debug_nodes: Vec::new(),
         debug_depth: 0,
         max_depth: 0,
         octree_job_in_flight: false,
         last_requested_camera_pos: initial_camera_pos,
-        octree_tx,
-        octree_rx: Mutex::new(octree_rx),
     });
 
     world.insert_resource(PlanetWorkerCoord {
@@ -817,14 +919,41 @@ fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Point3
     camera.velocity_sample_distance = 0.0;
 }
 
-fn should_request_octree_rebuild(game_state: &GameState, camera_pos: Point3<f32>) -> bool {
+fn should_rebuild_active_bricks(game_state: &GameState, camera_pos: Point3<f32>) -> bool {
     if game_state.current_leaves.is_empty() {
         return true;
     }
 
     let distance = (camera_pos - game_state.last_requested_camera_pos).magnitude();
-    let threshold = CHUNK_SIZE as f32 * 8.0;
-    distance >= threshold
+    distance >= BRICK_REBUILD_DISTANCE
+}
+
+struct ChunkJob {
+    key: NodeKey,
+    info: ChunkInfo,
+    neighbors: Vec<ChunkNeighbor>,
+    neighbor_signature: NeighborSignature,
+    priority: f32,
+}
+
+fn chunk_job_priority(
+    key: NodeKey,
+    info: ChunkInfo,
+    camera_pos: Point3<f32>,
+    terrain_physics_enabled: bool,
+) -> f32 {
+    let distance = distance_to_brick(camera_pos, info);
+    let level = brick_level_for_distance(distance);
+    let mut priority = distance + level as f32 * 256.0 + key.size as f32 * 0.25;
+
+    if terrain_physics_enabled
+        && info.size <= MAX_TERRAIN_PHYSICS_BRICK_SIZE
+        && distance <= TERRAIN_PHYSICS_RADIUS
+    {
+        priority -= 10_000.0;
+    }
+
+    priority
 }
 
 fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
@@ -851,42 +980,21 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
         return;
     }
 
-    let mut latest_octree = None;
-    {
-        let rx = game_state.octree_rx.lock().unwrap();
-        while let Ok(result) = rx.try_recv() {
-            latest_octree = Some(result);
-        }
-    }
-
-    if let Some(result) = latest_octree {
-        let mut current_leaves = HashMap::new();
-        for (center, node_size, _) in &result.leaves {
-            current_leaves.insert(
-                NodeKey {
-                    x: center.x as i32,
-                    y: center.y as i32,
-                    z: center.z as i32,
-                    size: *node_size as i32,
-                },
-                ChunkInfo {
-                    center: *center,
-                    size: *node_size,
-                },
-            );
-        }
-
-        game_state.octree_job_in_flight = false;
-        game_state.last_requested_camera_pos = result.camera_pos;
-        game_state.max_depth = result.max_depth;
-        game_state.debug_nodes = result.leaves;
-        game_state.current_leaves = current_leaves;
-    }
-
-    if !game_state.octree_job_in_flight && should_request_octree_rebuild(&game_state, camera_pos) {
-        game_state.octree_job_in_flight = true;
+    if should_rebuild_active_bricks(&game_state, camera_pos) {
+        let current_leaves = collect_active_bricks(camera_pos);
         game_state.last_requested_camera_pos = camera_pos;
-        spawn_octree_worker(camera_pos, game_state.octree_tx.clone());
+        game_state.max_depth = BRICK_LOD_RADII.len().saturating_sub(1) as u32;
+        game_state.debug_nodes = current_leaves
+            .values()
+            .map(|info| {
+                (
+                    info.center,
+                    info.size,
+                    brick_level_for_distance(distance_to_brick(camera_pos, *info)) as u32,
+                )
+            })
+            .collect();
+        game_state.current_leaves = current_leaves;
     }
 
     let current_leaves = game_state.current_leaves.clone();
@@ -939,6 +1047,7 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
 
     let mut scheduled = 0usize;
     let neighbor_map = build_neighbor_map(&current_leaves);
+    let mut jobs = Vec::new();
 
     for (key, info) in &current_leaves {
         let neighbors = neighbor_map.get(key).cloned().unwrap_or_default();
@@ -964,13 +1073,30 @@ fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::comma
 
         game_state.empty_chunks.remove(key);
         game_state.empty_neighbor_signatures.remove(key);
-        game_state.in_flight.insert(*key);
-        spawn_chunk_worker(
-            info.center,
-            info.size,
-            *key,
+        jobs.push(ChunkJob {
+            key: *key,
+            info: *info,
+            priority: chunk_job_priority(
+                *key,
+                *info,
+                camera_pos,
+                game_state.terrain_physics_enabled,
+            ),
             neighbors,
             neighbor_signature,
+        });
+    }
+
+    jobs.sort_by(|a, b| a.priority.total_cmp(&b.priority));
+
+    for job in jobs.into_iter().take(MAX_CHUNK_WORKER_SPAWNS_PER_FRAME) {
+        game_state.in_flight.insert(job.key);
+        spawn_chunk_worker(
+            job.info.center,
+            job.info.size,
+            job.key,
+            job.neighbors,
+            job.neighbor_signature,
             tx.clone(),
         );
         scheduled += 1;
@@ -1001,6 +1127,9 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
 
 fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut World) {
     let start = Instant::now();
+    let camera_pos = world
+        .get_resource::<GameCamera>()
+        .map(|camera| camera.camera.position);
     let Some(mut game_state) = world.get_resource_mut::<GameState>() else {
         return;
     };
@@ -1042,12 +1171,28 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
             game_state.solid_material.clone(),
             &PipelineHandle(0),
         );
-        game_state.current_meshes.insert(chunk.key, render_data);
-        game_state
-            .mesh_neighbor_signatures
-            .insert(chunk.key, chunk.neighbor_signature);
-        game_state.empty_chunks.remove(&chunk.key);
-        game_state.empty_neighbor_signatures.remove(&chunk.key);
+        let collider_mesh = if game_state.terrain_physics_enabled {
+            camera_pos.and_then(|camera_pos| {
+                game_state.current_leaves.get(&chunk.key).and_then(|info| {
+                    let distance = distance_to_brick(camera_pos, *info);
+                    if info.size <= MAX_TERRAIN_PHYSICS_BRICK_SIZE
+                        && distance <= TERRAIN_PHYSICS_RADIUS
+                    {
+                        cook_terrain_collider_mesh(&chunk.vertices, &chunk.indices)
+                    } else {
+                        None
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        //if let Some(handle) = game_state.terrain_colliders.remove(&chunk.key) {
+        //    if let Some(mut physics) = world.get_resource_mut::<Physics>() {
+        //        physics.remove_collider(handle.0);
+        //    }
+        //}
         //if let Some((vertices, indices)) = collider_mesh {
         //    if let Some(mut physics) = world.get_resource_mut::<Physics>() {
         //        if let Some(handle) = physics.add_trimesh_collider(vertices, indices, 0.0, 0.9) {
@@ -1057,6 +1202,13 @@ fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut Wo
         //        }
         //    }
         //}
+
+        game_state.current_meshes.insert(chunk.key, render_data);
+        game_state
+            .mesh_neighbor_signatures
+            .insert(chunk.key, chunk.neighbor_signature);
+        game_state.empty_chunks.remove(&chunk.key);
+        game_state.empty_neighbor_signatures.remove(&chunk.key);
         uploaded += 1;
     }
 
@@ -1074,7 +1226,7 @@ fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
     debug_pass_node.clear_wire_cubes();
     debug_pass_node.clear_cubes();
 
-    for (center, size, depth) in &game_state.debug_nodes {
+    for (center, size, depth) in game_state.debug_nodes.iter().take(MAX_DEBUG_BRICKS) {
         debug_pass_node.add_wire_cube(*center, *size, depth_color(*depth));
         debug_pass_node.add_cube(
             *center + vec3(0.0, size / 2.0, 0.0),
@@ -1140,6 +1292,17 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
     if let Some(mut game_state) = world.get_resource_mut::<GameState>() {
         if pressed && key_code == KeyCode::KeyK {
             game_state.update_octree = !game_state.update_octree;
+        }
+
+        if pressed && key_code == KeyCode::KeyP {
+            game_state.terrain_physics_enabled = !game_state.terrain_physics_enabled;
+            if !game_state.terrain_physics_enabled {
+                if let Some(mut physics) = world.get_resource_mut::<Physics>() {
+                    for (_, handle) in game_state.terrain_colliders.drain() {
+                        physics.remove_collider(handle.0);
+                    }
+                }
+            }
         }
 
         if pressed && key_code == KeyCode::KeyL {
@@ -1780,6 +1943,14 @@ pub fn sdf(p: cgmath::Vector3<f32>) -> f32 {
 
 fn planet_radius() -> f32 {
     PLANET_SIZE as f32 / 8.0
+}
+
+fn min_terrain_height() -> f32 {
+    -planet_radius() * 0.011
+}
+
+fn max_terrain_height() -> f32 {
+    planet_radius() * 0.045
 }
 
 fn spherical_terrain_height(dir: Vector3<f32>, planet_r: f32) -> f32 {
