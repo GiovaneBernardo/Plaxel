@@ -227,6 +227,45 @@ impl State {
         //self.camera_controller.handle_mouse_scroll(delta);
     }
 
+    fn extract_positions(mesh: &MeshAsset) -> Result<Vec<Point3<f32>>, String> {
+        let stride = mesh.vertex_layout.stride as usize;
+
+        //if stride != std::mem::size_of::<[f32; 3]>() {
+        //    return Err(format!("expected stride 12, got {}", stride));
+        //}
+
+        let attr = mesh
+            .vertex_layout
+            .attributes
+            .iter()
+            .find(|attr| attr.shader_location == 0)
+            .ok_or("missing position attribute at shader_location 0")?;
+
+        if attr.offset != 0 {
+            return Err(format!("expected position offset 0, got {}", attr.offset));
+        }
+
+        if mesh.vertices.len() % stride != 0 {
+            return Err(format!(
+                "vertex byte buffer length {} is not divisible by stride {}",
+                mesh.vertices.len(),
+                stride
+            ));
+        }
+
+        let mut positions = Vec::with_capacity(mesh.vertices.len() / stride);
+
+        for vertex in mesh.vertices.chunks_exact(stride) {
+            let x = f32::from_le_bytes(vertex[0..4].try_into().unwrap());
+            let y = f32::from_le_bytes(vertex[4..8].try_into().unwrap());
+            let z = f32::from_le_bytes(vertex[8..12].try_into().unwrap());
+
+            positions.push(Point3::new(x, y, z));
+        }
+
+        Ok(positions)
+    }
+
     fn handle_dropped_file(&mut self, path: &Path) {
         if path
             .extension()
@@ -372,7 +411,7 @@ impl State {
                     TransformComponent {
                         position: Vector3::new(0.0, 0.0, 0.0),
                         rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                        scale: Vector3::new(1.0, 1.0, 1.0),
+                        scale: Vector3::new(0.01, 0.01, 0.01),
                         velocity: Vector3 {
                             x: 0.0,
                             y: 0.0,
@@ -386,6 +425,23 @@ impl State {
                     MeshRendererComponent {
                         mesh: handle,
                         material: material_uuid,
+                    },
+                );
+
+                let vertices = State::extract_positions(&mesh).unwrap();
+
+                let indices: Vec<[u32; 3]> = mesh
+                    .indices
+                    .chunks_exact(3)
+                    .map(|tri| [tri[0], tri[1], tri[2]])
+                    .collect();
+
+                world.insert(
+                    entity,
+                    ColliderComponent {
+                        shape: ColliderShape::Trimesh { vertices, indices },
+                        friction: 0.5,
+                        restitution: 0.5,
                     },
                 );
             }

@@ -167,7 +167,13 @@ impl Physics {
                 components::physics::ColliderShape::Trimesh { vertices, indices } => {
                     let vertices = vertices
                         .into_iter()
-                        .map(|p| point![p.x, p.y, p.z])
+                        .map(|p| {
+                            point![
+                                p.x * transform.scale.x,
+                                p.y * transform.scale.y,
+                                p.z * transform.scale.z
+                            ]
+                        })
                         .collect();
                     let Ok(builder) = ColliderBuilder::trimesh(vertices, indices) else {
                         return;
