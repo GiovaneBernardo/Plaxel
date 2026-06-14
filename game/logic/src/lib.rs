@@ -1,11 +1,13 @@
+use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::input::KeyCode;
+use engine::ecs::entity::Entity;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
 #[cfg(feature = "dynamic_linking")]
 #[allow(unused_imports)]
 use engine_dylib;
 
-use cgmath::{self, EuclideanSpace, Vector3, vec3};
+use cgmath::{self, EuclideanSpace, Quaternion, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
 use engine::assets::material::Material;
 use engine::core::components::physics::RapierColliderHandle;
@@ -55,6 +57,7 @@ struct GameState {
 }
 
 struct GameCamera {
+    entity: Entity,
     camera: engine::camera::Camera,
     controller: engine::camera::CameraController,
     uniform: engine::camera::CameraUniform,
@@ -557,7 +560,29 @@ pub fn register_systems(state: &mut engine::State) {
 
     let velocity_sample_pos = camera.position;
     let velocity_sample_time = Instant::now();
+
+    let camera_entity = world.spawn();
+    world.insert(
+        camera_entity,
+        TransformComponent {
+            position: cgmath::vec3(0.0, 0.0, 0.0),
+            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            scale: cgmath::vec3(1.0, 1.0, 1.0),
+            velocity: cgmath::vec3(0.0, 0.0, 0.0),
+        },
+    );
+    world.insert(
+        camera_entity,
+        CameraComponent {
+            speed: 1.0,
+            fov: 75.0,
+            far_plane: 15000.0,
+            near_plane: 0.01,
+        },
+    );
+
     world.insert_resource(GameCamera {
+        entity: camera_entity,
         camera,
         controller: engine::camera::CameraController::new(0.2),
         uniform,
@@ -596,9 +621,9 @@ pub fn register_systems(state: &mut engine::State) {
     let update_schedule_mut = scene.update_schedule_mut();
 
     update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
+    update_schedule_mut.add_system(player_interaction_system);
     update_schedule_mut.add_system(camera_update_system);
     update_schedule_mut.add_system(planet_lod_system);
-    update_schedule_mut.add_system(player_interaction_system);
     update_schedule_mut.add_system(renderer::get_render_data_system);
     update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
 }
@@ -631,12 +656,24 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
         return;
     };
 
+    let camera_entity = camera.entity;
+    let camera_transform = world.get::<TransformComponent>(camera_entity).unwrap();
+    let camera_component = world.get::<CameraComponent>(camera_entity).unwrap();
+
     let previous_position = camera.camera.position;
     let mut controller = std::mem::replace(
         &mut camera.controller,
         engine::camera::CameraController::new(0.2),
     );
     controller.update_camera(&mut camera.camera);
+    camera.camera.position = cgmath::point3::<f32>(
+        camera_transform.position.x,
+        camera_transform.position.y,
+        camera_transform.position.z,
+    );
+    camera.camera.orientation = camera_transform.rotation;
+    camera.camera.fovy = camera_component.fov;
+
     camera.controller = controller;
     update_camera_velocity_log(&mut camera, previous_position);
     let camera_copy = engine::camera::Camera {
@@ -647,6 +684,7 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
         znear: camera.camera.znear,
         zfar: camera.camera.zfar,
     };
+
     camera.uniform.update_view_proj(&camera_copy);
 }
 
@@ -988,13 +1026,14 @@ pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: b
     let world = scene.world_mut();
 
     if let Some(mut camera) = world.get_resource_mut::<GameCamera>() {
+        let mut camera_transform = world.get_mut::<TransformComponent>(camera.entity).unwrap();
         camera.controller.handle_key(key_code, pressed);
 
         if pressed && key_code == KeyCode::PageUp {
-            camera.camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
+            camera_transform.position = cgmath::vec3(0.0, PLANET_SIZE as f32, 0.0);
         }
         if pressed && key_code == KeyCode::PageDown {
-            camera.camera.position = cgmath::point3(0.0, 0.0, 0.0);
+            camera_transform.position = cgmath::vec3(0.0, 0.0, 0.0);
         }
     }
 

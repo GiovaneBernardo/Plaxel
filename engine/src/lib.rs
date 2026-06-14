@@ -223,8 +223,22 @@ impl State {
         }
     }
 
-    fn handle_mouse_scroll(&mut self, _delta: MouseScrollDelta) {
-        //self.camera_controller.handle_mouse_scroll(delta);
+    fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
+        let scroll = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 100.0,
+        };
+
+        let world = self.active_scene_mut().unwrap().world_mut();
+        let mut input = world.get_resource_mut::<InputState>().unwrap();
+        input.scroll += scroll.clamp(-1.0, 1.0);
+    }
+
+    fn handle_mouse_motion(&mut self, dx: f64, dy: f64) {
+        let world = self.active_scene_mut().unwrap().world_mut();
+        let mut input = world.get_resource_mut::<InputState>().unwrap();
+        input.mouse_delta.0 += dx as f32;
+        input.mouse_delta.1 += dy as f32;
     }
 
     fn extract_positions(mesh: &MeshAsset) -> Result<Vec<Point3<f32>>, String> {
@@ -1151,6 +1165,7 @@ impl ApplicationHandler<State> for App {
     ) {
         if let Some(state) = &mut self.state {
             if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+                state.handle_mouse_motion(dx, dy);
                 if let Some(f) = &mut self.on_mouse_motion {
                     f(state, dx, dy);
                 }
