@@ -60,6 +60,16 @@ impl RenderNode for DebugPassNode {
     fn describe_pass(&self) -> RenderNodeDescriptor {
         RenderNodeDescriptor {
             name: "debug",
+            color_attachments: vec![ColorAttachmentDescriptor {
+                name: "swapchain_image",
+                load_op: AttachmentLoadOp::Load,
+                store: true,
+            }],
+            depth_attachment: Some(DepthAttachmentDescriptor {
+                name: "main_depth",
+                load_op: AttachmentLoadOp::Load,
+                store: true,
+            }),
             input_textures: Vec::new(),
             output_textures: vec![
                 OutputTexture::WriteTo("swapchain_image"),
@@ -99,9 +109,12 @@ impl RenderNode for DebugPassNode {
         self.camera_bind_group = Some(bind_group);
         self.camera_bind_group_layout = Some(layout);
 
-        ctx.api.create_pipeline(&self.sphere_material, &[layout]);
-        ctx.api.create_pipeline(&self.cube_material, &[layout]);
-        ctx.api.create_pipeline(&self.wire_cube_material, &[layout]);
+        ctx.api
+            .create_pipeline(&self.sphere_material, &[layout], &ctx.target_info);
+        ctx.api
+            .create_pipeline(&self.cube_material, &[layout], &ctx.target_info);
+        ctx.api
+            .create_pipeline(&self.wire_cube_material, &[layout], &ctx.target_info);
     }
 
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI) {

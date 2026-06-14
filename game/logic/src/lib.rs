@@ -537,16 +537,32 @@ pub fn register_systems(state: &mut engine::State) {
             "Frame material bind group layout must be initialized before creating planet pipelines",
         );
 
+    let target_info = {
+        let renderer = &state.global_resources.renderer;
+        let descriptor = GeometryPassNode::pass_descriptor();
+        renderer
+            .renderer_api
+            .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
+    };
+
     state
         .global_resources
         .renderer
         .renderer_api
-        .create_pipeline(&solid_material, &[camera_layout, textures_layout]);
+        .create_pipeline(
+            &solid_material,
+            &[camera_layout, textures_layout],
+            &target_info,
+        );
     state
         .global_resources
         .renderer
         .renderer_api
-        .create_pipeline(&line_material, &[camera_layout, textures_layout]);
+        .create_pipeline(
+            &line_material,
+            &[camera_layout, textures_layout],
+            &target_info,
+        );
 
     let (chunk_tx, chunk_rx) = mpsc::channel();
     let (octree_tx, octree_rx) = mpsc::channel();

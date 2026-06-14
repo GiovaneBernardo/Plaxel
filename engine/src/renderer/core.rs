@@ -256,9 +256,19 @@ pub enum BindingType {
     },
     Texture {
         dimension: TextureDimension,
+        sample_type: TextureSampleType,
         multisampled: bool,
     },
     Sampler,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureSampleType {
+    FloatFilterable,
+    FloatUnfilterable,
+    Depth,
+    Uint,
+    Sint,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -299,6 +309,8 @@ pub struct BufferSlot {
 
 pub struct RenderNodeDescriptor {
     pub name: &'static str,
+    pub color_attachments: Vec<ColorAttachmentDescriptor>,
+    pub depth_attachment: Option<DepthAttachmentDescriptor>,
     pub input_textures: Vec<&'static str>,
     pub output_textures: Vec<OutputTexture>,
     pub input_buffers: Vec<&'static str>,
@@ -313,6 +325,27 @@ pub enum OutputTexture {
 pub enum OutputBuffer {
     Create(BufferSlot),    // I create this resource (has format, size, etc.)
     WriteTo(&'static str), // I write to an existing resource (name only)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ColorAttachmentDescriptor {
+    pub name: &'static str,
+    pub load_op: AttachmentLoadOp,
+    pub store: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DepthAttachmentDescriptor {
+    pub name: &'static str,
+    pub load_op: AttachmentLoadOp,
+    pub store: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AttachmentLoadOp {
+    Load,
+    ClearColor([f64; 4]),
+    ClearDepth(f32),
 }
 
 pub trait RenderNode {
@@ -518,8 +551,15 @@ pub struct PipelineKey {
     pub depth_state: Option<DepthState>,
     pub multisample_count: u32,
     pub vertex_layouts: Vec<VertexLayout>,
-    pub color_format: TextureFormat, // from pass
-    pub depth_format: TextureFormat, // from pass
+    pub color_formats: Vec<TextureFormat>,   // from pass
+    pub depth_format: Option<TextureFormat>, // from pass
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct PipelineTargetInfo {
+    pub color_formats: Vec<TextureFormat>,
+    pub depth_format: Option<TextureFormat>,
+    pub sample_count: u32,
 }
 
 impl PipelineKey {
@@ -538,8 +578,8 @@ impl PipelineKey {
             depth_state: desc.depth_state,
             multisample_count: desc.multisample.count,
             vertex_layouts: desc.vertex_layouts.clone(),
-            color_format: TextureFormat::None,
-            depth_format: TextureFormat::None,
+            color_formats: Vec::new(),
+            depth_format: None,
         }
     }
 }
@@ -717,6 +757,7 @@ impl Renderer {
                             visibility: ShaderStages::Fragment,
                             entry_type: BindingType::Texture {
                                 dimension: TextureDimension::D2,
+                                sample_type: TextureSampleType::FloatFilterable,
                                 multisampled: false,
                             },
                             count: Some(512),
@@ -855,6 +896,18 @@ impl RenderGraph {
         };
         graph.nodes.push((0, Box::new(geometry_pass_node)));
 
+        graph.nodes.push((1, Box::new(AtmospherePassNode::new())));
+
+        RenderGraph::default_debug_nodes(renderer_api, &mut graph, 2);
+
+        graph
+    }
+
+    pub fn default_debug_nodes(
+        renderer_api: &mut dyn RendererAPI,
+        graph: &mut RenderGraph,
+        start_index: i8,
+    ) {
         let _meshe = MeshAsset {
             name: "eae".to_string(),
             uuid: Uuid::new_v4(),
@@ -1046,9 +1099,7 @@ impl RenderGraph {
             wire_cube_instance_count: 0,
         };
 
-        graph.nodes.push((1, Box::new(debug_pass_node)));
-
-        graph
+        graph.nodes.push((start_index, Box::new(debug_pass_node)));
     }
 
     fn allocate_graph_resources(
@@ -1086,11 +1137,13 @@ impl RenderGraph {
 
         for (_, node) in &mut self.nodes {
             let desc = node.describe_pass();
+            let target_info = api.target_info_for_pass(&desc, &self.resources);
             let mut ctx = NodeCompileContext {
                 api,
                 render_resources,
                 resolved_inputs: self.resources.resolve_inputs(&desc),
                 resolved_outputs: self.resources.resolve_outputs(&desc),
+                target_info,
             };
             node.compile(&mut ctx);
         }
@@ -1106,11 +1159,13 @@ impl RenderGraph {
     ) {
         for (_, node) in &mut self.nodes {
             let desc = node.describe_pass();
+            let target_info = api.target_info_for_pass(&desc, &self.resources);
             let mut ctx = NodeCompileContext {
                 api,
                 render_resources,
                 resolved_inputs: self.resources.resolve_inputs(&desc),
                 resolved_outputs: self.resources.resolve_outputs(&desc),
+                target_info,
             };
 
             node.resize(&mut ctx, &self.resources, width, height);

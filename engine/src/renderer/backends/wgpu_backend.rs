@@ -13,15 +13,16 @@ use crate::renderer::BufferDescriptor;
 use crate::renderer::FrameBindings;
 use crate::renderer::GpuMaterialData;
 use crate::renderer::GraphResources;
-use crate::renderer::OutputTexture;
 use crate::renderer::PipelineKey;
+use crate::renderer::PipelineTargetInfo;
 use crate::renderer::SamplerDescriptor;
 use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
 pub use crate::renderer::pool::*;
 use crate::renderer::{
-    AddressMode, BindGroupEntry, BindingType, BufferUsages, FilterMode, SamplerBorderColor,
-    ShaderStages, TextureDimension, TextureFormat, TextureUsages,
+    AddressMode, AttachmentLoadOp, BindGroupEntry, BindingType, BufferUsages, FilterMode,
+    RenderNodeDescriptor, SamplerBorderColor, ShaderStages, TextureDimension, TextureFormat,
+    TextureSampleType, TextureUsages,
 };
 use crate::texture;
 use cgmath::point2;
@@ -280,9 +281,20 @@ impl From<&BindingType> for wgpu::BindingType {
             },
             BindingType::Texture {
                 dimension,
+                sample_type,
                 multisampled,
             } => wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                sample_type: match sample_type {
+                    TextureSampleType::FloatFilterable => {
+                        wgpu::TextureSampleType::Float { filterable: true }
+                    }
+                    TextureSampleType::FloatUnfilterable => {
+                        wgpu::TextureSampleType::Float { filterable: false }
+                    }
+                    TextureSampleType::Depth => wgpu::TextureSampleType::Depth,
+                    TextureSampleType::Uint => wgpu::TextureSampleType::Uint,
+                    TextureSampleType::Sint => wgpu::TextureSampleType::Sint,
+                },
                 view_dimension: match dimension {
                     TextureDimension::D2 => wgpu::TextureViewDimension::D2,
                     TextureDimension::D3 => wgpu::TextureViewDimension::D3,
@@ -413,6 +425,7 @@ pub struct GpuMesh {
 struct ShaderHotReloadData {
     pipeline_descriptor: PipelineDescriptor,
     bind_group_layouts: Vec<BindGroupLayoutHandle>,
+    target_info: PipelineTargetInfo,
     pipeline_handle: PipelineHandle,
 }
 
@@ -642,14 +655,13 @@ impl RendererAPI for WgpuBackend {
             self.update_global_materials(render_resources);
         }
 
-        for (i, (_, node)) in render_graph.nodes.iter_mut().enumerate() {
+        for (_, node) in render_graph.nodes.iter_mut() {
             self.render_node(
                 node.as_mut(),
                 &render_graph.resources,
                 render_resources,
                 &mut encoder,
                 &view,
-                i == 0,
             );
         }
 
@@ -665,8 +677,11 @@ impl RendererAPI for WgpuBackend {
         };
 
         for data in reload_data {
-            let pipeline =
-                self.create_render_pipeline(&data.pipeline_descriptor, &data.bind_group_layouts);
+            let pipeline = self.create_render_pipeline(
+                &data.pipeline_descriptor,
+                &data.bind_group_layouts,
+                &data.target_info,
+            );
             self.pipelines.insert(data.pipeline_handle, pipeline);
             self.pipelines_by_uuid
                 .insert(data.pipeline_descriptor.uuid, data.pipeline_handle);
@@ -801,30 +816,61 @@ impl RendererAPI for WgpuBackend {
         &mut self,
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
+        target_info: &PipelineTargetInfo,
     ) {
-        if self
-            .pipelines_by_uuid
-            .contains_key(&material.pipeline_descriptor.uuid)
-        {
-            return;
-        }
-
-        let pipeline_key =
-            WgpuBackend::pipeline_key(&material.pipeline_descriptor, bind_group_layouts);
+        let pipeline_key = WgpuBackend::pipeline_key(
+            &material.pipeline_descriptor,
+            bind_group_layouts,
+            target_info,
+        );
         if let Some(handle) = self.pipelines_by_key.get(&pipeline_key).copied() {
             self.pipelines_by_uuid
                 .insert(material.pipeline_descriptor.uuid, handle);
             return;
         }
 
-        let render_pipeline =
-            self.create_render_pipeline(&material.pipeline_descriptor, bind_group_layouts);
+        let render_pipeline = self.create_render_pipeline(
+            &material.pipeline_descriptor,
+            bind_group_layouts,
+            target_info,
+        );
         let handle = self.add_render_pipeline(
             render_pipeline,
             &material.pipeline_descriptor,
             bind_group_layouts,
+            target_info,
         );
         self.pipelines_by_key.insert(pipeline_key, handle);
+    }
+
+    fn target_info_for_pass(
+        &self,
+        descriptor: &RenderNodeDescriptor,
+        resources: &GraphResources,
+    ) -> PipelineTargetInfo {
+        let color_formats = descriptor
+            .color_attachments
+            .iter()
+            .map(|attachment| {
+                self.attachment_format(attachment.name, resources)
+                    .unwrap_or_else(|| {
+                        panic!("Color attachment '{}' has no known format", attachment.name)
+                    })
+            })
+            .collect();
+
+        let depth_format = descriptor.depth_attachment.as_ref().map(|attachment| {
+            self.attachment_format(attachment.name, resources)
+                .unwrap_or_else(|| {
+                    panic!("Depth attachment '{}' has no known format", attachment.name)
+                })
+        });
+
+        PipelineTargetInfo {
+            color_formats,
+            depth_format,
+            sample_count: 1,
+        }
     }
 
     fn create_render_data(
@@ -1399,9 +1445,76 @@ impl WgpuBackend {
 }
 
 impl WgpuBackend {
+    fn color_load_op(load_op: AttachmentLoadOp) -> wgpu::LoadOp<wgpu::Color> {
+        match load_op {
+            AttachmentLoadOp::Load => wgpu::LoadOp::Load,
+            AttachmentLoadOp::ClearColor([r, g, b, a]) => {
+                wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a })
+            }
+            AttachmentLoadOp::ClearDepth(_) => {
+                panic!("ClearDepth cannot be used for a color attachment")
+            }
+        }
+    }
+
+    fn depth_load_op(load_op: AttachmentLoadOp) -> wgpu::LoadOp<f32> {
+        match load_op {
+            AttachmentLoadOp::Load => wgpu::LoadOp::Load,
+            AttachmentLoadOp::ClearDepth(depth) => wgpu::LoadOp::Clear(depth),
+            AttachmentLoadOp::ClearColor(_) => {
+                panic!("ClearColor cannot be used for a depth attachment")
+            }
+        }
+    }
+
+    fn attachment_view<'a>(
+        &'a self,
+        name: &str,
+        resources: &GraphResources,
+        swapchain_view: &'a wgpu::TextureView,
+    ) -> Option<&'a wgpu::TextureView> {
+        if name == "swapchain_image" {
+            return Some(swapchain_view);
+        }
+
+        let handle = resources.texture(name)?;
+        self.get_texture_view(*handle)
+    }
+
+    fn attachment_format(&self, name: &str, resources: &GraphResources) -> Option<TextureFormat> {
+        if name == "swapchain_image" {
+            return Some(Self::texture_format_from_wgpu(self.surface_config.format));
+        }
+
+        let handle = resources.texture(name)?;
+        let texture = self.get_texture(*handle)?;
+        Some(Self::texture_format_from_wgpu(texture.format()))
+    }
+
+    fn texture_format_from_wgpu(format: wgpu::TextureFormat) -> TextureFormat {
+        match format {
+            wgpu::TextureFormat::Depth32Float => TextureFormat::Depth32Float,
+            wgpu::TextureFormat::Depth24PlusStencil8 => TextureFormat::Depth24PlusStencil8,
+            wgpu::TextureFormat::Depth24Plus => TextureFormat::Depth24Plus,
+            wgpu::TextureFormat::Depth16Unorm => TextureFormat::Depth16Unorm,
+            wgpu::TextureFormat::Depth32FloatStencil8 => TextureFormat::Depth32FloatStencil8,
+            wgpu::TextureFormat::Stencil8 => TextureFormat::Stencil8,
+            wgpu::TextureFormat::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm => TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba16Float => TextureFormat::Rgba16Float,
+            wgpu::TextureFormat::Rgba32Float => TextureFormat::Rgba32Float,
+            wgpu::TextureFormat::Rg32Float => TextureFormat::Rg32Float,
+            wgpu::TextureFormat::R32Float => TextureFormat::R32Float,
+            other => panic!("Unsupported render target texture format: {other:?}"),
+        }
+    }
+
     fn pipeline_key(
         pipeline_descriptor: &PipelineDescriptor,
         bind_group_layouts: &[BindGroupLayoutHandle],
+        target_info: &PipelineTargetInfo,
     ) -> WgpuPipelineKey {
         WgpuPipelineKey {
             pipeline: PipelineKey {
@@ -1414,8 +1527,8 @@ impl WgpuBackend {
                 depth_state: pipeline_descriptor.depth_state,
                 multisample_count: pipeline_descriptor.multisample.count,
                 vertex_layouts: pipeline_descriptor.vertex_layouts.clone(),
-                color_format: TextureFormat::None,
-                depth_format: TextureFormat::None,
+                color_formats: target_info.color_formats.clone(),
+                depth_format: target_info.depth_format,
             },
             bind_group_layouts: bind_group_layouts.to_vec(),
         }
@@ -1578,90 +1691,54 @@ impl WgpuBackend {
         render_resources: &RenderResources,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        clear: bool,
     ) {
-        let depth_load = if clear {
-            // Reverse-Z: clear to 0.0 (the "far" value); depth_compare = Greater.
-            wgpu::LoadOp::Clear(0.0)
-        } else {
-            wgpu::LoadOp::Load
-        };
-
-        let color_load = if clear {
-            wgpu::LoadOp::Clear(wgpu::Color {
-                r: 0.1,
-                g: 0.2,
-                b: 0.3,
-                a: 1.0,
-            })
-        } else {
-            wgpu::LoadOp::Load
-        };
-
         let render_node_descriptor = node.describe_pass();
-        let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = Vec::new();
-        let mut i = 0;
-        let mut depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment<'_>> = None;
+        let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
+            Vec::with_capacity(render_node_descriptor.color_attachments.len());
 
-        for output_texture in render_node_descriptor.output_textures {
-            let texture_name = match output_texture {
-                OutputTexture::Create(slot) => slot.name,
-                OutputTexture::WriteTo(name) => name,
-            };
-
-            if texture_name == "swapchain_image" {
-                color_attachments.insert(
-                    i,
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: color_load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    }),
-                );
-                i += 1;
-                continue;
-            }
-
-            let handle = resources.texture(texture_name).unwrap();
-            let Some(view) = self.get_texture_view(*handle) else {
-                continue;
-            };
-            let Some(texture) = self.get_texture(*handle) else {
-                continue;
-            };
-
-            let format = texture.format();
-
-            if WgpuBackend::is_depth(format) {
-                depth_stencil_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: depth_load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                });
-                continue;
-            }
-
-            color_attachments.insert(
-                i,
-                Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: color_load,
-                        store: wgpu::StoreOp::Store,
+        for attachment in &render_node_descriptor.color_attachments {
+            let attachment_view = self
+                .attachment_view(attachment.name, resources, view)
+                .unwrap_or_else(|| panic!("Color attachment '{}' was not found", attachment.name));
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: attachment_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: Self::color_load_op(attachment.load_op),
+                    store: if attachment.store {
+                        wgpu::StoreOp::Store
+                    } else {
+                        wgpu::StoreOp::Discard
                     },
-                    depth_slice: None,
-                }),
-            );
-            i += 1;
+                },
+                depth_slice: None,
+            }));
         }
+
+        let depth_stencil_attachment =
+            render_node_descriptor
+                .depth_attachment
+                .as_ref()
+                .map(|attachment| {
+                    let attachment_view = self
+                        .attachment_view(attachment.name, resources, view)
+                        .unwrap_or_else(|| {
+                            panic!("Depth attachment '{}' was not found", attachment.name)
+                        });
+
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view: attachment_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: Self::depth_load_op(attachment.load_op),
+                            store: if attachment.store {
+                                wgpu::StoreOp::Store
+                            } else {
+                                wgpu::StoreOp::Discard
+                            },
+                        }),
+                        stencil_ops: None,
+                    }
+                });
 
         if color_attachments.len() == 0 && depth_stencil_attachment.is_none() {
             return;
@@ -1757,6 +1834,7 @@ impl WgpuBackend {
         &self,
         pipeline_descriptor: &PipelineDescriptor,
         bind_group_layouts: &[BindGroupLayoutHandle],
+        target_info: &PipelineTargetInfo,
     ) -> wgpu::RenderPipeline {
         engine_info!("Shader name: {:?}", pipeline_descriptor.shader);
         let shader = self
@@ -1817,13 +1895,28 @@ impl WgpuBackend {
             _ => None,
         };
 
-        let depth_stencil = desc.depth_state.map(|ds| wgpu::DepthStencilState {
-            format: texture::Texture::DEPTH_FORMAT,
-            depth_write_enabled: ds.write_enabled,
-            depth_compare: ds.compare.into(),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        });
+        let depth_stencil = desc
+            .depth_state
+            .and_then(|ds| target_info.depth_format.map(|format| (ds, format)))
+            .map(|(ds, format)| wgpu::DepthStencilState {
+                format: format.into(),
+                depth_write_enabled: ds.write_enabled,
+                depth_compare: ds.compare.into(),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            });
+
+        let color_targets: Vec<Option<wgpu::ColorTargetState>> = target_info
+            .color_formats
+            .iter()
+            .map(|format| {
+                Some(wgpu::ColorTargetState {
+                    format: (*format).into(),
+                    blend: blend_mode_to_wgpu(desc.blend_mode),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            })
+            .collect();
 
         self.device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1838,11 +1931,7 @@ impl WgpuBackend {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_config.format,
-                        blend: blend_mode_to_wgpu(desc.blend_mode),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &color_targets,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -1856,7 +1945,7 @@ impl WgpuBackend {
                 },
                 depth_stencil,
                 multisample: wgpu::MultisampleState {
-                    count: desc.multisample.count,
+                    count: target_info.sample_count,
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },
@@ -1877,6 +1966,7 @@ impl WgpuBackend {
         pipeline: wgpu::RenderPipeline,
         pipeline_descriptor: &PipelineDescriptor,
         bind_group_layouts: &[BindGroupLayoutHandle],
+        target_info: &PipelineTargetInfo,
     ) -> PipelineHandle {
         let handle = PipelineHandle(self.pipelines.len() as u32);
         self.pipelines.insert(handle, pipeline);
@@ -1888,6 +1978,7 @@ impl WgpuBackend {
             .push(ShaderHotReloadData {
                 pipeline_descriptor: pipeline_descriptor.clone(),
                 bind_group_layouts: bind_group_layouts.to_vec(),
+                target_info: target_info.clone(),
                 pipeline_handle: handle,
             });
         handle

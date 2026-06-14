@@ -17,24 +17,24 @@ pub struct GeometryPassNode {
     pub transform_capacity: u32,
 }
 
-impl RenderNode for GeometryPassNode {
-    fn should_render_to_swapchain(&self) -> bool {
-        true
-    }
-
-    fn describe_pass(&self) -> RenderNodeDescriptor {
-        //RenderNodeDescriptor {
-        //    input_textures: Vec::new(),
-        //    output_textures: Vec::new(),
-        //    input_buffers: Vec::new(),
-        //    output_buffers: Vec::new(),
-        //}
-
+impl GeometryPassNode {
+    pub fn pass_descriptor() -> RenderNodeDescriptor {
         const MAIN_DEPTH_USAGE: TextureUsages =
             TextureUsages::RENDER_ATTACHMENT.union(TextureUsages::COPY_SRC);
 
         RenderNodeDescriptor {
             name: "geometry_pass",
+            color_attachments: vec![ColorAttachmentDescriptor {
+                name: "swapchain_image",
+                load_op: AttachmentLoadOp::ClearColor([0.1, 0.2, 0.3, 1.0]),
+                store: true,
+            }],
+            depth_attachment: Some(DepthAttachmentDescriptor {
+                name: "main_depth",
+                // Reverse-Z: clear to 0.0 (the "far" value); depth_compare = Greater.
+                load_op: AttachmentLoadOp::ClearDepth(0.0),
+                store: true,
+            }),
             input_textures: Vec::new(),
             output_textures: vec![
                 // Later when the renderer have post processes, uncomment the create path and rename all other nodes to use the main_color
@@ -67,6 +67,16 @@ impl RenderNode for GeometryPassNode {
             input_buffers: Vec::new(),
             output_buffers: Vec::new(),
         }
+    }
+}
+
+impl RenderNode for GeometryPassNode {
+    fn should_render_to_swapchain(&self) -> bool {
+        true
+    }
+
+    fn describe_pass(&self) -> RenderNodeDescriptor {
+        Self::pass_descriptor()
     }
 
     fn compile(&mut self, ctx: &mut NodeCompileContext) {

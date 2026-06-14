@@ -6,7 +6,8 @@ use crate::assets::manager::{AssetHeader, Handle};
 use crate::assets::material::{Material, TextureAsset};
 use crate::model::MeshAsset;
 use crate::renderer::core::{
-    BufferHandle, MeshDrawRange, PipelineHandle, RenderGraph, RenderNode, TextureHandle,
+    BufferHandle, GraphResources, MeshDrawRange, PipelineHandle, PipelineTargetInfo, RenderGraph,
+    RenderNode, RenderNodeDescriptor, TextureHandle,
 };
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,
@@ -50,14 +51,21 @@ pub trait RendererAPI {
         &mut self,
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
+        target_info: &PipelineTargetInfo,
     );
     fn update_pipeline(
         &mut self,
         material: &Material,
         bind_group_layouts: &[BindGroupLayoutHandle],
+        target_info: &PipelineTargetInfo,
     ) {
-        self.create_pipeline(material, bind_group_layouts);
+        self.create_pipeline(material, bind_group_layouts, target_info);
     }
+    fn target_info_for_pass(
+        &self,
+        descriptor: &RenderNodeDescriptor,
+        resources: &GraphResources,
+    ) -> PipelineTargetInfo;
     fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureHandle;
     fn create_buffer(&mut self, descriptor: &BufferDescriptor) -> BufferHandle;
     fn create_sampler(&mut self, descriptor: &SamplerDescriptor) -> SamplerHandle;
@@ -142,6 +150,7 @@ pub struct NodeCompileContext<'a> {
     pub render_resources: &'a mut RenderResources,
     pub resolved_inputs: HashMap<&'static str, TextureHandle>,
     pub resolved_outputs: HashMap<&'static str, TextureHandle>,
+    pub target_info: PipelineTargetInfo,
 }
 
 impl<'a> NodeCompileContext<'a> {

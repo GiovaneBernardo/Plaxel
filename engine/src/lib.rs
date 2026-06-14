@@ -412,10 +412,18 @@ impl State {
                     .asset_manager
                     .get_by_uuid::<Material>(material_uuid)
                 {
-                    self.global_resources
-                        .renderer
-                        .renderer_api
-                        .create_pipeline(material, &[camera_layout, textures_layout]);
+                    let target_info = {
+                        let renderer = &self.global_resources.renderer;
+                        let descriptor = GeometryPassNode::pass_descriptor();
+                        renderer
+                            .renderer_api
+                            .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
+                    };
+                    self.global_resources.renderer.renderer_api.create_pipeline(
+                        material,
+                        &[camera_layout, textures_layout],
+                        &target_info,
+                    );
                 }
 
                 let world = self.active_scene_mut().unwrap().world_mut();
@@ -776,10 +784,18 @@ impl State {
             anyhow::bail!("Frame material bind group layout is not available");
         };
 
-        self.global_resources
-            .renderer
-            .renderer_api
-            .create_pipeline(&material, &[camera_layout, textures_layout]);
+        let target_info = {
+            let renderer = &self.global_resources.renderer;
+            let descriptor = GeometryPassNode::pass_descriptor();
+            renderer
+                .renderer_api
+                .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
+        };
+        self.global_resources.renderer.renderer_api.create_pipeline(
+            &material,
+            &[camera_layout, textures_layout],
+            &target_info,
+        );
         self.global_resources
             .asset_manager
             .add_asset::<Material>(material);
