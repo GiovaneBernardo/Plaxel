@@ -161,6 +161,13 @@ impl RenderNode for AtmospherePassNode {
         let atmosphere_radius =
             (planet_radius + self.settings.atmosphere_height).max(planet_radius + 1.0);
 
+        let scatter_r =
+            (400.0 / self.settings.wave_lengths[0]).powf(4.0) * self.settings.scattering_strength;
+        let scatter_g =
+            (400.0 / self.settings.wave_lengths[1]).powf(4.0) * self.settings.scattering_strength;
+        let scatter_b =
+            (400.0 / self.settings.wave_lengths[2]).powf(4.0) * self.settings.scattering_strength;
+
         let uniform = AtmosphereUniform {
             camera_position: [
                 camera_data.uniform.position[0],
@@ -182,7 +189,12 @@ impl RenderNode for AtmospherePassNode {
             ],
             params: [planet_radius, atmosphere_radius, 0.0, 0.0],
             screen_size: [surface_size.x as f32, surface_size.y as f32],
-            _padding: [0.0, 0.0],
+            _screen_padding: [0.0, 0.0],
+            scattering_coefficients: [scatter_r, scatter_g, scatter_b],
+            density_falloff: self.settings.density_fallof,
+            num_in_scattering_points: self.settings.num_in_scattering_points,
+            num_optical_depth_points: self.settings.num_optical_depth_points,
+            _matrix_padding: [0.0, 0.0],
             inverse_projection: camera_data.inverse_projection,
             inverse_view: camera_data.inverse_view,
         };
@@ -223,6 +235,11 @@ pub struct AtmosphereSettings {
     pub planet_center: [f32; 3],
     pub planet_radius: f32,
     pub atmosphere_height: f32,
+    pub scattering_strength: f32,
+    pub wave_lengths: [f32; 3],
+    pub density_fallof: f32,
+    pub num_in_scattering_points: i32,
+    pub num_optical_depth_points: i32,
 }
 
 impl Default for AtmosphereSettings {
@@ -233,6 +250,11 @@ impl Default for AtmosphereSettings {
             planet_center: [0.0, 0.0, 0.0],
             planet_radius: terrain_radius * 1.05,
             atmosphere_height: 2000.0,
+            scattering_strength: 7.0,
+            wave_lengths: [700.0, 530.0, 460.0],
+            density_fallof: 4.0,
+            num_in_scattering_points: 10,
+            num_optical_depth_points: 10,
         }
     }
 }
@@ -245,7 +267,14 @@ pub struct AtmosphereUniform {
     pub planet_center: [f32; 4],
     pub params: [f32; 4],
     pub screen_size: [f32; 2],
-    pub _padding: [f32; 2],
+    pub _screen_padding: [f32; 2],
+    pub scattering_coefficients: [f32; 3],
+    pub density_falloff: f32,
+    pub num_in_scattering_points: i32,
+    pub num_optical_depth_points: i32,
+    pub _matrix_padding: [f32; 2],
     pub inverse_projection: [[f32; 4]; 4],
     pub inverse_view: [[f32; 4]; 4],
 }
+
+const _: () = assert!(size_of::<AtmosphereUniform>() == 240);
