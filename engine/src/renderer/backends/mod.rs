@@ -41,6 +41,7 @@ pub trait RendererAPI {
     fn get_default_sampler(&self) -> SamplerHandle;
 
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
+    fn create_texture_asset(&mut self, texture: &TextureAsset) -> TextureHandle;
     fn upload_texture_asset(&mut self, texture: &TextureAsset, index: Option<u32>)
     -> TextureHandle;
     fn is_texture_asset_uploaded(&self, uuid: Uuid) -> bool;

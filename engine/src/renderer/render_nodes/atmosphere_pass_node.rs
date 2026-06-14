@@ -1,6 +1,11 @@
 use std::any::Any;
 
+use half::f16;
+use image::codecs::hdr::HdrDecoder;
+use uuid::Uuid;
+
 use crate::assets::material::Material;
+use crate::assets::material::{TextureAsset, TextureMip};
 use crate::renderer::*;
 
 pub struct AtmospherePassNode {
@@ -8,10 +13,13 @@ pub struct AtmospherePassNode {
     uniform_buffer: Option<BufferHandle>,
     bind_group_layout: Option<BindGroupLayoutHandle>,
     bind_group: Option<BindGroupHandle>,
+    skybox_texture: Option<TextureHandle>,
     pub settings: AtmosphereSettings,
 }
 
 impl AtmospherePassNode {
+    const SKYBOX_PATH: &'static str = "skybox/HDR_multi_nebulae_1.hdr";
+
     pub fn new() -> Self {
         let material = Material::new("shaders/atmosphere.wgsl".to_string())
             .with_vertex_layouts(Vec::new())
@@ -23,7 +31,80 @@ impl AtmospherePassNode {
             uniform_buffer: None,
             bind_group_layout: None,
             bind_group: None,
+            skybox_texture: None,
             settings: AtmosphereSettings::default(),
+        }
+    }
+
+    fn load_skybox_texture() -> TextureAsset {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../res")
+                .join(Self::SKYBOX_PATH);
+            let load_result = std::fs::File::open(&path)
+                .map(std::io::BufReader::new)
+                .map_err(image::ImageError::IoError)
+                .and_then(HdrDecoder::new)
+                .and_then(|decoder| {
+                    let metadata = decoder.metadata();
+                    let width = metadata.width;
+                    let height = metadata.height;
+                    let mut pixels =
+                        vec![[f16::from_f32(0.0); 4]; width as usize * height as usize];
+                    decoder.read_image_transform(
+                        |pixel| {
+                            let rgb = pixel.to_hdr().0;
+                            [
+                                f16::from_f32(rgb[0]),
+                                f16::from_f32(rgb[1]),
+                                f16::from_f32(rgb[2]),
+                                f16::from_f32(1.0),
+                            ]
+                        },
+                        pixels.as_mut_slice(),
+                    )?;
+                    Ok((width, height, pixels))
+                });
+
+            match load_result {
+                Ok((width, height, pixels)) => {
+                    return TextureAsset {
+                        uuid: Uuid::new_v4(),
+                        name: Self::SKYBOX_PATH.to_string(),
+                        width,
+                        height,
+                        format: TextureFormat::Rgba16Float,
+                        mip_levels: vec![TextureMip {
+                            width,
+                            height,
+                            bytes: bytemuck::cast_slice(&pixels).to_vec(),
+                        }],
+                    };
+                }
+                Err(error) => {
+                    log::warn!("Unable to load skybox {:?}: {error}", path);
+                }
+            }
+        }
+
+        let fallback = [
+            f16::from_f32(0.0),
+            f16::from_f32(0.0),
+            f16::from_f32(0.0),
+            f16::from_f32(1.0),
+        ];
+        TextureAsset {
+            uuid: Uuid::new_v4(),
+            name: "fallback_skybox".to_string(),
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba16Float,
+            mip_levels: vec![TextureMip {
+                width: 1,
+                height: 1,
+                bytes: bytemuck::cast_slice(&fallback).to_vec(),
+            }],
         }
     }
 
@@ -32,6 +113,7 @@ impl AtmospherePassNode {
         ctx: &mut NodeCompileContext,
         scene_color: TextureHandle,
         scene_depth: TextureHandle,
+        skybox_texture: TextureHandle,
     ) -> BindGroupHandle {
         let layout = self
             .bind_group_layout
@@ -51,6 +133,7 @@ impl AtmospherePassNode {
                 (1, BindGroupEntry::Texture(scene_depth)),
                 (2, BindGroupEntry::Texture(scene_color)),
                 (3, BindGroupEntry::Sampler(ctx.api.get_default_sampler())),
+                (4, BindGroupEntry::Texture(skybox_texture)),
             ],
         });
 
@@ -135,14 +218,30 @@ impl RenderNode for AtmospherePassNode {
                     entry_type: BindingType::Sampler,
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::Fragment,
+                    entry_type: BindingType::Texture {
+                        dimension: TextureDimension::D2,
+                        sample_type: TextureSampleType::FloatFilterable,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
+        let skybox_texture = self.skybox_texture.unwrap_or_else(|| {
+            let texture = Self::load_skybox_texture();
+            let handle = ctx.api.create_texture_asset(&texture);
+            self.skybox_texture = Some(handle);
+            handle
+        });
         let scene_color = ctx.input_texture("main_color");
         self.uniform_buffer = Some(uniform_buffer);
         self.bind_group_layout = Some(layout);
         let scene_depth = ctx.input_texture("main_depth");
-        self.rebuild_bind_group(ctx, scene_color, scene_depth);
+        self.rebuild_bind_group(ctx, scene_color, scene_depth, skybox_texture);
 
         self.fullscreen.bind_group_layouts = vec![layout];
         self.fullscreen.compile(ctx);
@@ -187,7 +286,12 @@ impl RenderNode for AtmospherePassNode {
                 self.settings.planet_center[2],
                 0.0,
             ],
-            params: [planet_radius, atmosphere_radius, 0.0, 0.0],
+            params: [
+                planet_radius,
+                atmosphere_radius,
+                self.settings.skybox_exposure.max(0.0),
+                0.0,
+            ],
             screen_size: [surface_size.x as f32, surface_size.y as f32],
             _screen_padding: [0.0, 0.0],
             scattering_coefficients: [scatter_r, scatter_g, scatter_b],
@@ -209,11 +313,12 @@ impl RenderNode for AtmospherePassNode {
         _width: u32,
         _height: u32,
     ) {
-        if let (Some(scene_color), Some(scene_depth)) = (
+        if let (Some(scene_color), Some(scene_depth), Some(skybox_texture)) = (
             graph_resources.texture("main_color").copied(),
             graph_resources.texture("main_depth").copied(),
+            self.skybox_texture,
         ) {
-            self.rebuild_bind_group(ctx, scene_color, scene_depth);
+            self.rebuild_bind_group(ctx, scene_color, scene_depth, skybox_texture);
         }
     }
 
@@ -238,6 +343,7 @@ pub struct AtmosphereSettings {
     pub scattering_strength: f32,
     pub wave_lengths: [f32; 3],
     pub density_fallof: f32,
+    pub skybox_exposure: f32,
     pub num_in_scattering_points: i32,
     pub num_optical_depth_points: i32,
 }
@@ -253,6 +359,7 @@ impl Default for AtmosphereSettings {
             scattering_strength: 7.0,
             wave_lengths: [700.0, 530.0, 460.0],
             density_fallof: 4.0,
+            skybox_exposure: 8.0,
             num_in_scattering_points: 10,
             num_optical_depth_points: 10,
         }

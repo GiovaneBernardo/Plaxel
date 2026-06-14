@@ -258,7 +258,7 @@
             ),
         ),
     ),
-    maximize_viewport: false,
+    maximize_viewport: true,
     floating_hierarchy: true,
     floating_inspector: true,
 )

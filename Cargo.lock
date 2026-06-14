@@ -1203,6 +1203,7 @@ dependencies = [
  "engine-inspector-derive",
  "getrandom 0.2.17",
  "glob",
+ "half",
  "image 0.24.9",
  "libloading",
  "log",
@@ -1987,6 +1988,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "num-traits",

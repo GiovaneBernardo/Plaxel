@@ -1076,6 +1076,10 @@ impl RendererAPI for WgpuBackend {
         self.load_mesh_with_data(mesh)
     }
 
+    fn create_texture_asset(&mut self, texture: &TextureAsset) -> TextureHandle {
+        self.create_texture_asset_handle(texture)
+    }
+
     fn upload_texture_asset(
         &mut self,
         texture: &TextureAsset,
@@ -1087,50 +1091,7 @@ impl RendererAPI for WgpuBackend {
             }
         }
 
-        let mip = texture
-            .mip_levels
-            .first()
-            .expect("TextureAsset must contain at least one mip level");
-        let format: wgpu::TextureFormat = texture.format.into();
-        let bytes_per_pixel =
-            WgpuBackend::bytes_per_pixel(format).expect("unsupported texture format");
-
-        let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(texture.name.as_str()),
-            size: wgpu::Extent3d {
-                width: texture.width,
-                height: texture.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: texture.mip_levels.len().max(1) as u32,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &wgpu_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &mip.bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_pixel * mip.width),
-                rows_per_image: Some(mip.height),
-            },
-            wgpu::Extent3d {
-                width: mip.width,
-                height: mip.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        let handle = self.add_texture(wgpu_texture);
+        let handle = self.create_texture_asset_handle(texture);
         self.upload_texture(&handle, index);
         self.textures_by_uuid.insert(texture.uuid, handle);
         handle
@@ -2036,6 +1997,53 @@ impl WgpuBackend {
 
     fn get_texture_view(&self, handle: TextureHandle) -> Option<&wgpu::TextureView> {
         self.texture_views.get(&handle)
+    }
+
+    fn create_texture_asset_handle(&mut self, texture: &TextureAsset) -> TextureHandle {
+        let mip = texture
+            .mip_levels
+            .first()
+            .expect("TextureAsset must contain at least one mip level");
+        let format: wgpu::TextureFormat = texture.format.into();
+        let bytes_per_pixel =
+            WgpuBackend::bytes_per_pixel(format).expect("unsupported texture format");
+
+        let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(texture.name.as_str()),
+            size: wgpu::Extent3d {
+                width: texture.width,
+                height: texture.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: texture.mip_levels.len().max(1) as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &wgpu_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &mip.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_pixel * mip.width),
+                rows_per_image: Some(mip.height),
+            },
+            wgpu::Extent3d {
+                width: mip.width,
+                height: mip.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.add_texture(wgpu_texture)
     }
 
     pub fn add_bind_group_layout(

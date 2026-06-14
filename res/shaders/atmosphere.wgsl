@@ -20,6 +20,8 @@ var scene_depth: texture_depth_2d;
 var scene_color: texture_2d<f32>;
 @group(0) @binding(3)
 var scene_sampler: sampler;
+@group(0) @binding(4)
+var skybox_texture: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -57,6 +59,26 @@ fn get_world_pos_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return world.xyz / world.w;
 }
 
+fn tone_map_aces(color: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((color * (a * color + b)) / (color * (c * color + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn sample_skybox(direction: vec3<f32>) -> vec3<f32> {
+    let dir = normalize(direction);
+    let inv_atan = vec2<f32>(0.15915494309189535, 0.3183098861837907);
+    let uv = vec2<f32>(
+        atan2(dir.z, dir.x) * inv_atan.x + 0.5,
+        acos(clamp(dir.y, -1.0, 1.0)) * inv_atan.y
+    );
+    let hdr_color = textureSample(skybox_texture, scene_sampler, uv).rgb;
+    return tone_map_aces(hdr_color * atmosphere.params.z);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let planet_radius = atmosphere.params.x;
@@ -78,6 +100,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let raw_depth = textureLoad(scene_depth, depth_texel, 0);
     var scene_color_sample = textureSample(scene_color, scene_sampler, uv);
+    if raw_depth <= 0.0 {
+        scene_color_sample = vec4<f32>(sample_skybox(ray_direction), 1.0);
+    }
 
     let scene_world_pos = get_world_pos_from_depth(uv, raw_depth);
     let scene_depth_value = length(scene_world_pos - ray_origin);
