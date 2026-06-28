@@ -1,5 +1,65 @@
 use cgmath::{InnerSpace, Vector3, vec3};
 
+const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
+const EARTH_HIGHEST_ALTITUDE_METERS: f32 = 8_848.86;
+const EARTH_HEIGHT_EXAGGERATION: f32 = 64.0;
+
+pub struct EarthHeightmap {
+    pub width: u32,
+    pub height: u32,
+    pub samples: Vec<f32>,
+    pub min_height: f32,
+    pub max_height: f32,
+}
+
+impl EarthHeightmap {
+    pub fn sample_height(&self, dir: Vector3<f32>, planet_r: f32) -> Option<f32> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+
+        let expected_len = self.width as usize * self.height as usize;
+        if self.samples.len() < expected_len {
+            return None;
+        }
+
+        let dir = if dir.magnitude2() > 1e-12 {
+            dir.normalize()
+        } else {
+            vec3(0.0, 1.0, 0.0)
+        };
+
+        let lon = dir.z.atan2(dir.x);
+        let lat = dir.y.clamp(-1.0, 1.0).asin();
+        let u = (0.5 - lon / std::f32::consts::TAU).rem_euclid(1.0);
+        let v = (0.5 - lat / std::f32::consts::PI).clamp(0.0, 1.0);
+
+        let x = u * self.width as f32;
+        let y = v * (self.height - 1) as f32;
+        let x0 = x.floor() as u32 % self.width;
+        let x1 = (x0 + 1) % self.width;
+        let y0 = y.floor() as u32;
+        let y1 = (y0 + 1).min(self.height - 1);
+        let tx = x - x.floor();
+        let ty = y - y.floor();
+
+        let sample =
+            |x: u32, y: u32| -> f32 { self.samples[y as usize * self.width as usize + x as usize] };
+
+        let top = lerp(sample(x0, y0), sample(x1, y0), tx);
+        let bottom = lerp(sample(x0, y1), sample(x1, y1), tx);
+        let height_scale = planet_r
+            * (EARTH_HIGHEST_ALTITUDE_METERS / EARTH_MEAN_RADIUS_METERS)
+            * EARTH_HEIGHT_EXAGGERATION;
+        let sampled_height = lerp(top, bottom, ty);
+        let mut final_height = sampled_height * height_scale;
+        if sampled_height == 0.0 {
+            final_height -= 2.0;
+        }
+        Some(final_height)
+    }
+}
+
 #[inline(always)]
 pub fn hash3(p: Vector3<f32>) -> f32 {
     let ix = (p.x.floor() as i32).wrapping_mul(1619);
@@ -79,13 +139,14 @@ pub fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
 }
 
 pub fn sdf(p: cgmath::Vector3<f32>, planet_size: u32) -> f32 {
-    sdf_at_center(p, vec3(0.0, 0.0, 0.0), planet_size)
+    sdf_at_center(p, vec3(0.0, 0.0, 0.0), planet_size, None)
 }
 
 pub fn sdf_at_center(
     p: cgmath::Vector3<f32>,
     planet_center: cgmath::Vector3<f32>,
     planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
 ) -> f32 {
     let planet_r = planet_radius(planet_size);
     let local_p = p - planet_center;
@@ -96,7 +157,9 @@ pub fn sdf_at_center(
         vec3(0.0, 1.0, 0.0)
     };
 
-    let height = spherical_terrain_height(dir, planet_r);
+    let height = heightmap
+        .and_then(|heightmap| heightmap.sample_height(dir, planet_r))
+        .unwrap_or_else(|| spherical_terrain_height(dir, planet_r));
     let terrain = dist_from_center - (planet_r + height);
     return terrain;
 

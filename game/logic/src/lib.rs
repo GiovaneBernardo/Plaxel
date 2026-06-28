@@ -24,7 +24,7 @@ use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use web_time::{Duration, Instant};
 
 pub mod octree;
@@ -35,7 +35,7 @@ use game_types::game_mode::{GameMode, GameModeState};
 use systems::{InputMap, player_interaction_system};
 
 use crate::octree::depth_color;
-use crate::sdf::sdf_at_center;
+use crate::sdf::EarthHeightmap;
 use crate::systems::planets::{self, PlanetExt, planet_debug};
 
 struct GameState {
@@ -221,6 +221,7 @@ pub fn register_systems(state: &mut engine::State) {
         mode: GameMode::Walking,
     });
     world.insert_resource(InputMap::default());
+    load_earth_heightmap_resource(world);
 
     let velocity_sample_pos = camera.position;
     let velocity_sample_time = Instant::now();
@@ -386,6 +387,37 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
     renderer
         .render_resources
         .insert(CameraData::from_camera(&camera.camera, camera.uniform));
+}
+
+fn load_earth_heightmap_resource(world: &mut World) {
+    let path = "res/heightmaps/earth5400x2700.jpg";
+    let Ok(image) = image::open(path) else {
+        tracing::warn!("failed to load earth heightmap from {path}");
+        return;
+    };
+
+    let grayscale = image.to_luma8();
+    let width = grayscale.width();
+    let height = grayscale.height();
+    let samples: Vec<f32> = grayscale
+        .pixels()
+        .map(|pixel| pixel[0] as f32 / u8::MAX as f32)
+        .collect();
+
+    let (min_height, max_height) = samples
+        .iter()
+        .copied()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+            (min.min(value), max.max(value))
+        });
+
+    world.insert_resource(Arc::new(EarthHeightmap {
+        width,
+        height,
+        samples,
+        min_height,
+        max_height,
+    }));
 }
 
 fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {

@@ -12,7 +12,7 @@ use game_types::{
 
 use crate::{
     octree,
-    sdf::{self},
+    sdf::{self, EarthHeightmap},
     systems::planets::generate_grid_from_min,
 };
 
@@ -32,6 +32,7 @@ pub trait PlanetExt {
         resolution: f32,
         planet_position: Vector3<f32>,
         planet_size: u32,
+        heightmap: Option<&EarthHeightmap>,
     ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(
         planet_position: cgmath::Vector3<f32>,
@@ -85,11 +86,13 @@ impl PlanetExt for Planet {
                     min_corner.to_vec(),
                     self.position,
                     planet_size,
+                    None,
                 ),
                 min_corner,
                 resolution,
                 self.position,
                 planet_size,
+                None,
             );
 
             let mesh = PlanetMesh { positions, indices };
@@ -144,6 +147,7 @@ impl PlanetExt for Planet {
         resolution: f32,
         planet_position: Vector3<f32>,
         planet_size: u32,
+        heightmap: Option<&EarthHeightmap>,
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -244,28 +248,34 @@ impl PlanetExt for Planet {
                             p + vec3(eps, 0.0, 0.0),
                             planet_position,
                             planet_size,
+                            heightmap,
                         ) - sdf::sdf_at_center(
                             p - vec3(eps, 0.0, 0.0),
                             planet_position,
                             planet_size,
+                            heightmap,
                         );
                         let dy = sdf::sdf_at_center(
                             p + vec3(0.0, eps, 0.0),
                             planet_position,
                             planet_size,
+                            heightmap,
                         ) - sdf::sdf_at_center(
                             p - vec3(0.0, eps, 0.0),
                             planet_position,
                             planet_size,
+                            heightmap,
                         );
                         let dz = sdf::sdf_at_center(
                             p + vec3(0.0, 0.0, eps),
                             planet_position,
                             planet_size,
+                            heightmap,
                         ) - sdf::sdf_at_center(
                             p - vec3(0.0, 0.0, eps),
                             planet_position,
                             planet_size,
+                            heightmap,
                         );
 
                         let n = vec3(dx, dy, dz).normalize();
@@ -389,6 +399,7 @@ impl PlanetExt for Planet {
             camera_position,
             planet_position,
             planet_size,
+            None,
         )
     }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Vector3, point3, vec3};
 use engine::{
@@ -14,7 +14,9 @@ use rand::Rng;
 use web_time::{Duration, Instant};
 
 use crate::{
-    CHUNK_SIZE, GameCamera, GameState, octree, sdf::sdf_at_center, systems::planets::PlanetExt,
+    CHUNK_SIZE, GameCamera, GameState, octree,
+    sdf::{EarthHeightmap, sdf_at_center},
+    systems::planets::PlanetExt,
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -35,7 +37,7 @@ pub struct GeneratedMesh {
 const MESH_UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
 const PLANET_COUNT: usize = 12;
-const PLANET_RADIUS_MULTIPLIER: f32 = 0.1;
+const PLANET_RADIUS_MULTIPLIER: f32 = 64.0; //0.1;
 const PLANET_SPAWN_RANGE: f32 = 1_000_000.0 * PLANET_RADIUS_MULTIPLIER;
 const MAX_PLANET_SPAWN_ATTEMPTS: usize = 256;
 
@@ -187,6 +189,10 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         .get::<TransformComponent>(camera_entity)
         .unwrap()
         .position;
+    let heightmap = ctx
+        .world
+        .get_resource::<Arc<EarthHeightmap>>()
+        .map(|heightmap| Arc::clone(&heightmap));
 
     let mut changes = Vec::new();
     {
@@ -199,6 +205,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 planet.position,
                 planet_size,
                 &mut changes,
+                heightmap.as_deref(),
             );
         });
     }
@@ -210,7 +217,10 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
     drain_generated_meshes(ctx);
 }
 
-pub fn build_requested_mesh(request: PlanetMeshRequest) -> GeneratedMesh {
+pub fn build_requested_mesh(
+    request: PlanetMeshRequest,
+    heightmap: Option<Arc<EarthHeightmap>>,
+) -> GeneratedMesh {
     let planet_position = request.planet_position;
     let size = request.node_size;
     let min_corner = point3(
@@ -228,6 +238,7 @@ pub fn build_requested_mesh(request: PlanetMeshRequest) -> GeneratedMesh {
         min_corner.to_vec(),
         planet_position,
         request.planet_size,
+        heightmap.as_deref(),
     );
     let (vertices, indices) = Planet::dual_contour_grid(
         &grid,
@@ -235,6 +246,7 @@ pub fn build_requested_mesh(request: PlanetMeshRequest) -> GeneratedMesh {
         resolution,
         planet_position,
         request.planet_size,
+        heightmap.as_deref(),
     );
 
     GeneratedMesh {
@@ -269,9 +281,13 @@ fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
 
         mesh_jobs.sender.clone()
     };
+    let heightmap = ctx
+        .world
+        .get_resource::<Arc<EarthHeightmap>>()
+        .map(|heightmap| Arc::clone(&heightmap));
 
     let _ = ctx.globals.job_system.spawn(move || {
-        let mesh = build_requested_mesh(request);
+        let mesh = build_requested_mesh(request, heightmap);
         let _ = sender.send(mesh);
     });
 }
@@ -344,6 +360,7 @@ pub fn generate_grid_from_min(
     min: Vector3<f32>,
     planet_position: Vector3<f32>,
     planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
 ) -> Vec<Vec<Vec<f32>>> {
     let mut grid = Vec::new();
     for xi in 0..nx {
@@ -356,7 +373,12 @@ pub fn generate_grid_from_min(
                     min.y + yi as f32 * resolution,
                     min.z + zi as f32 * resolution,
                 );
-                row.push(sdf_at_center(position, planet_position, planet_size));
+                row.push(sdf_at_center(
+                    position,
+                    planet_position,
+                    planet_size,
+                    heightmap,
+                ));
             }
             plane.push(row);
         }

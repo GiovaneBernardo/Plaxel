@@ -3,7 +3,10 @@ use std::sync::atomic::AtomicU32;
 use cgmath::{InnerSpace, Point3, Vector3, vec3};
 use game_types::octree::{NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest};
 
-use crate::{NodeKey, sdf::sdf_at_center};
+use crate::{
+    NodeKey,
+    sdf::{EarthHeightmap, sdf_at_center},
+};
 
 const THRESHOLD: f32 = 0.3;
 
@@ -54,8 +57,9 @@ pub fn build_node(
     camera_position: &cgmath::Point3<f32>,
     planet_center: Vector3<f32>,
     planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
 ) -> OctreeNode {
-    let has_surface = has_surface(min, size, planet_center, planet_size);
+    let has_surface = has_surface(min, size, planet_center, planet_size, heightmap);
     let _is_behind_horizon = is_behind_horizon(
         min + vec3(size * 0.5, size * 0.5, size * 0.5),
         vec3(camera_position.x, camera_position.y, camera_position.z),
@@ -111,6 +115,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(child_size, 0.0, 0.0),
@@ -120,6 +125,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(0.0, child_size, 0.0),
@@ -129,6 +135,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(child_size, child_size, 0.0),
@@ -138,6 +145,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(0.0, 0.0, child_size),
@@ -147,6 +155,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(child_size, 0.0, child_size),
@@ -156,6 +165,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(0.0, child_size, child_size),
@@ -165,6 +175,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
         Box::new(build_node(
             min + vec3(child_size, child_size, child_size),
@@ -174,6 +185,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            heightmap,
         )),
     ]);
 
@@ -193,6 +205,7 @@ pub fn has_surface(
     size: f32,
     planet_center: Vector3<f32>,
     planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
 ) -> bool {
     let mut has_neg = false;
     let mut has_pos = false;
@@ -200,7 +213,7 @@ pub fn has_surface(
         for dy in [0.0, size] {
             for dz in [0.0, size] {
                 let p = min + vec3(dx, dy, dz);
-                let d = sdf_at_center(p, planet_center, planet_size);
+                let d = sdf_at_center(p, planet_center, planet_size, heightmap);
                 if d < 0.0 {
                     has_neg = true;
                 }
@@ -305,17 +318,18 @@ pub fn update(
     planet_position: Vector3<f32>,
     planet_size: u32,
     changes: &mut Vec<OctreeChanges>,
+    heightmap: Option<&EarthHeightmap>,
 ) {
     let min_node_size = 32.0;
     let is_root_node = node.size >= planet_size as f32 * 0.5;
 
     if is_root_node && node.children.is_none() {
-        split_node(node, changes, planet_position, planet_size);
+        split_node(node, changes, planet_position, planet_size, heightmap);
         return;
     }
 
     if should_split(node, camera_pos, min_node_size, planet_size) {
-        split_node(node, changes, planet_position, planet_size);
+        split_node(node, changes, planet_position, planet_size, heightmap);
         return;
     }
 
@@ -326,7 +340,14 @@ pub fn update(
 
     if let Some(children) = node.children.as_mut() {
         for child in children.iter_mut() {
-            update(child, camera_pos, planet_position, planet_size, changes);
+            update(
+                child,
+                camera_pos,
+                planet_position,
+                planet_size,
+                changes,
+                heightmap,
+            );
         }
     }
 }
@@ -335,6 +356,7 @@ pub fn create_children(
     parent: &OctreeNode,
     planet_position: Vector3<f32>,
     planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
 ) -> [Box<OctreeNode>; 8] {
     let bounds = node_bounds(parent);
     let min = bounds.min;
@@ -342,7 +364,7 @@ pub fn create_children(
     let child_size = parent.size * 0.5;
 
     let make_child = |min: cgmath::Vector3<f32>| {
-        let has_surface = has_surface(min, child_size, planet_position, planet_size);
+        let has_surface = has_surface(min, child_size, planet_position, planet_size, heightmap);
         OctreeNode {
             key: NodeKey {
                 x: min.x as i32,
@@ -456,10 +478,11 @@ fn split_node(
     changes: &mut Vec<OctreeChanges>,
     planet_position: Vector3<f32>,
     planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
 ) {
     changes.push(OctreeChanges::RemoveMesh { key: node.key });
 
-    let children = create_children(node, planet_position, planet_size);
+    let children = create_children(node, planet_position, planet_size, heightmap);
 
     for child in children.iter() {
         if child.has_surface {
