@@ -14,7 +14,7 @@ use rand::Rng;
 use web_time::{Duration, Instant};
 
 use crate::{
-    CHUNK_SIZE, GameCamera, GameState, generate_grid_from_min, octree, systems::planets::PlanetExt,
+    CHUNK_SIZE, GameCamera, GameState, octree, sdf::sdf_at_center, systems::planets::PlanetExt,
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -334,4 +334,33 @@ pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
             game_state.planets_meshes.remove(key);
         }
     }
+}
+
+pub fn generate_grid_from_min(
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    resolution: f32,
+    min: Vector3<f32>,
+    planet_position: Vector3<f32>,
+    planet_size: u32,
+) -> Vec<Vec<Vec<f32>>> {
+    let mut grid = Vec::new();
+    for xi in 0..nx {
+        let mut plane = Vec::new();
+        for yi in 0..ny {
+            let mut row = Vec::new();
+            for zi in 0..nz {
+                let position = vec3(
+                    min.x + xi as f32 * resolution,
+                    min.y + yi as f32 * resolution,
+                    min.z + zi as f32 * resolution,
+                );
+                row.push(sdf_at_center(position, planet_position, planet_size));
+            }
+            plane.push(row);
+        }
+        grid.push(plane);
+    }
+    grid
 }

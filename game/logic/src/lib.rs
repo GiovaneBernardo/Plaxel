@@ -112,540 +112,12 @@ struct ReadyChunk {
     indices: Vec<u32>,
 }
 
-fn spawn_chunk_worker(
-    center: Point3<f32>,
-    size: f32,
-    key: NodeKey,
-    neighbors: Vec<ChunkNeighbor>,
-    neighbor_signature: NeighborSignature,
-    tx: mpsc::Sender<ReadyChunk>,
-) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let chunk = build_chunk(center, size, key, neighbors, neighbor_signature);
-        let _ = tx.send(chunk);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    rayon::spawn(move || {
-        let chunk = build_chunk(center, size, key, neighbors, neighbor_signature);
-        let _ = tx.send(chunk);
-    });
-}
-
-fn build_chunk(
-    center: Point3<f32>,
-    size: f32,
-    key: NodeKey,
-    neighbors: Vec<ChunkNeighbor>,
-    neighbor_signature: NeighborSignature,
-) -> ReadyChunk {
-    let planet_position = vec3(0.0, 0.0, 0.0);
-    let resolution = size / CHUNK_SIZE as f32;
-    let min_corner = Point3::new(
-        center.x - size * 0.5,
-        center.y - size * 0.5,
-        center.z - size * 0.5,
-    );
-    let grid = generate_grid_from_min(
-        34,
-        34,
-        34,
-        resolution,
-        min_corner.to_vec(),
-        planet_position,
-        size as u32,
-    );
-    let (vertices, indices) =
-        Planet::dual_contour_grid(&grid, min_corner, resolution, planet_position, size as u32);
-    let (vertices, indices) = add_lod_boundary_skirts(vertices, indices, center, size, &neighbors);
-    ReadyChunk {
-        key,
-        neighbor_signature,
-        vertices,
-        indices,
-    }
-}
-
-fn neighbor_signature(neighbors: &[ChunkNeighbor]) -> NeighborSignature {
-    NeighborSignature(neighbors.iter().map(|neighbor| neighbor.key).collect())
-}
-
-fn nearly_equal(a: f32, b: f32, eps: f32) -> bool {
-    (a - b).abs() <= eps
-}
-
 #[derive(Clone, Copy)]
 struct ChunkBounds {
     key: NodeKey,
     info: ChunkInfo,
     min: [i32; 3],
     max: [i32; 3],
-}
-
-fn bounds_for(key: NodeKey, info: ChunkInfo) -> ChunkBounds {
-    let half = key.size / 2;
-    ChunkBounds {
-        key,
-        info,
-        min: [key.x - half, key.y - half, key.z - half],
-        max: [key.x + half, key.y + half, key.z + half],
-    }
-}
-
-fn overlap_1d(a_min: i32, a_max: i32, b_min: i32, b_max: i32) -> bool {
-    a_min < b_max && b_min < a_max
-}
-
-fn build_neighbor_map(
-    leaves: &HashMap<NodeKey, ChunkInfo>,
-) -> HashMap<NodeKey, Vec<ChunkNeighbor>> {
-    let bounds: Vec<_> = leaves
-        .iter()
-        .map(|(&key, &info)| bounds_for(key, info))
-        .collect();
-
-    let mut face_min: [HashMap<i32, Vec<usize>>; 3] = Default::default();
-    let mut face_max: [HashMap<i32, Vec<usize>>; 3] = Default::default();
-
-    for (i, b) in bounds.iter().enumerate() {
-        for axis in 0..3 {
-            face_min[axis].entry(b.min[axis]).or_default().push(i);
-            face_max[axis].entry(b.max[axis]).or_default().push(i);
-        }
-    }
-
-    let mut result: HashMap<NodeKey, Vec<ChunkNeighbor>> = HashMap::new();
-
-    for (i, a) in bounds.iter().enumerate() {
-        let mut neighbors = Vec::new();
-
-        for axis in 0..3 {
-            let candidates = face_min[axis]
-                .get(&a.max[axis])
-                .into_iter()
-                .chain(face_max[axis].get(&a.min[axis]).into_iter())
-                .flatten();
-
-            for &j in candidates {
-                if i == j {
-                    continue;
-                }
-
-                let b = bounds[j];
-
-                let u = (axis + 1) % 3;
-                let v = (axis + 2) % 3;
-
-                if overlap_1d(a.min[u], a.max[u], b.min[u], b.max[u])
-                    && overlap_1d(a.min[v], a.max[v], b.min[v], b.max[v])
-                {
-                    neighbors.push(ChunkNeighbor {
-                        key: b.key,
-                        center: b.info.center,
-                        size: b.info.size,
-                    });
-                }
-            }
-        }
-
-        neighbors.sort_by_key(|n| n.key);
-        neighbors.dedup_by_key(|n| n.key);
-        result.insert(a.key, neighbors);
-    }
-
-    result
-}
-
-fn brick_cell_size(level: u8) -> f32 {
-    2.0f32.powi(level as i32)
-}
-
-fn brick_world_size(level: u8) -> f32 {
-    CHUNK_SIZE as f32 * brick_cell_size(level)
-}
-
-fn brick_min(coord: BrickCoord) -> Vector3<f32> {
-    let size = brick_world_size(coord.level);
-    vec3(
-        coord.x as f32 * size,
-        coord.y as f32 * size,
-        coord.z as f32 * size,
-    )
-}
-
-fn brick_info(coord: BrickCoord) -> ChunkInfo {
-    let size = brick_world_size(coord.level);
-    let min = brick_min(coord);
-    ChunkInfo {
-        center: Point3::from_vec(min + vec3(size * 0.5, size * 0.5, size * 0.5)),
-        size,
-    }
-}
-
-fn brick_key(coord: BrickCoord) -> NodeKey {
-    let info = brick_info(coord);
-    NodeKey {
-        x: info.center.x.round() as i32,
-        y: info.center.y.round() as i32,
-        z: info.center.z.round() as i32,
-        size: info.size.round() as i32,
-    }
-}
-
-fn aabb_radius_range(min: Vector3<f32>, max: Vector3<f32>) -> (f32, f32) {
-    let closest_axis_distance = |min: f32, max: f32| {
-        if min > 0.0 {
-            min
-        } else if max < 0.0 {
-            max
-        } else {
-            0.0
-        }
-    };
-
-    let closest = vec3(
-        closest_axis_distance(min.x, max.x),
-        closest_axis_distance(min.y, max.y),
-        closest_axis_distance(min.z, max.z),
-    );
-    let farthest = vec3(
-        min.x.abs().max(max.x.abs()),
-        min.y.abs().max(max.y.abs()),
-        min.z.abs().max(max.z.abs()),
-    );
-
-    (closest.magnitude(), farthest.magnitude())
-}
-
-fn brick_may_contain_surface(coord: BrickCoord, planet_size: u32) -> bool {
-    let size = brick_world_size(coord.level);
-    let min = brick_min(coord);
-    let max = min + vec3(size, size, size);
-    let (min_radius, max_radius) = aabb_radius_range(min, max);
-    let surface_min_radius = sdf::planet_radius(planet_size) + sdf::min_terrain_height(planet_size);
-    let surface_max_radius = sdf::planet_radius(planet_size) + sdf::max_terrain_height(planet_size);
-
-    min_radius <= surface_max_radius && max_radius >= surface_min_radius
-}
-
-fn distance_to_brick(camera_pos: Point3<f32>, info: ChunkInfo) -> f32 {
-    let half = info.size * 0.5;
-    let min = vec3(
-        info.center.x - half,
-        info.center.y - half,
-        info.center.z - half,
-    );
-    let max = vec3(
-        info.center.x + half,
-        info.center.y + half,
-        info.center.z + half,
-    );
-    let p = camera_pos.to_vec();
-    let dx = if p.x < min.x {
-        min.x - p.x
-    } else if p.x > max.x {
-        p.x - max.x
-    } else {
-        0.0
-    };
-    let dy = if p.y < min.y {
-        min.y - p.y
-    } else if p.y > max.y {
-        p.y - max.y
-    } else {
-        0.0
-    };
-    let dz = if p.z < min.z {
-        min.z - p.z
-    } else if p.z > max.z {
-        p.z - max.z
-    } else {
-        0.0
-    };
-
-    vec3(dx, dy, dz).magnitude()
-}
-
-fn brick_level_for_distance(distance: f32) -> u8 {
-    for (level, radius) in BRICK_LOD_RADII.iter().enumerate() {
-        if distance <= *radius {
-            return level as u8;
-        }
-    }
-
-    (BRICK_LOD_RADII.len() - 1) as u8
-}
-
-fn should_refine_brick(coord: BrickCoord, camera_pos: Point3<f32>) -> bool {
-    if coord.level == 0 {
-        return false;
-    }
-
-    let info = brick_info(coord);
-    let distance = distance_to_brick(camera_pos, info);
-    let desired_level = brick_level_for_distance(distance);
-    coord.level > desired_level
-}
-
-fn collect_brick_hierarchy(
-    coord: BrickCoord,
-    camera_pos: Point3<f32>,
-    bricks: &mut HashMap<NodeKey, ChunkInfo>,
-    planet_size: u32,
-) {
-    if !brick_may_contain_surface(coord, planet_size) {
-        return;
-    }
-
-    if should_refine_brick(coord, camera_pos) {
-        let child_level = coord.level - 1;
-        for dx in 0..2 {
-            for dy in 0..2 {
-                for dz in 0..2 {
-                    collect_brick_hierarchy(
-                        BrickCoord {
-                            level: child_level,
-                            x: coord.x * 2 + dx,
-                            y: coord.y * 2 + dy,
-                            z: coord.z * 2 + dz,
-                        },
-                        camera_pos,
-                        bricks,
-                        planet_size,
-                    );
-                }
-            }
-        }
-    } else {
-        bricks.insert(brick_key(coord), brick_info(coord));
-    }
-}
-
-fn collect_active_bricks(camera_pos: Point3<f32>, planet_size: u32) -> HashMap<NodeKey, ChunkInfo> {
-    let mut bricks = HashMap::new();
-
-    let root_size = brick_world_size(COARSE_PLANET_BRICK_LEVEL);
-    let surface_radius = sdf::planet_radius(planet_size) + sdf::max_terrain_height(planet_size);
-    let coord_min = (-(surface_radius / root_size).ceil() as i32) - 1;
-    let coord_max = ((surface_radius / root_size).ceil() as i32) + 1;
-
-    for x in coord_min..=coord_max {
-        for y in coord_min..=coord_max {
-            for z in coord_min..=coord_max {
-                collect_brick_hierarchy(
-                    BrickCoord {
-                        level: COARSE_PLANET_BRICK_LEVEL,
-                        x,
-                        y,
-                        z,
-                    },
-                    camera_pos,
-                    &mut bricks,
-                    planet_size,
-                );
-            }
-        }
-    }
-
-    bricks
-}
-
-pub fn generate_grid_from_min(
-    nx: u32,
-    ny: u32,
-    nz: u32,
-    resolution: f32,
-    min: Vector3<f32>,
-    planet_position: Vector3<f32>,
-    planet_size: u32,
-) -> Vec<Vec<Vec<f32>>> {
-    let mut grid = Vec::new();
-    for xi in 0..nx {
-        let mut plane = Vec::new();
-        for yi in 0..ny {
-            let mut row = Vec::new();
-            for zi in 0..nz {
-                let position = vec3(
-                    min.x + xi as f32 * resolution,
-                    min.y + yi as f32 * resolution,
-                    min.z + zi as f32 * resolution,
-                );
-                row.push(sdf_at_center(position, planet_position, planet_size));
-            }
-            plane.push(row);
-        }
-        grid.push(plane);
-    }
-    grid
-}
-
-fn add_lod_boundary_skirts(
-    mut vertices: Vec<PlanetVertex>,
-    mut indices: Vec<u32>,
-    center: Point3<f32>,
-    size: f32,
-    neighbors: &[ChunkNeighbor],
-) -> (Vec<PlanetVertex>, Vec<u32>) {
-    if vertices.is_empty() || indices.is_empty() {
-        return (vertices, indices);
-    }
-
-    let half = size * 0.5;
-    let local_min = vec3(center.x - half, center.y - half, center.z - half);
-    let local_max = vec3(center.x + half, center.y + half, center.z + half);
-    let local_resolution = size / CHUNK_SIZE as f32;
-
-    let mut lod_faces = Vec::new();
-    for neighbor in neighbors {
-        if (neighbor.size - size).abs() <= f32::EPSILON {
-            continue;
-        }
-
-        let neighbor_half = neighbor.size * 0.5;
-        let neighbor_min = vec3(
-            neighbor.center.x - neighbor_half,
-            neighbor.center.y - neighbor_half,
-            neighbor.center.z - neighbor_half,
-        );
-        let neighbor_max = vec3(
-            neighbor.center.x + neighbor_half,
-            neighbor.center.y + neighbor_half,
-            neighbor.center.z + neighbor_half,
-        );
-        let eps = local_resolution.min(neighbor.size / CHUNK_SIZE as f32) * 0.25;
-
-        for axis in 0..3 {
-            if nearly_equal(
-                axis_value(local_max, axis),
-                axis_value(neighbor_min, axis),
-                eps,
-            ) {
-                lod_faces.push((
-                    axis,
-                    axis_value(local_max, axis),
-                    neighbor_min,
-                    neighbor_max,
-                ));
-            } else if nearly_equal(
-                axis_value(local_min, axis),
-                axis_value(neighbor_max, axis),
-                eps,
-            ) {
-                lod_faces.push((
-                    axis,
-                    axis_value(local_min, axis),
-                    neighbor_min,
-                    neighbor_max,
-                ));
-            }
-        }
-    }
-
-    if lod_faces.is_empty() {
-        return (vertices, indices);
-    }
-
-    let original_indices = indices.clone();
-    let mut emitted_edges = HashSet::new();
-    for tri in original_indices.chunks_exact(3) {
-        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-            let edge_key = if a < b { (a, b) } else { (b, a) };
-            if !emitted_edges.insert(edge_key) {
-                continue;
-            }
-
-            let Some(pa) = vertices
-                .get(a as usize)
-                .map(|v| vec3(v.position[0], v.position[1], v.position[2]))
-            else {
-                continue;
-            };
-            let Some(pb) = vertices
-                .get(b as usize)
-                .map(|v| vec3(v.position[0], v.position[1], v.position[2]))
-            else {
-                continue;
-            };
-
-            let mut on_lod_face = false;
-            for (axis, boundary, neighbor_min, neighbor_max) in &lod_faces {
-                if !nearly_equal(axis_value(pa, *axis), *boundary, local_resolution * 0.75)
-                    || !nearly_equal(axis_value(pb, *axis), *boundary, local_resolution * 0.75)
-                {
-                    continue;
-                }
-
-                let u_axis = (*axis + 1) % 3;
-                let v_axis = (*axis + 2) % 3;
-                let a_in_overlap = axis_value(pa, u_axis)
-                    >= axis_value(*neighbor_min, u_axis) - local_resolution
-                    && axis_value(pa, u_axis)
-                        <= axis_value(*neighbor_max, u_axis) + local_resolution
-                    && axis_value(pa, v_axis)
-                        >= axis_value(*neighbor_min, v_axis) - local_resolution
-                    && axis_value(pa, v_axis)
-                        <= axis_value(*neighbor_max, v_axis) + local_resolution;
-                let b_in_overlap = axis_value(pb, u_axis)
-                    >= axis_value(*neighbor_min, u_axis) - local_resolution
-                    && axis_value(pb, u_axis)
-                        <= axis_value(*neighbor_max, u_axis) + local_resolution
-                    && axis_value(pb, v_axis)
-                        >= axis_value(*neighbor_min, v_axis) - local_resolution
-                    && axis_value(pb, v_axis)
-                        <= axis_value(*neighbor_max, v_axis) + local_resolution;
-
-                if a_in_overlap && b_in_overlap {
-                    on_lod_face = true;
-                    break;
-                }
-            }
-
-            if !on_lod_face {
-                continue;
-            }
-
-            let skirt_depth = local_resolution * 3.0;
-            let va = vertices[a as usize];
-            let vb = vertices[b as usize];
-            let skirt_a = extruded_skirt_vertex(va, skirt_depth);
-            let skirt_b = extruded_skirt_vertex(vb, skirt_depth);
-            let skirt_ai = vertices.len() as u32;
-            vertices.push(skirt_a);
-            let skirt_bi = vertices.len() as u32;
-            vertices.push(skirt_b);
-
-            indices.extend_from_slice(&[a, b, skirt_ai]);
-            indices.extend_from_slice(&[skirt_ai, b, skirt_bi]);
-            indices.extend_from_slice(&[a, skirt_ai, b]);
-            indices.extend_from_slice(&[skirt_ai, skirt_bi, b]);
-        }
-    }
-
-    (vertices, indices)
-}
-
-fn extruded_skirt_vertex(mut vertex: PlanetVertex, depth: f32) -> PlanetVertex {
-    vertex.position[0] -= vertex.normal[0] * depth;
-    vertex.position[1] -= vertex.normal[1] * depth;
-    vertex.position[2] -= vertex.normal[2] * depth;
-    vertex
-}
-
-fn axis_value(v: Vector3<f32>, axis: usize) -> f32 {
-    match axis {
-        0 => v.x,
-        1 => v.y,
-        2 => v.z,
-        _ => unreachable!(),
-    }
-}
-
-struct PlanetWorkerCoord {
-    tx: mpsc::Sender<ReadyChunk>,
-    rx: Mutex<mpsc::Receiver<ReadyChunk>>,
-    scheduled: usize,
-    completed: usize,
 }
 
 const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
@@ -742,88 +214,77 @@ pub fn register_systems(state: &mut engine::State) {
             &target_info,
         );
 
-    let (chunk_tx, chunk_rx) = mpsc::channel();
-    {
-        let scene = state.active_scene_mut().unwrap();
-        let world = scene.world_mut();
+    let scene = state.active_scene_mut().unwrap();
+    let world = scene.world_mut();
 
-        world.insert_resource(GameModeState {
-            mode: GameMode::Walking,
-        });
-        world.insert_resource(InputMap::default());
+    world.insert_resource(GameModeState {
+        mode: GameMode::Walking,
+    });
+    world.insert_resource(InputMap::default());
 
-        let velocity_sample_pos = camera.position;
-        let velocity_sample_time = Instant::now();
+    let velocity_sample_pos = camera.position;
+    let velocity_sample_time = Instant::now();
 
-        let camera_entity = world.spawn();
-        world.insert(
-            camera_entity,
-            TransformComponent {
-                position: cgmath::vec3(0.0, 8573.0, 0.0),
-                rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                scale: cgmath::vec3(1.0, 1.0, 1.0),
-                velocity: cgmath::vec3(0.0, 0.0, 0.0),
-            },
-        );
-        world.insert(
-            camera_entity,
-            CameraComponent {
-                speed: 1.0,
-                fov: 75.0,
-                far_plane: 15000.0,
-                near_plane: 0.001,
-            },
-        );
+    let camera_entity = world.spawn();
+    world.insert(
+        camera_entity,
+        TransformComponent {
+            position: cgmath::vec3(0.0, 8573.0, 0.0),
+            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            scale: cgmath::vec3(1.0, 1.0, 1.0),
+            velocity: cgmath::vec3(0.0, 0.0, 0.0),
+        },
+    );
+    world.insert(
+        camera_entity,
+        CameraComponent {
+            speed: 1.0,
+            fov: 75.0,
+            far_plane: 15000.0,
+            near_plane: 0.001,
+        },
+    );
 
-        world.insert_resource(GameCamera {
-            entity: camera_entity,
-            camera,
-            controller: engine::camera::CameraController::new(0.2),
-            uniform,
-            velocity_sample_pos,
-            velocity_sample_time,
-            velocity_sample_distance: 0.0,
-        });
+    world.insert_resource(GameCamera {
+        entity: camera_entity,
+        camera,
+        controller: engine::camera::CameraController::new(0.2),
+        uniform,
+        velocity_sample_pos,
+        velocity_sample_time,
+        velocity_sample_distance: 0.0,
+    });
 
-        world.insert_resource(GameState {
-            previous_leaves: HashMap::new(),
-            current_leaves: HashMap::new(),
-            current_meshes: HashMap::new(),
-            planets_meshes: HashMap::new(),
-            mesh_neighbor_signatures: HashMap::new(),
-            terrain_colliders: HashMap::new(),
-            in_flight: HashSet::new(),
-            empty_chunks: HashSet::new(),
-            empty_neighbor_signatures: HashMap::new(),
-            solid_material,
-            update_octree: true,
-            terrain_physics_enabled: true,
-            debug_nodes: Vec::new(),
-            debug_depth: 0,
-            max_depth: 0,
-            octree_job_in_flight: false,
-            last_requested_camera_pos: initial_camera_pos,
-        });
+    world.insert_resource(GameState {
+        previous_leaves: HashMap::new(),
+        current_leaves: HashMap::new(),
+        current_meshes: HashMap::new(),
+        planets_meshes: HashMap::new(),
+        mesh_neighbor_signatures: HashMap::new(),
+        terrain_colliders: HashMap::new(),
+        in_flight: HashSet::new(),
+        empty_chunks: HashSet::new(),
+        empty_neighbor_signatures: HashMap::new(),
+        solid_material,
+        update_octree: true,
+        terrain_physics_enabled: true,
+        debug_nodes: Vec::new(),
+        debug_depth: 0,
+        max_depth: 0,
+        octree_job_in_flight: false,
+        last_requested_camera_pos: initial_camera_pos,
+    });
 
-        world.insert_resource(PlanetWorkerCoord {
-            tx: chunk_tx,
-            rx: Mutex::new(chunk_rx),
-            scheduled: 0,
-            completed: 0,
-        });
+    let init_schedule_mut = scene.init_schedule_mut();
+    init_schedule_mut.add_system(systems::planets::planet_system_init);
 
-        let init_schedule_mut = scene.init_schedule_mut();
-        init_schedule_mut.add_system(systems::planets::planet_system_init);
-
-        let update_schedule_mut = scene.update_schedule_mut();
-        update_schedule_mut.add_system(systems::planets::planet_system_update);
-        update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
-        update_schedule_mut.add_system(player_interaction_system);
-        update_schedule_mut.add_system(camera_update_system);
-        update_schedule_mut.add_system(planet_lod_system);
-        update_schedule_mut.add_system(renderer::get_render_data_system);
-        update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
-    }
+    let update_schedule_mut = scene.update_schedule_mut();
+    update_schedule_mut.add_system(systems::planets::planet_system_update);
+    update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
+    update_schedule_mut.add_system(player_interaction_system);
+    update_schedule_mut.add_system(camera_update_system);
+    update_schedule_mut.add_system(renderer::get_render_data_system);
+    update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
 }
 
 #[unsafe(no_mangle)]
@@ -841,7 +302,6 @@ pub fn update(state: &mut engine::State) {
     };
 
     sync_camera_to_renderer(renderer, scene.world());
-    drain_planet_chunks(renderer, scene.world_mut());
     sync_planet_debug(renderer, scene.world());
     sync_planet_octree_debug(renderer, scene.world());
     sync_physics_debug(renderer, scene.world());
@@ -918,204 +378,6 @@ fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Point3
     camera.velocity_sample_distance = 0.0;
 }
 
-fn should_rebuild_active_bricks(game_state: &GameState, camera_pos: Point3<f32>) -> bool {
-    if game_state.current_leaves.is_empty() {
-        return true;
-    }
-
-    let distance = (camera_pos - game_state.last_requested_camera_pos).magnitude();
-    distance >= BRICK_REBUILD_DISTANCE
-}
-
-struct ChunkJob {
-    key: NodeKey,
-    info: ChunkInfo,
-    neighbors: Vec<ChunkNeighbor>,
-    neighbor_signature: NeighborSignature,
-    priority: f32,
-}
-
-fn chunk_job_priority(
-    key: NodeKey,
-    info: ChunkInfo,
-    camera_pos: Point3<f32>,
-    terrain_physics_enabled: bool,
-) -> f32 {
-    let distance = distance_to_brick(camera_pos, info);
-    let level = brick_level_for_distance(distance);
-    let mut priority = distance + level as f32 * 256.0 + key.size as f32 * 0.25;
-
-    if terrain_physics_enabled
-        && info.size <= MAX_TERRAIN_PHYSICS_BRICK_SIZE
-        && distance <= TERRAIN_PHYSICS_RADIUS
-    {
-        priority -= 10_000.0;
-    }
-
-    priority
-}
-
-fn planet_lod_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
-    let world = &mut ctx.world;
-    let camera_pos = {
-        let Some(camera) = world.get_resource::<GameCamera>() else {
-            return;
-        };
-        camera.camera.position
-    };
-
-    let tx = {
-        let Some(workers) = world.get_resource::<PlanetWorkerCoord>() else {
-            return;
-        };
-        workers.tx.clone()
-    };
-
-    let Some(mut game_state) = world.get_resource_mut::<GameState>() else {
-        return;
-    };
-
-    if !game_state.update_octree {
-        return;
-    }
-
-    let planet_size = 65536;
-
-    if should_rebuild_active_bricks(&game_state, camera_pos) {
-        let current_leaves = collect_active_bricks(camera_pos, planet_size);
-        game_state.last_requested_camera_pos = camera_pos;
-        game_state.max_depth = BRICK_LOD_RADII.len().saturating_sub(1) as u32;
-        game_state.debug_nodes = current_leaves
-            .values()
-            .map(|info| {
-                (
-                    info.center,
-                    info.size,
-                    brick_level_for_distance(distance_to_brick(camera_pos, *info)) as u32,
-                )
-            })
-            .collect();
-        game_state.current_leaves = current_leaves;
-    }
-
-    let current_leaves = game_state.current_leaves.clone();
-    if current_leaves.is_empty() {
-        return;
-    }
-
-    game_state
-        .in_flight
-        .retain(|key| current_leaves.contains_key(key));
-    game_state
-        .empty_chunks
-        .retain(|key| current_leaves.contains_key(key));
-    game_state
-        .empty_neighbor_signatures
-        .retain(|key, _| current_leaves.contains_key(key));
-
-    let stale_keys: Vec<NodeKey> = game_state
-        .current_meshes
-        .keys()
-        .filter(|key| !current_leaves.contains_key(key))
-        .copied()
-        .collect();
-
-    for stale_key in stale_keys {
-        let stale_half = stale_key.size as f32 * 0.5;
-        let stale_center = Point3::new(stale_key.x as f32, stale_key.y as f32, stale_key.z as f32);
-        let all_covered = current_leaves.iter().all(|(leaf_key, info)| {
-            let max_distance = info.size * 0.5 + stale_half;
-            let overlaps = (info.center.x - stale_center.x).abs() < max_distance
-                && (info.center.y - stale_center.y).abs() < max_distance
-                && (info.center.z - stale_center.z).abs() < max_distance;
-
-            !overlaps
-                || game_state.current_meshes.contains_key(leaf_key)
-                || game_state.empty_chunks.contains(leaf_key)
-        });
-
-        if all_covered {
-            game_state.current_meshes.remove(&stale_key);
-            game_state.mesh_neighbor_signatures.remove(&stale_key);
-            game_state.empty_neighbor_signatures.remove(&stale_key);
-            if let Some(handle) = game_state.terrain_colliders.remove(&stale_key) {
-                if let Some(mut physics) = world.get_resource_mut::<Physics>() {
-                    physics.remove_collider(handle.0);
-                }
-            }
-        }
-    }
-
-    let mut scheduled = 0usize;
-    let neighbor_map = build_neighbor_map(&current_leaves);
-    let mut jobs = Vec::new();
-
-    for (key, info) in &current_leaves {
-        let neighbors = neighbor_map.get(key).cloned().unwrap_or_default();
-        let neighbor_signature = neighbor_signature(&neighbors);
-        let mesh_is_current = game_state
-            .mesh_neighbor_signatures
-            .get(key)
-            .is_some_and(|signature| signature == &neighbor_signature);
-        let empty_is_current = game_state
-            .empty_neighbor_signatures
-            .get(key)
-            .is_some_and(|signature| signature == &neighbor_signature);
-
-        if game_state.current_meshes.contains_key(key) && mesh_is_current {
-            continue;
-        }
-        if game_state.empty_chunks.contains(key) && empty_is_current {
-            continue;
-        }
-        if game_state.in_flight.contains(key) {
-            continue;
-        }
-
-        game_state.empty_chunks.remove(key);
-        game_state.empty_neighbor_signatures.remove(key);
-        jobs.push(ChunkJob {
-            key: *key,
-            info: *info,
-            priority: chunk_job_priority(
-                *key,
-                *info,
-                camera_pos,
-                game_state.terrain_physics_enabled,
-            ),
-            neighbors,
-            neighbor_signature,
-        });
-    }
-
-    jobs.sort_by(|a, b| a.priority.total_cmp(&b.priority));
-
-    for job in jobs.into_iter().take(MAX_CHUNK_WORKER_SPAWNS_PER_FRAME) {
-        game_state.in_flight.insert(job.key);
-        spawn_chunk_worker(
-            job.info.center,
-            job.info.size,
-            job.key,
-            job.neighbors,
-            job.neighbor_signature,
-            tx.clone(),
-        );
-        scheduled += 1;
-    }
-
-    game_state.previous_leaves.clear();
-    for (key, info) in &current_leaves {
-        game_state.previous_leaves.insert(*key, *info);
-    }
-
-    drop(game_state);
-    if scheduled > 0 {
-        if let Some(mut workers) = world.get_resource_mut::<PlanetWorkerCoord>() {
-            workers.scheduled += scheduled;
-        }
-    }
-}
-
 fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &World) {
     let Some(camera) = world.get_resource::<GameCamera>() else {
         return;
@@ -1124,96 +386,6 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
     renderer
         .render_resources
         .insert(CameraData::from_camera(&camera.camera, camera.uniform));
-}
-
-fn drain_planet_chunks(renderer: &mut engine::renderer::Renderer, world: &mut World) {
-    let start = Instant::now();
-    let camera_pos = world
-        .get_resource::<GameCamera>()
-        .map(|camera| camera.camera.position);
-    let Some(mut game_state) = world.get_resource_mut::<GameState>() else {
-        return;
-    };
-    let Some(mut workers) = world.get_resource_mut::<PlanetWorkerCoord>() else {
-        return;
-    };
-
-    let mut uploaded = 0usize;
-    loop {
-        if start.elapsed() >= UPLOAD_BUDGET {
-            break;
-        }
-
-        let chunk = {
-            let rx = workers.rx.lock().unwrap();
-            match rx.try_recv() {
-                Ok(chunk) => chunk,
-                Err(_) => break,
-            }
-        };
-
-        game_state.in_flight.remove(&chunk.key);
-
-        if chunk.vertices.is_empty() {
-            game_state.current_meshes.remove(&chunk.key);
-            game_state.mesh_neighbor_signatures.remove(&chunk.key);
-            game_state.empty_chunks.insert(chunk.key);
-            game_state
-                .empty_neighbor_signatures
-                .insert(chunk.key, chunk.neighbor_signature);
-            continue;
-        }
-
-        //let collider_mesh = cook_terrain_collider_mesh(&chunk.vertices, &chunk.indices);
-        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&chunk.vertices).to_vec();
-        let render_data = renderer.renderer_api.create_render_data(
-            &vertex_bytes,
-            &chunk.indices,
-            game_state.solid_material.clone(),
-            &PipelineHandle(0),
-        );
-        //let collider_mesh = if game_state.terrain_physics_enabled {
-        //    camera_pos.and_then(|camera_pos| {
-        //        game_state.current_leaves.get(&chunk.key).and_then(|info| {
-        //            let distance = distance_to_brick(camera_pos, *info);
-        //            if info.size <= MAX_TERRAIN_PHYSICS_BRICK_SIZE
-        //                && distance <= TERRAIN_PHYSICS_RADIUS
-        //            {
-        //                cook_terrain_collider_mesh(&chunk.vertices, &chunk.indices)
-        //            } else {
-        //                None
-        //            }
-        //        })
-        //    })
-        //} else {
-        //    None
-        //};
-
-        //if let Some(handle) = game_state.terrain_colliders.remove(&chunk.key) {
-        //    if let Some(mut physics) = world.get_resource_mut::<Physics>() {
-        //        physics.remove_collider(handle.0);
-        //    }
-        //}
-        //if let Some((vertices, indices)) = collider_mesh {
-        //    if let Some(mut physics) = world.get_resource_mut::<Physics>() {
-        //        if let Some(handle) = physics.add_trimesh_collider(vertices, indices, 0.0, 0.9) {
-        //            game_state
-        //                .terrain_colliders
-        //                .insert(chunk.key, RapierColliderHandle(handle));
-        //        }
-        //    }
-        //}
-
-        game_state.current_meshes.insert(chunk.key, render_data);
-        game_state
-            .mesh_neighbor_signatures
-            .insert(chunk.key, chunk.neighbor_signature);
-        game_state.empty_chunks.remove(&chunk.key);
-        game_state.empty_neighbor_signatures.remove(&chunk.key);
-        uploaded += 1;
-    }
-
-    workers.completed += uploaded;
 }
 
 fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {

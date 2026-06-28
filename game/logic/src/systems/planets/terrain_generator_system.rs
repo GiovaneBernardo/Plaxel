@@ -11,8 +11,9 @@ use game_types::{
 };
 
 use crate::{
-    generate_grid_from_min, octree,
+    octree,
     sdf::{self},
+    systems::planets::generate_grid_from_min,
 };
 
 pub trait PlanetExt {
