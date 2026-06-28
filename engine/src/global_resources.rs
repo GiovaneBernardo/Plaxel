@@ -23,7 +23,7 @@ impl GlobalResources {
         let frame_capturer = FrameCapturer::new();
         let renderer = Renderer::new(window.clone()).await.unwrap();
 
-        let worker_count = (thread::available_parallelism().unwrap().get() - 1).max(1);
+        let worker_count = (num_cpus::get() - 1).max(1);
         Self {
             asset_manager: AssetManager::new(),
             frame_capturer,

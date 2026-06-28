@@ -650,7 +650,7 @@ struct PlanetWorkerCoord {
 
 const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
-const PLANET_SIZE: usize = 65536; //* 16;
+const PLANET_SIZE: usize = 65536 * 16;
 const CHUNK_SIZE: usize = 32;
 const BRICK_LOD_RADII: [f32; 7] = [160.0, 448.0, 1024.0, 2048.0, 4096.0, 8192.0, f32::MAX];
 const MAX_DEBUG_BRICKS: usize = 512;

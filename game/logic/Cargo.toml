@@ -19,6 +19,7 @@ pollster = { workspace = true }
 libloading = { workspace = true }
 rand = { workspace = true }
 web-time = { workspace = true }
+crossbeam-channel = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
