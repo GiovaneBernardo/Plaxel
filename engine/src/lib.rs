@@ -5,6 +5,7 @@ pub mod core;
 pub mod frame_capturer;
 pub mod global_resources;
 pub mod logging;
+pub mod multithreading;
 pub mod renderer;
 
 use cgmath::Point3;
@@ -911,6 +912,19 @@ impl State {
         world.insert_resource(GeometryRenderQueue::new());
     }
 
+    fn init_active_scene(&mut self) {
+        let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
+            return;
+        };
+
+        let (global_resources, scenes) = (&mut self.global_resources, &mut self.scenes);
+        let Some(scene) = scenes.get_mut(scene_index) else {
+            return;
+        };
+
+        scene.init(global_resources);
+    }
+
     pub fn create_main_game_scene() -> Scene {
         let mut scene = Scene::new();
 
@@ -1105,6 +1119,7 @@ impl ApplicationHandler<State> for App {
                     if let Some(f) = &mut self.on_register_system {
                         f(state);
                     }
+                    state.init_active_scene();
                     state.registered_systems = true;
                 }
                 state.window.request_redraw();

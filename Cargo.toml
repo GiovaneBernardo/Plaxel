@@ -39,6 +39,9 @@ rapier3d = { version = "0.29", features = ["simd-stable"] }
 
 # Threading
 rayon = "1.10"
+crossbeam-channel = "0.5"
+num_cpus = "1"
+parking_lot = "0.12"
 
 
 # Image

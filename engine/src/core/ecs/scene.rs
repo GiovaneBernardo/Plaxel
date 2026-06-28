@@ -38,6 +38,10 @@ impl Scene {
         &mut self.update_schedule
     }
 
+    pub fn init_schedule_mut(&mut self) -> &mut Schedule {
+        &mut self.init_schedule
+    }
+
     pub fn init(&mut self, globals: &mut GlobalResources) {
         let mut ctx = SystemContext {
             world: &mut self.world,

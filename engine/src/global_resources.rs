@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread};
 
 use winit::window::Window;
 
@@ -6,6 +6,7 @@ use crate::{
     assets::manager::AssetManager,
     core::input::InputState,
     frame_capturer::{self, FrameCapturer},
+    multithreading::job_system::JobSystem,
     renderer::{self, Renderer},
 };
 
@@ -14,6 +15,7 @@ pub struct GlobalResources {
     pub asset_manager: AssetManager,
     pub frame_capturer: FrameCapturer,
     pub input: InputState,
+    pub job_system: JobSystem,
 }
 
 impl GlobalResources {
@@ -21,11 +23,13 @@ impl GlobalResources {
         let frame_capturer = FrameCapturer::new();
         let renderer = Renderer::new(window.clone()).await.unwrap();
 
+        let worker_count = (thread::available_parallelism().unwrap().get() - 1).max(1);
         Self {
             asset_manager: AssetManager::new(),
             frame_capturer,
             input: InputState::new(),
             renderer,
+            job_system: JobSystem::new(worker_count),
         }
     }
 }

@@ -1,3 +1,5 @@
+pub mod assembly;
+pub mod block;
 pub mod game_mode;
 pub mod octree;
 pub mod planet;

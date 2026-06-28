@@ -1,9 +1,11 @@
 use crate::octree::OctreeNode;
+use cgmath::Vector3;
 use engine::model::*;
 
 pub struct Planet {
     pub id: u64,
     pub name: String,
+    pub position: Vector3<f32>,
     pub octree_root: OctreeNode,
 }
 
