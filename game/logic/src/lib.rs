@@ -122,7 +122,7 @@ struct ChunkBounds {
 
 const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
-const PLANET_SIZE: usize = 65536 * 16;
+const PLANET_SIZE: usize = 65536 * 1;
 const CHUNK_SIZE: usize = 32;
 const BRICK_LOD_RADII: [f32; 7] = [160.0, 448.0, 1024.0, 2048.0, 4096.0, 8192.0, f32::MAX];
 const MAX_DEBUG_BRICKS: usize = 512;
@@ -458,6 +458,13 @@ fn sync_physics_debug(renderer: &mut engine::renderer::Renderer, world: &World) 
 
 fn sync_planet_octree_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
     let mut query = engine::ecs::query::Query::<(&Planet,)>::new(world);
+    if world
+        .get_resource::<GameState>()
+        .unwrap()
+        .terrain_physics_enabled
+    {
+        return;
+    }
     query.for_each(|_, (planet,)| {
         planet_debug::sync_planet_debug(renderer, world, planet);
     });

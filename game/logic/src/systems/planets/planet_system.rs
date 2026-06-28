@@ -36,8 +36,8 @@ pub struct GeneratedMesh {
 
 const MESH_UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
-const PLANET_COUNT: usize = 12;
-const PLANET_RADIUS_MULTIPLIER: f32 = 64.0; //0.1;
+const PLANET_COUNT: usize = 128;
+const PLANET_RADIUS_MULTIPLIER: f32 = 1000.0; //0.1;
 const PLANET_SPAWN_RANGE: f32 = 1_000_000.0 * PLANET_RADIUS_MULTIPLIER;
 const MAX_PLANET_SPAWN_ATTEMPTS: usize = 256;
 
@@ -124,11 +124,14 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
     });
 
     for i in 0..PLANET_COUNT {
-        let Some(planet_position) =
+        let Some(mut planet_position) =
             random_planet_position(&mut rng, &planet_positions, min_planet_distance)
         else {
             continue;
         };
+        if i == 0 {
+            planet_position = vec3(0.0, 0.0, 0.0);
+        }
         planet_positions.push(planet_position);
         let new_planet = world.spawn();
 

@@ -290,8 +290,13 @@ impl PlanetExt for Planet {
                         vec3(0.0, 1.0, 0.0)
                     };
                     let slope = avg_norm[0] * up.x + avg_norm[1] * up.y + avg_norm[2] * up.z;
+                    let is_ocean = heightmap
+                        .and_then(|heightmap| heightmap.sample_unit_height(up))
+                        .is_some_and(|height| height == 0.0);
 
-                    let (mat_a, mat_b, blend) = if slope > 0.7 {
+                    let (mat_a, mat_b, blend) = if is_ocean {
+                        (3u16, 3u16, 0u8)
+                    } else if slope > 0.7 {
                         (0u16, 1u16, 0u8)
                     } else if slope > 0.4 {
                         let t = (0.7 - slope) / 0.3;

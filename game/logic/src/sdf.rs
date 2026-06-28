@@ -2,7 +2,10 @@ use cgmath::{InnerSpace, Vector3, vec3};
 
 const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
 const EARTH_HIGHEST_ALTITUDE_METERS: f32 = 8_848.86;
-const EARTH_HEIGHT_EXAGGERATION: f32 = 64.0;
+const EARTH_HEIGHT_EXAGGERATION: f32 = 1.0; //32.0;
+const EARTH_BROAD_DETAIL_SCALE: f32 = 0.18;
+const EARTH_RIDGE_DETAIL_SCALE: f32 = 0.12;
+const EARTH_FINE_DETAIL_SCALE: f32 = 0.035;
 
 pub struct EarthHeightmap {
     pub width: u32,
@@ -13,7 +16,7 @@ pub struct EarthHeightmap {
 }
 
 impl EarthHeightmap {
-    pub fn sample_height(&self, dir: Vector3<f32>, planet_r: f32) -> Option<f32> {
+    pub fn sample_unit_height(&self, dir: Vector3<f32>) -> Option<f32> {
         if self.width == 0 || self.height == 0 {
             return None;
         }
@@ -48,15 +51,38 @@ impl EarthHeightmap {
 
         let top = lerp(sample(x0, y0), sample(x1, y0), tx);
         let bottom = lerp(sample(x0, y1), sample(x1, y1), tx);
+        Some(lerp(top, bottom, ty))
+    }
+
+    pub fn sample_height(&self, dir: Vector3<f32>, planet_r: f32) -> Option<f32> {
+        let dir = if dir.magnitude2() > 1e-12 {
+            dir.normalize()
+        } else {
+            vec3(0.0, 1.0, 0.0)
+        };
+        let sampled_height = self.sample_unit_height(dir)?;
         let height_scale = planet_r
             * (EARTH_HIGHEST_ALTITUDE_METERS / EARTH_MEAN_RADIUS_METERS)
             * EARTH_HEIGHT_EXAGGERATION;
-        let sampled_height = lerp(top, bottom, ty);
-        let mut final_height = sampled_height * height_scale;
-        if sampled_height == 0.0 {
-            final_height -= 2.0;
-        }
-        Some(final_height)
+        let land_mask = smoothstep(((sampled_height - 0.015) / 0.08).clamp(0.0, 1.0));
+        let mountain_mask = smoothstep(((sampled_height - 0.24) / 0.42).clamp(0.0, 1.0));
+
+        let broad = (fbm(dir * 42.0 + vec3(9.7, 31.2, 4.4), 4) - 0.5)
+            * height_scale
+            * EARTH_BROAD_DETAIL_SCALE
+            * land_mask;
+        let ridge_raw = fbm(dir * 155.0 + vec3(43.1, 7.8, 91.4), 5);
+        let ridges = (1.0 - (ridge_raw * 2.0 - 1.0).abs()).powf(1.7)
+            * height_scale
+            * EARTH_RIDGE_DETAIL_SCALE
+            * mountain_mask;
+        let fine = (fbm(dir * 520.0 + vec3(3.2, 77.5, 18.6), 3) - 0.5)
+            * height_scale
+            * EARTH_FINE_DETAIL_SCALE
+            * land_mask;
+        let ocean_depression = if sampled_height == 0.0 { -2.0 } else { 0.0 };
+
+        Some(sampled_height * height_scale + broad + ridges + fine + ocean_depression)
     }
 }
 
