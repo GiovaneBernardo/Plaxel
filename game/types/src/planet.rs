@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use crate::octree::OctreeNode;
-use cgmath::Vector3;
+use cgmath::{Point3, Vector3};
 use engine::model::*;
 
 pub struct Planet {
@@ -93,4 +95,23 @@ impl PlanetInstance {
             ],
         }
     }
+}
+
+#[derive(Clone)]
+pub struct PlanetTerrainEdits {
+    pub modified_chunks: HashMap<TerrainBrickKey, Vec<Vec<Vec<f32>>>>, //TerrainBrickEdits>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct TerrainBrickKey {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub level: u32,
+}
+
+#[derive(Clone)]
+pub struct TerrainBrickEdits {
+    pub resolution: u32,
+    pub offsets: Vec<f32>,
 }

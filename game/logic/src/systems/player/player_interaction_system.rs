@@ -1,5 +1,6 @@
 use std::any::TypeId;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use engine::assets::importer::AssetPayload;
 use engine::assets::loader;
@@ -7,20 +8,28 @@ use engine::assets::manager::{Asset, Handle, UntypedHandle, Uuid};
 use engine::assets::material::{Material, MaterialResource};
 use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::components::renderer::MeshRendererComponent;
+use engine::ecs::entity::Entity;
+use engine::ecs::query::Query;
 use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
 use game_types::assembly::Assembly;
+use game_types::octree::{NodeKey, OctreeNode, PlanetMeshRequest};
+use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use rand::Rng;
 
-use cgmath::{InnerSpace, Quaternion, Rotation3, Vector3, vec3};
+use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Rotation3, Vector3, vec3};
 
 use engine::core::input::{InputState, KeyCode, MouseButton};
 use engine::ecs::commands::{Commands, PhysicalSphereParams};
 use engine::ecs::system::SystemContext;
 use game_types::game_mode::{GameMode, GameModeState};
 
-use crate::GameCamera;
+use crate::{
+    GameCamera, GameState, octree,
+    sdf::{EarthHeightmap, sdf_at_center},
+    systems::planets::{MeshJobResults, submit_requested_mesh},
+};
 
 #[allow(dead_code)]
 pub enum Action {
@@ -95,6 +104,183 @@ impl InputMap {
     }
 }
 
+fn ray_from_mouse_position(
+    camera: &engine::camera::Camera,
+    mouse_position_x: f32,
+    mouse_position_y: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Option<(cgmath::Point3<f32>, Vector3<f32>)> {
+    if viewport_width <= 0.0 || viewport_height <= 0.0 {
+        return None;
+    }
+
+    let viewport_position_x = (mouse_position_x / viewport_width) * 2.0 - 1.0;
+    let viewport_position_y = 1.0 - (mouse_position_y / viewport_height) * 2.0;
+    let half_vertical_field_of_view = (camera.fovy.to_radians() * 0.5).tan();
+    let half_horizontal_field_of_view = half_vertical_field_of_view * camera.aspect;
+
+    let ray_direction = camera.forward()
+        + camera.right() * viewport_position_x * half_horizontal_field_of_view
+        + camera.up() * viewport_position_y * half_vertical_field_of_view;
+
+    if ray_direction.magnitude2() <= f32::EPSILON {
+        return None;
+    }
+
+    Some((camera.position, ray_direction.normalize()))
+}
+
+fn trace_terrain_surface(
+    ray_origin: cgmath::Point3<f32>,
+    ray_direction: Vector3<f32>,
+    ray_start_distance: f32,
+    ray_end_distance: f32,
+    planet_position: Vector3<f32>,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
+) -> Option<(f32, cgmath::Point3<f32>)> {
+    let mut previous_distance = ray_start_distance.max(0.0);
+    let previous_position = ray_origin + ray_direction * previous_distance;
+    let mut previous_density = sdf_at_center(
+        previous_position.to_vec(),
+        planet_position,
+        planet_size,
+        heightmap,
+        terrain_edits,
+    );
+
+    if previous_density.abs() < 0.5 {
+        return Some((previous_distance, previous_position));
+    }
+
+    let mut current_distance = previous_distance;
+
+    for _ in 0..256 {
+        if current_distance > ray_end_distance {
+            return None;
+        }
+
+        let step_distance = previous_density.abs().clamp(0.25, 64.0);
+        current_distance = (current_distance + step_distance).min(ray_end_distance);
+
+        let current_position = ray_origin + ray_direction * current_distance;
+        let current_density = sdf_at_center(
+            current_position.to_vec(),
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+        );
+
+        if current_density.abs() < 0.5 {
+            return Some((current_distance, current_position));
+        }
+
+        if previous_density.signum() != current_density.signum() {
+            let mut lower_distance = previous_distance;
+            let mut upper_distance = current_distance;
+            let mut lower_density = previous_density;
+
+            for _ in 0..16 {
+                let middle_distance = (lower_distance + upper_distance) * 0.5;
+                let middle_position = ray_origin + ray_direction * middle_distance;
+                let middle_density = sdf_at_center(
+                    middle_position.to_vec(),
+                    planet_position,
+                    planet_size,
+                    heightmap,
+                    terrain_edits,
+                );
+
+                if middle_density.abs() < 0.5 {
+                    return Some((middle_distance, middle_position));
+                }
+
+                if lower_density.signum() == middle_density.signum() {
+                    lower_distance = middle_distance;
+                    lower_density = middle_density;
+                } else {
+                    upper_distance = middle_distance;
+                }
+            }
+
+            let surface_distance = (lower_distance + upper_distance) * 0.5;
+            return Some((
+                surface_distance,
+                ray_origin + ray_direction * surface_distance,
+            ));
+        }
+
+        previous_distance = current_distance;
+        previous_density = current_density;
+    }
+
+    None
+}
+
+fn node_overlaps_bounds(
+    node: &OctreeNode,
+    bounds_min: Vector3<f32>,
+    bounds_max: Vector3<f32>,
+) -> bool {
+    let node_max = node.min + vec3(node.size, node.size, node.size);
+
+    node.min.x <= bounds_max.x
+        && node_max.x >= bounds_min.x
+        && node.min.y <= bounds_max.y
+        && node_max.y >= bounds_min.y
+        && node.min.z <= bounds_max.z
+        && node_max.z >= bounds_min.z
+}
+
+fn collect_dirty_mesh_requests(
+    node: &OctreeNode,
+    planet_entity: Entity,
+    planet_position: Vector3<f32>,
+    planet_size: u32,
+    bounds_min: Vector3<f32>,
+    bounds_max: Vector3<f32>,
+    requests: &mut Vec<PlanetMeshRequest>,
+) {
+    if !node_overlaps_bounds(node, bounds_min, bounds_max) {
+        return;
+    }
+
+    if let Some(children) = node.children.as_ref() {
+        for child in children {
+            collect_dirty_mesh_requests(
+                child,
+                planet_entity,
+                planet_position,
+                planet_size,
+                bounds_min,
+                bounds_max,
+                requests,
+            );
+        }
+        return;
+    }
+
+    requests.push(PlanetMeshRequest {
+        planet_entity,
+        planet_position,
+        planet_size,
+        node_min_corner: node.min,
+        node_size: node.size,
+    });
+}
+
+fn mesh_request_key(request: &PlanetMeshRequest) -> NodeKey {
+    NodeKey {
+        x: request.node_min_corner.x as i32,
+        y: request.node_min_corner.y as i32,
+        z: request.node_min_corner.z as i32,
+        size: request.node_size as i32,
+    }
+}
+
 pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Commands) {
     let world = &mut ctx.world;
 
@@ -122,10 +308,15 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
             let roll_right = input_map.pressed(&input, Action::RollRight);
             let interact = input_map.just_pressed(&input, Action::Interact);
             let open_menu = input_map.just_pressed(&input, Action::OpenMenu);
-            let left_mouse_just_pressed = input.mouse_just_pressed.contains(&MouseButton::Left);
+            let left_mouse_pressed = input.mouse_pressed.contains(&MouseButton::Left);
             let right_mouse_pressed = input.mouse_pressed.contains(&MouseButton::Right);
+            let mouse_position = input.mouse_position;
             let mouse_delta = input.mouse_delta;
             let scroll = input.scroll;
+            let viewport_size = ctx.globals.renderer.renderer_api.get_surface_size();
+            let heightmap = world
+                .get_resource::<Arc<EarthHeightmap>>()
+                .map(|heightmap| Arc::clone(&*heightmap));
 
             drop(input_map);
             drop(input);
@@ -144,6 +335,9 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
             let right = camera.camera.right();
             let up = camera.camera.up();
             let camera_position = camera.camera.position;
+            let camera_aspect = camera.camera.aspect;
+            let camera_near_plane = camera.camera.znear;
+            let camera_far_plane = camera.camera.zfar;
             drop(camera);
 
             {
@@ -164,6 +358,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                         (camera_component.speed * factor).clamp(0.001, 1_000_000.0);
                 }
 
+                let camera_field_of_view = camera_component.fov;
                 let mut final_speed = camera_component.speed;
                 drop(camera_component);
 
@@ -225,6 +420,210 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                         cgmath::Rad(roll_amount * 0.02),
                     );
                     camera_transform.rotation = (camera_transform.rotation * roll).normalize();
+                }
+
+                // Deform with left click
+                if left_mouse_pressed {
+                    if let Some((mouse_position_x, mouse_position_y)) = mouse_position {
+                        let current_camera = engine::camera::Camera {
+                            position: cgmath::point3(
+                                camera_transform.position.x,
+                                camera_transform.position.y,
+                                camera_transform.position.z,
+                            ),
+                            orientation: camera_transform.rotation,
+                            aspect: camera_aspect,
+                            fovy: camera_field_of_view,
+                            znear: camera_near_plane,
+                            zfar: camera_far_plane,
+                        };
+
+                        if let Some((ray_origin, ray_direction)) = ray_from_mouse_position(
+                            &current_camera,
+                            mouse_position_x,
+                            mouse_position_y,
+                            viewport_size.x as f32,
+                            viewport_size.y as f32,
+                        ) {
+                            let mut closest_hit = None;
+                            let mut query = Query::<(&Planet, &PlanetTerrainEdits)>::new(&world);
+
+                            query.for_each(|entity, (planet, terrain_edits)| {
+                                let Some((planet_entry_distance, planet_exit_distance)) =
+                                    octree::ray_intersects(
+                                        &planet.octree_root,
+                                        ray_origin,
+                                        ray_direction,
+                                    )
+                                else {
+                                    return;
+                                };
+
+                                let planet_size = (planet.octree_root.size * 2.0) as u32;
+                                let Some((surface_distance, surface_position)) =
+                                    trace_terrain_surface(
+                                        ray_origin,
+                                        ray_direction,
+                                        planet_entry_distance,
+                                        planet_exit_distance,
+                                        planet.position,
+                                        planet_size,
+                                        heightmap.as_deref(),
+                                        terrain_edits,
+                                    )
+                                else {
+                                    return;
+                                };
+
+                                if closest_hit.clone().is_none_or(|(_, hit_distance, _)| {
+                                    surface_distance < hit_distance
+                                }) {
+                                    closest_hit =
+                                        Some((entity, surface_distance, surface_position));
+                                }
+                            });
+
+                            drop(query);
+
+                            if let Some((hit_entity, _hit_distance, hit_pos)) = closest_hit {
+                                let hit_planet = world.get::<Planet>(hit_entity).unwrap();
+
+                                let hit_world = hit_pos.to_vec();
+                                let hit_local = hit_world - hit_planet.position;
+
+                                let brick_size = 32.0;
+                                let level = 0;
+                                let brush_radius = 10.0;
+                                let brush_strength = 32.0;
+                                let brush_bounds_min =
+                                    hit_world - vec3(brush_radius, brush_radius, brush_radius);
+                                let brush_bounds_max =
+                                    hit_world + vec3(brush_radius, brush_radius, brush_radius);
+                                let planet_size = (hit_planet.octree_root.size * 2.0) as u32;
+                                let mut dirty_mesh_requests = Vec::new();
+                                collect_dirty_mesh_requests(
+                                    &hit_planet.octree_root,
+                                    hit_entity,
+                                    hit_planet.position,
+                                    planet_size,
+                                    brush_bounds_min,
+                                    brush_bounds_max,
+                                    &mut dirty_mesh_requests,
+                                );
+                                let min_brick = TerrainBrickKey {
+                                    x: ((hit_local.x - brush_radius) / brick_size).floor() as i32,
+                                    y: ((hit_local.y - brush_radius) / brick_size).floor() as i32,
+                                    z: ((hit_local.z - brush_radius) / brick_size).floor() as i32,
+                                    level,
+                                };
+                                let max_brick = TerrainBrickKey {
+                                    x: ((hit_local.x + brush_radius) / brick_size).floor() as i32,
+                                    y: ((hit_local.y + brush_radius) / brick_size).floor() as i32,
+                                    z: ((hit_local.z + brush_radius) / brick_size).floor() as i32,
+                                    level,
+                                };
+
+                                if world.get::<PlanetTerrainEdits>(hit_entity).is_none() {
+                                    println!("Planet terrain edits not found!");
+                                    return;
+                                }
+
+                                let resolution = 16usize;
+                                let modified_chunks = &mut world
+                                    .get_mut::<PlanetTerrainEdits>(hit_entity)
+                                    .unwrap()
+                                    .modified_chunks;
+
+                                for brick_x in min_brick.x..=max_brick.x {
+                                    for brick_y in min_brick.y..=max_brick.y {
+                                        for brick_z in min_brick.z..=max_brick.z {
+                                            let key = TerrainBrickKey {
+                                                x: brick_x,
+                                                y: brick_y,
+                                                z: brick_z,
+                                                level,
+                                            };
+                                            let brick = modified_chunks
+                                                .entry(key.clone())
+                                                .or_insert_with(|| {
+                                                    vec![
+                                                        vec![vec![0.0; resolution]; resolution];
+                                                        resolution
+                                                    ]
+                                                });
+
+                                            let brick_min = vec3(
+                                                key.x as f32 * brick_size,
+                                                key.y as f32 * brick_size,
+                                                key.z as f32 * brick_size,
+                                            );
+                                            let sample_spacing = brick_size / resolution as f32;
+
+                                            for sample_x in 0..resolution {
+                                                for sample_y in 0..resolution {
+                                                    for sample_z in 0..resolution {
+                                                        let sample_position = brick_min
+                                                            + vec3(
+                                                                (sample_x as f32 + 0.5)
+                                                                    * sample_spacing,
+                                                                (sample_y as f32 + 0.5)
+                                                                    * sample_spacing,
+                                                                (sample_z as f32 + 0.5)
+                                                                    * sample_spacing,
+                                                            );
+                                                        let distance_from_hit = (sample_position
+                                                            - hit_local)
+                                                            .magnitude();
+
+                                                        if distance_from_hit > brush_radius {
+                                                            continue;
+                                                        }
+
+                                                        let normalized_distance =
+                                                            distance_from_hit / brush_radius;
+                                                        let brush_influence =
+                                                            1.0 - normalized_distance;
+                                                        let smooth_influence = brush_influence
+                                                            * brush_influence
+                                                            * (3.0 - 2.0 * brush_influence);
+
+                                                        brick[sample_x][sample_y][sample_z] +=
+                                                            brush_strength * smooth_influence;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                println!(
+                                    "terrain edit ray origin: {:?}, direction: {:?}, Hit Pos: {:?}",
+                                    ray_origin, ray_direction, hit_pos
+                                );
+
+                                commands.push(move |ctx| {
+                                    for request in dirty_mesh_requests {
+                                        let key = mesh_request_key(&request);
+
+                                        if let Some(mut mesh_jobs) =
+                                            ctx.world.get_resource_mut::<MeshJobResults>()
+                                        {
+                                            mesh_jobs.wanted.remove(&key);
+                                            mesh_jobs.in_flight.remove(&key);
+                                        }
+
+                                        if let Some(mut game_state) =
+                                            ctx.world.get_resource_mut::<GameState>()
+                                        {
+                                            game_state.planets_meshes.remove(&key);
+                                        }
+
+                                        submit_requested_mesh(ctx, request);
+                                    }
+                                });
+                            }
+                        }
+                    }
                 }
 
                 // Interact (spawn spheres for now)

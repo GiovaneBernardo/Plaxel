@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Vector3, point3, vec3};
 use engine::{
@@ -8,7 +11,7 @@ use engine::{
 };
 use game_types::{
     octree::{NodeKey, OctreeChanges, PlanetMeshRequest},
-    planet::{Planet, PlanetVertex},
+    planet::{Planet, PlanetTerrainEdits, PlanetVertex},
 };
 use rand::Rng;
 use web_time::{Duration, Instant};
@@ -26,10 +29,12 @@ pub struct MeshJobResults {
     pub receiver: Receiver<GeneratedMesh>,
     pub wanted: HashSet<NodeKey>,
     pub in_flight: HashSet<NodeKey>,
+    pub versions: HashMap<NodeKey, u64>,
 }
 
 pub struct GeneratedMesh {
     pub key: NodeKey,
+    pub version: u64,
     pub vertices: Vec<PlanetVertex>,
     pub indices: Vec<u32>,
 }
@@ -37,7 +42,7 @@ pub struct GeneratedMesh {
 const MESH_UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
 const PLANET_COUNT: usize = 128;
-const PLANET_RADIUS_MULTIPLIER: f32 = 1000.0; //0.1;
+const PLANET_RADIUS_MULTIPLIER: f32 = 1.0; //0.1;
 const PLANET_SPAWN_RANGE: f32 = 1_000_000.0 * PLANET_RADIUS_MULTIPLIER;
 const MAX_PLANET_SPAWN_ATTEMPTS: usize = 256;
 
@@ -121,6 +126,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         receiver: mesh_rx,
         wanted: HashSet::new(),
         in_flight: HashSet::new(),
+        versions: HashMap::new(),
     });
 
     for i in 0..PLANET_COUNT {
@@ -145,12 +151,17 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
             },
         );
 
+        let terrain_edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+        };
+
         let octree = Planet::create_octree(
             planet_position,
             planet_size as u32 / 2,
             &point3(camera_pos.x, camera_pos.y, camera_pos.z),
             planet_size as u32,
             chunk_size,
+            &terrain_edits,
         );
 
         let planet = Planet {
@@ -164,6 +175,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
 
         for leaf in leaf_nodes {
             mesh_requests.push(PlanetMeshRequest {
+                planet_entity: new_planet,
                 planet_position: planet.position,
                 planet_size: planet_size as u32,
                 node_min_corner: leaf.min,
@@ -172,6 +184,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         }
 
         world.insert(new_planet, planet);
+        world.insert(new_planet, terrain_edits);
     }
 
     for request in mesh_requests {
@@ -199,16 +212,18 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
 
     let mut changes = Vec::new();
     {
-        let mut query = Query::<(&mut Planet,)>::new(&mut ctx.world);
-        query.for_each(|_, (planet,)| {
+        let mut query = Query::<(&mut Planet, &PlanetTerrainEdits)>::new(&mut ctx.world);
+        query.for_each(|entity, (planet, terrain_edits)| {
             let planet_size = (planet.octree_root.size * 2.0) as u32;
             octree::update(
                 &mut planet.octree_root,
                 camera_pos,
+                entity,
                 planet.position,
                 planet_size,
                 &mut changes,
                 heightmap.as_deref(),
+                terrain_edits,
             );
         });
     }
@@ -222,7 +237,9 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
 
 pub fn build_requested_mesh(
     request: PlanetMeshRequest,
+    version: u64,
     heightmap: Option<Arc<EarthHeightmap>>,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> GeneratedMesh {
     let planet_position = request.planet_position;
     let size = request.node_size;
@@ -242,6 +259,7 @@ pub fn build_requested_mesh(
         planet_position,
         request.planet_size,
         heightmap.as_deref(),
+        terrain_edits,
     );
     let (vertices, indices) = Planet::dual_contour_grid(
         &grid,
@@ -250,6 +268,7 @@ pub fn build_requested_mesh(
         planet_position,
         request.planet_size,
         heightmap.as_deref(),
+        terrain_edits,
     );
 
     GeneratedMesh {
@@ -259,12 +278,13 @@ pub fn build_requested_mesh(
             z: min_corner.z as i32,
             size: size as i32,
         },
+        version,
         vertices,
         indices,
     }
 }
 
-fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
+pub(crate) fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
     let key = NodeKey {
         x: request.node_min_corner.x as i32,
         y: request.node_min_corner.y as i32,
@@ -272,7 +292,7 @@ fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
         size: request.node_size as i32,
     };
 
-    let sender = {
+    let (sender, version) = {
         let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
             return;
         };
@@ -281,16 +301,25 @@ fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
         if !mesh_jobs.in_flight.insert(key) {
             return;
         }
+        let version = mesh_jobs.versions.entry(key).or_insert(0);
+        *version += 1;
+        let version = *version;
 
-        mesh_jobs.sender.clone()
+        (mesh_jobs.sender.clone(), version)
     };
     let heightmap = ctx
         .world
         .get_resource::<Arc<EarthHeightmap>>()
         .map(|heightmap| Arc::clone(&heightmap));
 
+    let terrain_edits = ctx
+        .world
+        .get::<PlanetTerrainEdits>(request.planet_entity)
+        .unwrap()
+        .clone();
+
     let _ = ctx.globals.job_system.spawn(move || {
-        let mesh = build_requested_mesh(request, heightmap);
+        let mesh = build_requested_mesh(request, version, heightmap, &terrain_edits);
         let _ = sender.send(mesh);
     });
 }
@@ -321,6 +350,10 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
 
             mesh_jobs.in_flight.remove(&mesh.key);
             mesh_jobs.wanted.contains(&mesh.key)
+                && mesh_jobs
+                    .versions
+                    .get(&mesh.key)
+                    .is_some_and(|version| *version == mesh.version)
         };
 
         if !still_wanted || mesh.vertices.is_empty() {
@@ -364,6 +397,7 @@ pub fn generate_grid_from_min(
     planet_position: Vector3<f32>,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> Vec<Vec<Vec<f32>>> {
     let mut grid = Vec::new();
     for xi in 0..nx {
@@ -381,6 +415,7 @@ pub fn generate_grid_from_min(
                     planet_position,
                     planet_size,
                     heightmap,
+                    terrain_edits,
                 ));
             }
             plane.push(row);

@@ -1,11 +1,14 @@
 use cgmath::{InnerSpace, Vector3, vec3};
+use game_types::planet::{PlanetTerrainEdits, TerrainBrickKey};
 
 const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
 const EARTH_HIGHEST_ALTITUDE_METERS: f32 = 8_848.86;
-const EARTH_HEIGHT_EXAGGERATION: f32 = 1.0; //32.0;
+const EARTH_HEIGHT_EXAGGERATION: f32 = 16.0; //32.0;
 const EARTH_BROAD_DETAIL_SCALE: f32 = 0.18;
 const EARTH_RIDGE_DETAIL_SCALE: f32 = 0.12;
 const EARTH_FINE_DETAIL_SCALE: f32 = 0.035;
+const TERRAIN_EDIT_BRICK_SIZE: f32 = 32.0;
+const TERRAIN_EDIT_LEVEL: u32 = 0;
 
 pub struct EarthHeightmap {
     pub width: u32,
@@ -164,8 +167,76 @@ pub fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
     value
 }
 
-pub fn sdf(p: cgmath::Vector3<f32>, planet_size: u32) -> f32 {
-    sdf_at_center(p, vec3(0.0, 0.0, 0.0), planet_size, None)
+pub fn sample_terrain_edit(local_p: Vector3<f32>, terrain_edits: &PlanetTerrainEdits) -> f32 {
+    let key = TerrainBrickKey {
+        x: (local_p.x / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        y: (local_p.y / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        z: (local_p.z / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        level: TERRAIN_EDIT_LEVEL,
+    };
+
+    let Some(brick) = terrain_edits.modified_chunks.get(&key) else {
+        return 0.0;
+    };
+
+    let resolution = brick.len();
+    if resolution == 0 {
+        return 0.0;
+    }
+
+    let brick_min = vec3(
+        key.x as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        key.y as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        key.z as f32 * TERRAIN_EDIT_BRICK_SIZE,
+    );
+    let uvw = (local_p - brick_min) / TERRAIN_EDIT_BRICK_SIZE;
+    let max_index = resolution.saturating_sub(1);
+    if max_index == 0 {
+        return brick[0]
+            .get(0)
+            .and_then(|plane| plane.get(0))
+            .copied()
+            .unwrap_or(0.0);
+    }
+
+    let sample_axis = |v: f32| {
+        let coord = v.clamp(0.0, 1.0) * max_index as f32;
+        let i0 = coord.floor() as usize;
+        let i1 = (i0 + 1).min(max_index);
+        let t = coord - i0 as f32;
+        (i0, i1, t)
+    };
+
+    let (x0, x1, tx) = sample_axis(uvw.x);
+    let (y0, y1, ty) = sample_axis(uvw.y);
+    let (z0, z1, tz) = sample_axis(uvw.z);
+
+    let sample = |x: usize, y: usize, z: usize| {
+        brick
+            .get(x)
+            .and_then(|plane| plane.get(y))
+            .and_then(|row| row.get(z))
+            .copied()
+            .unwrap_or(0.0)
+    };
+
+    let c000 = sample(x0, y0, z0);
+    let c100 = sample(x1, y0, z0);
+    let c010 = sample(x0, y1, z0);
+    let c110 = sample(x1, y1, z0);
+    let c001 = sample(x0, y0, z1);
+    let c101 = sample(x1, y0, z1);
+    let c011 = sample(x0, y1, z1);
+    let c111 = sample(x1, y1, z1);
+
+    let c00 = lerp(c000, c100, tx);
+    let c10 = lerp(c010, c110, tx);
+    let c01 = lerp(c001, c101, tx);
+    let c11 = lerp(c011, c111, tx);
+    let c0 = lerp(c00, c10, ty);
+    let c1 = lerp(c01, c11, ty);
+
+    lerp(c0, c1, tz)
 }
 
 pub fn sdf_at_center(
@@ -173,6 +244,7 @@ pub fn sdf_at_center(
     planet_center: cgmath::Vector3<f32>,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> f32 {
     let planet_r = planet_radius(planet_size);
     let local_p = p - planet_center;
@@ -187,7 +259,7 @@ pub fn sdf_at_center(
         .and_then(|heightmap| heightmap.sample_height(dir, planet_r))
         .unwrap_or_else(|| spherical_terrain_height(dir, planet_r));
     let terrain = dist_from_center - (planet_r + height);
-    return terrain;
+    return terrain + sample_terrain_edit(local_p, terrain_edits);
 
     // let depth_below_surface = -terrain;
     // let fade_zone = planet_r * 0.1;

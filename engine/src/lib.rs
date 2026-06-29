@@ -242,6 +242,12 @@ impl State {
         input.mouse_delta.1 += dy as f32;
     }
 
+    fn handle_cursor_moved(&mut self, x: f64, y: f64) {
+        let world = self.active_scene_mut().unwrap().world_mut();
+        let mut input = world.get_resource_mut::<InputState>().unwrap();
+        input.mouse_position = Some((x as f32, y as f32));
+    }
+
     fn extract_positions(mesh: &MeshAsset) -> Result<Vec<Point3<f32>>, String> {
         let stride = mesh.vertex_layout.stride as usize;
 
@@ -434,7 +440,7 @@ impl State {
                     TransformComponent {
                         position: Vector3::new(0.0, 0.0, 0.0),
                         rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                        scale: Vector3::new(0.01, 0.01, 0.01),
+                        scale: Vector3::new(1.0, 1.0, 1.0),
                         velocity: Vector3 {
                             x: 0.0,
                             y: 0.0,
@@ -1160,9 +1166,10 @@ impl ApplicationHandler<State> for App {
                 }
             }
             WindowEvent::CursorMoved {
-                position: winit::dpi::PhysicalPosition { x: _, y: _ },
+                position: winit::dpi::PhysicalPosition { x, y },
                 ..
             } => {
+                state.handle_cursor_moved(x, y);
                 // state.camera_controller.handle_mouse(x, y);
             }
             WindowEvent::MouseInput {

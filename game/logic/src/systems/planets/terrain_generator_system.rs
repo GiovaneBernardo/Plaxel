@@ -7,7 +7,7 @@ use engine::{
 };
 use game_types::{
     octree::OctreeNode,
-    planet::{Planet, PlanetMesh, PlanetVertex},
+    planet::{Planet, PlanetMesh, PlanetTerrainEdits, PlanetVertex},
 };
 
 use crate::{
@@ -17,15 +17,6 @@ use crate::{
 };
 
 pub trait PlanetExt {
-    #[allow(dead_code)]
-    fn load_meshes(
-        &mut self,
-        state: &mut engine::State,
-        solid_material: &Material,
-        line_material: &Material,
-        planet_size: u32,
-        chunk_size: u32,
-    );
     fn dual_contour_grid(
         grid: &Vec<Vec<Vec<f32>>>,
         offset: Point3<f32>,
@@ -33,6 +24,7 @@ pub trait PlanetExt {
         planet_position: Vector3<f32>,
         planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
+        terrain_edits: &PlanetTerrainEdits,
     ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(
         planet_position: cgmath::Vector3<f32>,
@@ -40,6 +32,7 @@ pub trait PlanetExt {
         camera_position: &cgmath::Point3<f32>,
         planet_size: u32,
         chunk_size: u32,
+        terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode;
     fn collect_leaf_nodes(
         node: &OctreeNode,
@@ -49,98 +42,6 @@ pub trait PlanetExt {
 }
 
 impl PlanetExt for Planet {
-    fn load_meshes(
-        &mut self,
-        state: &mut engine::State,
-        solid_material: &Material,
-        line_material: &Material,
-        planet_size: u32,
-        chunk_size: u32,
-    ) {
-        let _debug_pass_node: &mut DebugPassNode = state
-            .global_resources
-            .renderer
-            .render_graph
-            .get_node_mut::<DebugPassNode>(2)
-            .unwrap();
-
-        let mut octree_nodes = Vec::new();
-        Planet::collect_leaf_nodes(&self.octree_root, 0, &mut octree_nodes);
-        println!("Leaf nodes: {}", octree_nodes.len());
-
-        let mut meshes_count = 0;
-
-        for (center, node_size, _node_depth) in &octree_nodes {
-            let resolution = node_size / chunk_size as f32;
-            let min_corner = Point3::new(
-                center.x - node_size * 0.5,
-                center.y - node_size * 0.5,
-                center.z - node_size * 0.5,
-            );
-            let (positions, indices) = Planet::dual_contour_grid(
-                &generate_grid_from_min(
-                    34,
-                    34,
-                    34,
-                    resolution,
-                    min_corner.to_vec(),
-                    self.position,
-                    planet_size,
-                    None,
-                ),
-                min_corner,
-                resolution,
-                self.position,
-                planet_size,
-                None,
-            );
-
-            let mesh = PlanetMesh { positions, indices };
-
-            if mesh.positions.len() > 0 {
-                meshes_count += 1;
-                println!("Added meshes: {}", meshes_count);
-                let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.positions).to_vec();
-                let solid_render_data = state
-                    .global_resources
-                    .renderer
-                    .renderer_api
-                    .create_render_data(
-                        &vertex_bytes,
-                        &mesh.indices,
-                        solid_material.clone(),
-                        &PipelineHandle(0),
-                    );
-
-                let _line_render_data = state
-                    .global_resources
-                    .renderer
-                    .renderer_api
-                    .create_render_data(
-                        &vertex_bytes,
-                        &mesh.indices,
-                        line_material.clone(),
-                        &PipelineHandle(0),
-                    );
-
-                if let Some(node) = state
-                    .global_resources
-                    .renderer
-                    .render_graph
-                    .nodes
-                    .first_mut()
-                    .unwrap()
-                    .1
-                    .as_any_mut()
-                    .downcast_mut::<GeometryPassNode>()
-                {
-                    node.add_render_data(solid_render_data);
-                }
-            }
-        }
-        println!("Added meshes: {}", meshes_count);
-    }
-
     fn dual_contour_grid(
         grid: &Vec<Vec<Vec<f32>>>,
         offset: Point3<f32>,
@@ -148,6 +49,7 @@ impl PlanetExt for Planet {
         planet_position: Vector3<f32>,
         planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
+        terrain_edits: &PlanetTerrainEdits,
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -249,33 +151,39 @@ impl PlanetExt for Planet {
                             planet_position,
                             planet_size,
                             heightmap,
+                            terrain_edits,
                         ) - sdf::sdf_at_center(
                             p - vec3(eps, 0.0, 0.0),
                             planet_position,
                             planet_size,
                             heightmap,
+                            terrain_edits,
                         );
                         let dy = sdf::sdf_at_center(
                             p + vec3(0.0, eps, 0.0),
                             planet_position,
                             planet_size,
                             heightmap,
+                            terrain_edits,
                         ) - sdf::sdf_at_center(
                             p - vec3(0.0, eps, 0.0),
                             planet_position,
                             planet_size,
                             heightmap,
+                            terrain_edits,
                         );
                         let dz = sdf::sdf_at_center(
                             p + vec3(0.0, 0.0, eps),
                             planet_position,
                             planet_size,
                             heightmap,
+                            terrain_edits,
                         ) - sdf::sdf_at_center(
                             p - vec3(0.0, 0.0, eps),
                             planet_position,
                             planet_size,
                             heightmap,
+                            terrain_edits,
                         );
 
                         let n = vec3(dx, dy, dz).normalize();
@@ -390,6 +298,7 @@ impl PlanetExt for Planet {
         camera_position: &cgmath::Point3<f32>,
         planet_size: u32,
         chunk_size: u32,
+        terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode {
         let r = planet_radius as f32 / 2.0;
         octree::build_node(
@@ -405,6 +314,7 @@ impl PlanetExt for Planet {
             planet_position,
             planet_size,
             None,
+            terrain_edits,
         )
     }
 

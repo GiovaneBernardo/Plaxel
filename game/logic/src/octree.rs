@@ -1,7 +1,12 @@
 use std::sync::atomic::AtomicU32;
 
-use cgmath::{InnerSpace, Point3, Vector3, vec3};
-use game_types::octree::{NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest};
+use cgmath::{InnerSpace, Point3, Vector3, point3, vec3};
+use engine::ecs::entity::Entity;
+use game_types::{
+    octree::{NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest},
+    planet::PlanetTerrainEdits,
+    terrain,
+};
 
 use crate::{
     NodeKey,
@@ -58,8 +63,16 @@ pub fn build_node(
     planet_center: Vector3<f32>,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> OctreeNode {
-    let has_surface = has_surface(min, size, planet_center, planet_size, heightmap);
+    let has_surface = has_surface(
+        min,
+        size,
+        planet_center,
+        planet_size,
+        heightmap,
+        terrain_edits,
+    );
     let _is_behind_horizon = is_behind_horizon(
         min + vec3(size * 0.5, size * 0.5, size * 0.5),
         vec3(camera_position.x, camera_position.y, camera_position.z),
@@ -116,6 +129,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(child_size, 0.0, 0.0),
@@ -126,6 +140,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(0.0, child_size, 0.0),
@@ -136,6 +151,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(child_size, child_size, 0.0),
@@ -146,6 +162,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(0.0, 0.0, child_size),
@@ -156,6 +173,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(child_size, 0.0, child_size),
@@ -166,6 +184,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(0.0, child_size, child_size),
@@ -176,6 +195,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
         Box::new(build_node(
             min + vec3(child_size, child_size, child_size),
@@ -186,6 +206,7 @@ pub fn build_node(
             planet_center,
             planet_size,
             heightmap,
+            terrain_edits,
         )),
     ]);
 
@@ -206,6 +227,7 @@ pub fn has_surface(
     planet_center: Vector3<f32>,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> bool {
     let mut has_neg = false;
     let mut has_pos = false;
@@ -213,7 +235,7 @@ pub fn has_surface(
         for dy in [0.0, size] {
             for dz in [0.0, size] {
                 let p = min + vec3(dx, dy, dz);
-                let d = sdf_at_center(p, planet_center, planet_size, heightmap);
+                let d = sdf_at_center(p, planet_center, planet_size, heightmap, terrain_edits);
                 if d < 0.0 {
                     has_neg = true;
                 }
@@ -315,26 +337,44 @@ impl Aabb {
 pub fn update(
     node: &mut OctreeNode,
     camera_pos: Vector3<f32>,
+    planet_entity: Entity,
     planet_position: Vector3<f32>,
     planet_size: u32,
     changes: &mut Vec<OctreeChanges>,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) {
     let min_node_size = 32.0;
     let is_root_node = node.size >= planet_size as f32 * 0.5;
 
     if is_root_node && node.children.is_none() {
-        split_node(node, changes, planet_position, planet_size, heightmap);
+        split_node(
+            node,
+            changes,
+            planet_entity,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+        );
         return;
     }
 
     if should_split(node, camera_pos, min_node_size, planet_size) {
-        split_node(node, changes, planet_position, planet_size, heightmap);
+        split_node(
+            node,
+            changes,
+            planet_entity,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+        );
         return;
     }
 
     if !is_root_node && should_merge(node, camera_pos, min_node_size) {
-        merge_node(node, changes, planet_position, planet_size);
+        merge_node(node, changes, planet_entity, planet_position, planet_size);
         return;
     }
 
@@ -343,10 +383,12 @@ pub fn update(
             update(
                 child,
                 camera_pos,
+                planet_entity,
                 planet_position,
                 planet_size,
                 changes,
                 heightmap,
+                terrain_edits,
             );
         }
     }
@@ -357,6 +399,7 @@ pub fn create_children(
     planet_position: Vector3<f32>,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> [Box<OctreeNode>; 8] {
     let bounds = node_bounds(parent);
     let min = bounds.min;
@@ -364,7 +407,14 @@ pub fn create_children(
     let child_size = parent.size * 0.5;
 
     let make_child = |min: cgmath::Vector3<f32>| {
-        let has_surface = has_surface(min, child_size, planet_position, planet_size, heightmap);
+        let has_surface = has_surface(
+            min,
+            child_size,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+        );
         OctreeNode {
             key: NodeKey {
                 x: min.x as i32,
@@ -462,10 +512,12 @@ pub fn should_merge(
 
 fn mesh_request(
     node: &OctreeNode,
+    planet_entity: Entity,
     planet_position: Vector3<f32>,
     planet_size: u32,
 ) -> PlanetMeshRequest {
     PlanetMeshRequest {
+        planet_entity,
         planet_position,
         planet_size,
         node_min_corner: node.min,
@@ -476,18 +528,20 @@ fn mesh_request(
 fn split_node(
     node: &mut OctreeNode,
     changes: &mut Vec<OctreeChanges>,
+    planet_entity: Entity,
     planet_position: Vector3<f32>,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
 ) {
     changes.push(OctreeChanges::RemoveMesh { key: node.key });
 
-    let children = create_children(node, planet_position, planet_size, heightmap);
+    let children = create_children(node, planet_position, planet_size, heightmap, terrain_edits);
 
     for child in children.iter() {
         if child.has_surface {
             changes.push(OctreeChanges::AddMesh {
-                request: mesh_request(child, planet_position, planet_size),
+                request: mesh_request(child, planet_entity, planet_position, planet_size),
             });
         }
     }
@@ -499,6 +553,7 @@ fn split_node(
 fn merge_node(
     node: &mut OctreeNode,
     changes: &mut Vec<OctreeChanges>,
+    planet_entity: Entity,
     planet_position: Vector3<f32>,
     planet_size: u32,
 ) {
@@ -511,7 +566,104 @@ fn merge_node(
 
     if node.has_surface {
         changes.push(OctreeChanges::AddMesh {
-            request: mesh_request(node, planet_position, planet_size),
+            request: mesh_request(node, planet_entity, planet_position, planet_size),
         });
+    }
+}
+
+pub fn ray_intersects(
+    node: &OctreeNode,
+    ray_origin: Point3<f32>,
+    ray_direction: Vector3<f32>,
+) -> Option<(f32, f32)> {
+    let inv_dir = vec3(
+        1.0 / ray_direction.x,
+        1.0 / ray_direction.y,
+        1.0 / ray_direction.z,
+    );
+    let max = point3(
+        node.min.x + node.size,
+        node.min.y + node.size,
+        node.min.z + node.size,
+    );
+
+    let mut tmin = (node.min.x - ray_origin.x) * inv_dir.x;
+    let mut tmax = (max.x - ray_origin.x) * inv_dir.x;
+    if tmin > tmax {
+        std::mem::swap(&mut tmin, &mut tmax);
+    }
+
+    let mut tymin = (node.min.y - ray_origin.y) * inv_dir.y;
+    let mut tymax = (max.y - ray_origin.y) * inv_dir.y;
+    if tymin > tymax {
+        std::mem::swap(&mut tymin, &mut tymax);
+    }
+
+    if tmin > tymax || tymin > tmax {
+        return None;
+    }
+
+    tmin = tmin.max(tymin);
+    tmax = tmax.min(tymax);
+
+    let mut tzmin = (node.min.z - ray_origin.z) * inv_dir.z;
+    let mut tzmax = (max.z - ray_origin.z) * inv_dir.z;
+    if tzmin > tzmax {
+        std::mem::swap(&mut tzmin, &mut tzmax);
+    }
+
+    if tmin > tzmax || tzmin > tmax {
+        return None;
+    }
+
+    tmin = tmin.max(tzmin);
+    tmax = tmax.min(tzmax);
+
+    if tmax >= 0.0 {
+        Some((tmin.max(0.0), tmax))
+    } else {
+        None
+    }
+}
+
+pub fn traverse_octree(
+    ray_origin: Point3<f32>,
+    ray_direction: Vector3<f32>,
+    node: &OctreeNode,
+    best_t: &mut f32,
+    last_node: &mut Option<OctreeNode>,
+) {
+    *last_node = Some(node.clone());
+    let Some((t_enter, _t_exit)) = ray_intersects(node, ray_origin, ray_direction) else {
+        return;
+    };
+
+    if t_enter > *best_t {
+        return;
+    }
+
+    let Some(children) = node.children.as_ref() else {
+        if node.has_surface {
+            *best_t = t_enter;
+        }
+        return;
+    };
+
+    let mut children: Vec<(&OctreeNode, f32)> = children
+        .iter()
+        .filter_map(|child| {
+            let child = child.as_ref();
+            let (t, _) = ray_intersects(child, ray_origin, ray_direction)?;
+            if t > *best_t {
+                return None;
+            }
+            Some((child, t))
+        })
+        .collect();
+
+    children.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+    for (child, _) in children {
+        traverse_octree(ray_origin, ray_direction, child, best_t, last_node);
     }
 }

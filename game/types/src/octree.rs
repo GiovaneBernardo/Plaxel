@@ -1,4 +1,5 @@
 use cgmath::Vector3;
+use engine::ecs::entity::Entity;
 
 #[derive(Clone)]
 pub enum NodeState {
@@ -17,6 +18,7 @@ pub enum OctreeChanges {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PlanetMeshRequest {
+    pub planet_entity: Entity,
     pub planet_position: Vector3<f32>,
     pub planet_size: u32,
     pub node_min_corner: Vector3<f32>,
