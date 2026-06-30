@@ -308,6 +308,10 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
             let roll_right = input_map.pressed(&input, Action::RollRight);
             let interact = input_map.just_pressed(&input, Action::Interact);
             let open_menu = input_map.just_pressed(&input, Action::OpenMenu);
+            let alt_pressed = input.pressed.contains(&KeyCode::AltLeft)
+                || input.pressed.contains(&KeyCode::AltRight);
+            let inverse_deformation = input.pressed.contains(&KeyCode::ShiftLeft)
+                || input.pressed.contains(&KeyCode::ShiftRight);
             let left_mouse_pressed = input.mouse_pressed.contains(&MouseButton::Left);
             let right_mouse_pressed = input.mouse_pressed.contains(&MouseButton::Right);
             let mouse_position = input.mouse_position;
@@ -340,6 +344,20 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
             let camera_far_plane = camera.camera.zfar;
             drop(camera);
 
+            let brush_radius = {
+                let mut game_state = world.get_resource_mut::<GameState>().unwrap();
+                if alt_pressed && scroll.abs() > f32::EPSILON {
+                    let radius_scale = 1.15f32.powf(scroll);
+                    game_state.terrain_brush_radius =
+                        (game_state.terrain_brush_radius * radius_scale).clamp(2.0, 512.0);
+                    engine::game_info!(
+                        "terrain brush radius: {:.2}",
+                        game_state.terrain_brush_radius
+                    );
+                }
+                game_state.terrain_brush_radius
+            };
+
             {
                 let Some(mut camera_transform) = world.get_mut::<TransformComponent>(camera_entity)
                 else {
@@ -351,7 +369,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                     return;
                 };
 
-                if scroll.abs() > f32::EPSILON {
+                if !alt_pressed && scroll.abs() > f32::EPSILON {
                     let sensitivity: f32 = 0.2;
                     let factor = (1.0f32 + sensitivity).powf(scroll);
                     camera_component.speed =
@@ -493,8 +511,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
 
                                 let brick_size = 32.0;
                                 let level = 0;
-                                let brush_radius = 10.0;
-                                let brush_strength = 32.0;
+                                let brush_strength = if inverse_deformation { -32.0 } else { 32.0 };
                                 let brush_bounds_min =
                                     hit_world - vec3(brush_radius, brush_radius, brush_radius);
                                 let brush_bounds_max =
@@ -524,7 +541,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                                 };
 
                                 if world.get::<PlanetTerrainEdits>(hit_entity).is_none() {
-                                    println!("Planet terrain edits not found!");
+                                    engine::game_warn!("Planet terrain edits not found!");
                                     return;
                                 }
 
@@ -546,11 +563,15 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                                             let brick = modified_chunks
                                                 .entry(key.clone())
                                                 .or_insert_with(|| {
-                                                    vec![
-                                                        vec![vec![0.0; resolution]; resolution];
+                                                    Arc::new(vec![
+                                                        vec![
+                                                            vec![0.0; resolution];
+                                                            resolution
+                                                        ];
                                                         resolution
-                                                    ]
+                                                    ])
                                                 });
+                                            let brick = Arc::make_mut(brick);
 
                                             let brick_min = vec3(
                                                 key.x as f32 * brick_size,
@@ -596,9 +617,11 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                                     }
                                 }
 
-                                println!(
+                                engine::game_info!(
                                     "terrain edit ray origin: {:?}, direction: {:?}, Hit Pos: {:?}",
-                                    ray_origin, ray_direction, hit_pos
+                                    ray_origin,
+                                    ray_direction,
+                                    hit_pos
                                 );
 
                                 commands.push(move |ctx| {
@@ -615,7 +638,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                                         if let Some(mut game_state) =
                                             ctx.world.get_resource_mut::<GameState>()
                                         {
-                                            game_state.planets_meshes.remove(&key);
+                                            //game_state.planets_meshes.remove(&key);
                                         }
 
                                         submit_requested_mesh(ctx, request);
@@ -696,7 +719,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
         }
 
         GameMode::Menu => {
-            println!("Menu");
+            engine::game_info!("Menu");
             let Some(input) = world.get_resource::<InputState>() else {
                 return;
             };
@@ -711,7 +734,7 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
         }
 
         GameMode::Editor => {
-            println!("Editor");
+            engine::game_info!("Editor");
         }
     }
 }
@@ -739,18 +762,20 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
     let mesh_header = match loader::load_header(&mesh_path) {
         Ok(header) => header,
         Err(error) => {
-            println!("Unable to build block: failed to read mesh header {mesh_path:?}: {error}");
+            engine::game_warn!(
+                "Unable to build block: failed to read mesh header {mesh_path:?}: {error}"
+            );
             return None;
         }
     };
     let mesh = match loader::load_payload(&mesh_path) {
         Ok(AssetPayload::Mesh(mesh)) => mesh,
         Ok(_) => {
-            println!("Unable to build block: {mesh_path:?} is not a mesh asset");
+            engine::game_warn!("Unable to build block: {mesh_path:?} is not a mesh asset");
             return None;
         }
         Err(error) => {
-            println!("Unable to build block: failed to load mesh {mesh_path:?}: {error}");
+            engine::game_warn!("Unable to build block: failed to load mesh {mesh_path:?}: {error}");
             return None;
         }
     };
@@ -768,7 +793,7 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
     let material_header = match loader::load_header(&material_path) {
         Ok(header) => header,
         Err(error) => {
-            println!(
+            engine::game_warn!(
                 "Unable to build block: failed to read material header {material_path:?}: {error}"
             );
             return None;
@@ -777,11 +802,13 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
     let mut material = match loader::load_payload(&material_path) {
         Ok(AssetPayload::Material(material)) => material,
         Ok(_) => {
-            println!("Unable to build block: {material_path:?} is not a material asset");
+            engine::game_warn!("Unable to build block: {material_path:?} is not a material asset");
             return None;
         }
         Err(error) => {
-            println!("Unable to build block: failed to load material {material_path:?}: {error}");
+            engine::game_warn!(
+                "Unable to build block: failed to load material {material_path:?}: {error}"
+            );
             return None;
         }
     };
@@ -800,7 +827,9 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
         .get_node_mut::<GeometryPassNode>(0)
         .and_then(|node| node.camera_bind_group_layout)
     else {
-        println!("Unable to build block: geometry camera bind group layout is unavailable");
+        engine::game_warn!(
+            "Unable to build block: geometry camera bind group layout is unavailable"
+        );
         return None;
     };
     let Some(textures_layout) = globals
@@ -809,7 +838,7 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
         .get_labeled::<FrameBindings>("frame_bindings")
         .map(|bindings| bindings.textures_layout)
     else {
-        println!("Unable to build block: frame texture bind group layout is unavailable");
+        engine::game_warn!("Unable to build block: frame texture bind group layout is unavailable");
         return None;
     };
 
@@ -860,13 +889,15 @@ fn upload_material_textures(
 
         let Some(texture_path) = find_sibling_asset_by_uuid(material_path, texture_uuid, "plxtex")
         else {
-            println!(
+            engine::game_warn!(
                 "Unable to build block: material {material_path:?} references missing texture {texture_uuid}"
             );
             continue;
         };
         let Ok(AssetPayload::Texture(texture)) = loader::load_payload(&texture_path) else {
-            println!("Unable to build block: failed to load texture asset {texture_path:?}");
+            engine::game_warn!(
+                "Unable to build block: failed to load texture asset {texture_path:?}"
+            );
             continue;
         };
 

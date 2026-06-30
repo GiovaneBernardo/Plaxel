@@ -73,7 +73,7 @@ impl FrameCapturer {
                     return;
                 };
 
-                println!("Opening capture: {:?}", path);
+                engine_info!("Opening capture: {:?}", path);
                 renderdoc.launch_replay_ui(true, path.to_str()).ok();
             } else if self.capture_poll_frames_remaining > 0 {
                 self.capture_poll_frames_remaining -= 1;

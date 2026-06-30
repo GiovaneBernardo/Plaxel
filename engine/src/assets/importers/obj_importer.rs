@@ -37,8 +37,8 @@ impl AssetImporter for ObjImporter {
 
         let materials = materials.unwrap_or_default();
 
-        println!("Number of models          = {}", models.len());
-        println!("Number of materials       = {}", materials.len());
+        engine_info!("Number of models          = {}", models.len());
+        engine_info!("Number of materials       = {}", materials.len());
 
         let mut imported_assets = Vec::new();
         let material_uuids = materials.iter().map(|_| Uuid::new_v4()).collect::<Vec<_>>();

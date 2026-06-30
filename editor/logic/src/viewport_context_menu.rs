@@ -93,7 +93,7 @@ pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> cgmath::Poi
         );
     }
 
-    println!("Position: {:?}", world_pos);
+    engine::engine_info!("Position: {:?}", world_pos);
     state
         .global_resources
         .renderer

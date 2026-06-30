@@ -40,6 +40,8 @@ pub struct GeneratedMesh {
 }
 
 const MESH_UPLOAD_BUDGET: Duration = Duration::from_millis(2);
+const TERRAIN_EDIT_BRICK_SIZE: f32 = 32.0;
+const TERRAIN_EDIT_LEVEL: u32 = 0;
 
 const PLANET_COUNT: usize = 128;
 const PLANET_RADIUS_MULTIPLIER: f32 = 1.0; //0.1;
@@ -284,6 +286,59 @@ pub fn build_requested_mesh(
     }
 }
 
+fn edits_for_mesh_request(
+    terrain_edits: &PlanetTerrainEdits,
+    request: &PlanetMeshRequest,
+) -> PlanetTerrainEdits {
+    if terrain_edits.modified_chunks.is_empty() {
+        return PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+        };
+    }
+
+    let mesh_sample_spacing = request.node_size / CHUNK_SIZE as f32;
+    let margin = mesh_sample_spacing * 2.0 + TERRAIN_EDIT_BRICK_SIZE;
+    let local_min =
+        request.node_min_corner - request.planet_position - vec3(margin, margin, margin);
+    let local_max = request.node_min_corner - request.planet_position
+        + vec3(request.node_size, request.node_size, request.node_size)
+        + vec3(margin, margin, margin);
+    let mut relevant_chunks = HashMap::new();
+
+    for (key, brick) in &terrain_edits.modified_chunks {
+        if key.level != TERRAIN_EDIT_LEVEL {
+            continue;
+        }
+
+        let brick_min = vec3(
+            key.x as f32 * TERRAIN_EDIT_BRICK_SIZE,
+            key.y as f32 * TERRAIN_EDIT_BRICK_SIZE,
+            key.z as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        );
+        let brick_max = brick_min
+            + vec3(
+                TERRAIN_EDIT_BRICK_SIZE,
+                TERRAIN_EDIT_BRICK_SIZE,
+                TERRAIN_EDIT_BRICK_SIZE,
+            );
+
+        let overlaps = brick_min.x <= local_max.x
+            && brick_max.x >= local_min.x
+            && brick_min.y <= local_max.y
+            && brick_max.y >= local_min.y
+            && brick_min.z <= local_max.z
+            && brick_max.z >= local_min.z;
+
+        if overlaps {
+            relevant_chunks.insert(*key, Arc::clone(brick));
+        }
+    }
+
+    PlanetTerrainEdits {
+        modified_chunks: relevant_chunks,
+    }
+}
+
 pub(crate) fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
     let key = NodeKey {
         x: request.node_min_corner.x as i32,
@@ -312,11 +367,13 @@ pub(crate) fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMesh
         .get_resource::<Arc<EarthHeightmap>>()
         .map(|heightmap| Arc::clone(&heightmap));
 
-    let terrain_edits = ctx
-        .world
-        .get::<PlanetTerrainEdits>(request.planet_entity)
-        .unwrap()
-        .clone();
+    let terrain_edits = {
+        let terrain_edits = ctx
+            .world
+            .get::<PlanetTerrainEdits>(request.planet_entity)
+            .unwrap();
+        edits_for_mesh_request(&terrain_edits, &request)
+    };
 
     let _ = ctx.globals.job_system.spawn(move || {
         let mesh = build_requested_mesh(request, version, heightmap, &terrain_edits);

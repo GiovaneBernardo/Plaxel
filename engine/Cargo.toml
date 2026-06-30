@@ -21,6 +21,7 @@ rand = { workspace = true }
 image = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-log = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }

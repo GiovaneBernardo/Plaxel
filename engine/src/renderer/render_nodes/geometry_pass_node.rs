@@ -241,7 +241,7 @@ impl GeometryPassNode {
         };
 
         let depth = api.read_texture::<f32>(texture, x, y);
-        println!("Depth: {}", depth);
+        engine_info!("Depth: {}", depth);
         let view_proj: cgmath::Matrix4<f32> = camera_data.uniform.view_proj.into();
         let Some(inv_view_proj) = view_proj.invert() else {
             return point3(0.0, 0.0, 0.0);
@@ -258,3 +258,4 @@ impl GeometryPassNode {
         world_pos
     }
 }
+use crate::engine_info;

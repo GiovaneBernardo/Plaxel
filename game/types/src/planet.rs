@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::octree::OctreeNode;
-use cgmath::{Point3, Vector3};
+use cgmath::Vector3;
 use engine::model::*;
 
 pub struct Planet {
@@ -99,10 +99,12 @@ impl PlanetInstance {
 
 #[derive(Clone)]
 pub struct PlanetTerrainEdits {
-    pub modified_chunks: HashMap<TerrainBrickKey, Vec<Vec<Vec<f32>>>>, //TerrainBrickEdits>,
+    pub modified_chunks: HashMap<TerrainBrickKey, Arc<TerrainBrickSamples>>,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+pub type TerrainBrickSamples = Vec<Vec<Vec<f32>>>;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TerrainBrickKey {
     pub x: i32,
     pub y: i32,

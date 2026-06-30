@@ -60,6 +60,7 @@ struct GameState {
     max_depth: u32,
     octree_job_in_flight: bool,
     last_requested_camera_pos: Point3<f32>,
+    terrain_brush_radius: f32,
 }
 
 struct GameCamera {
@@ -274,6 +275,7 @@ pub fn register_systems(state: &mut engine::State) {
         max_depth: 0,
         octree_job_in_flight: false,
         last_requested_camera_pos: initial_camera_pos,
+        terrain_brush_radius: 10.0,
     });
 
     let init_schedule_mut = scene.init_schedule_mut();
@@ -363,8 +365,7 @@ fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Point3
 
     let meters_per_second = camera.velocity_sample_distance / elapsed;
     if meters_per_second > 0.01 {
-        tracing::info!(
-            target: "game",
+        engine::game_info!(
             "editor camera speed: {:.2} m/s ({:.2} km/h), position: ({:.2}, {:.2}, {:.2})",
             meters_per_second,
             meters_per_second * 3.6,
@@ -392,7 +393,7 @@ fn sync_camera_to_renderer(renderer: &mut engine::renderer::Renderer, world: &Wo
 fn load_earth_heightmap_resource(world: &mut World) {
     let path = "res/heightmaps/earth5400x2700.jpg";
     let Ok(image) = image::open(path) else {
-        tracing::warn!("failed to load earth heightmap from {path}");
+        engine::game_warn!("failed to load earth heightmap from {path}");
         return;
     };
 

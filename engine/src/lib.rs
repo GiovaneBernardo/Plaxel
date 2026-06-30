@@ -16,6 +16,7 @@ pub use core::camera;
 pub use core::ecs;
 pub use renderer::model;
 pub use renderer::texture;
+pub use tracing;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -378,7 +379,7 @@ impl State {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("plxmesh"))
         {
             let header = loader::load_header(path).unwrap();
-            println!("Header: {header:?}");
+            engine_info!("Header: {header:?}");
 
             let payload = loader::load_payload(path).unwrap();
 
@@ -388,7 +389,7 @@ impl State {
                     .renderer
                     .renderer_api
                     .upload_mesh(&mesh);
-                println!("Uploaded mesh: {:?}", handle);
+                engine_info!("Uploaded mesh: {:?}", handle);
 
                 let material_uuid = self
                     .load_sibling_material_uuid(path, &mesh)
@@ -1232,14 +1233,7 @@ impl ApplicationHandler<State> for App {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        logging::init();
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        console_log::init_with_level(log::Level::Info).unwrap_throw();
-    }
+    logging::init();
 
     let event_loop = EventLoop::with_user_event().build()?;
     let mut app = App::new(
@@ -1254,7 +1248,6 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
-    console_error_panic_hook::set_once();
     run().unwrap_throw();
 
     Ok(())

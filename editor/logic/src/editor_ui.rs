@@ -19,6 +19,7 @@ use engine::{
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Once,
 };
 
 const EDITOR_LAYOUT_PATH: &str = "editor_layout.ron";
@@ -708,13 +709,93 @@ fn draw_inspector(ui: &mut Ui, state: &mut engine::State, selected_entity: &mut 
 }
 
 fn draw_console(ui: &mut Ui) {
+    static CONSOLE_TAB_CONNECTED: Once = Once::new();
+    CONSOLE_TAB_CONNECTED.call_once(|| {
+        engine::logging::record_console_entry(
+            engine::logging::ConsoleLevel::Info,
+            "editor",
+            "Console tab connected to log buffer",
+        );
+    });
+
+    let entries = engine::logging::console_entries();
+    let error_count = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.level,
+                engine::logging::ConsoleLevel::Error | engine::logging::ConsoleLevel::Panic
+            )
+        })
+        .count();
+    let warn_count = entries
+        .iter()
+        .filter(|entry| matches!(entry.level, engine::logging::ConsoleLevel::Warn))
+        .count();
+
     ui.horizontal(|ui| {
         ui.label(RichText::new("Console").strong());
         ui.separator();
-        ui.label("No log stream wired yet.");
+        ui.label(format!(
+            "{} entries  {} warnings  {} errors",
+            entries.len(),
+            warn_count,
+            error_count
+        ));
+        ui.separator();
+        if ui.button("Clear").clicked() {
+            engine::logging::clear_console_entries();
+        }
     });
     ui.separator();
-    ui.label("Logs will appear here.");
+
+    if entries.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.label("No log entries yet.");
+        });
+        return;
+    }
+
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for entry in entries {
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(format!("#{:04}", entry.sequence));
+                    ui.colored_label(
+                        console_level_color(entry.level),
+                        RichText::new(console_level_label(entry.level)).monospace(),
+                    );
+                    ui.label(RichText::new(entry.target).color(Color32::from_rgb(150, 165, 180)));
+                    ui.label(RichText::new(entry.message).monospace());
+                });
+            }
+        });
+}
+
+fn console_level_label(level: engine::logging::ConsoleLevel) -> &'static str {
+    match level {
+        engine::logging::ConsoleLevel::Trace => "TRACE",
+        engine::logging::ConsoleLevel::Debug => "DEBUG",
+        engine::logging::ConsoleLevel::Info => "INFO ",
+        engine::logging::ConsoleLevel::Warn => "WARN ",
+        engine::logging::ConsoleLevel::Error => "ERROR",
+        engine::logging::ConsoleLevel::Panic => "PANIC",
+    }
+}
+
+fn console_level_color(level: engine::logging::ConsoleLevel) -> Color32 {
+    match level {
+        engine::logging::ConsoleLevel::Trace => Color32::from_rgb(130, 145, 160),
+        engine::logging::ConsoleLevel::Debug => Color32::from_rgb(140, 165, 190),
+        engine::logging::ConsoleLevel::Info => Color32::from_rgb(120, 200, 150),
+        engine::logging::ConsoleLevel::Warn => Color32::from_rgb(230, 185, 90),
+        engine::logging::ConsoleLevel::Error | engine::logging::ConsoleLevel::Panic => {
+            Color32::from_rgb(235, 105, 95)
+        }
+    }
 }
 
 fn draw_asset_browser(ui: &mut Ui, state: &mut engine::State, assets: &mut AssetEditorState) {

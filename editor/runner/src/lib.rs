@@ -1,4 +1,8 @@
 use engine::core::input::KeyCode;
+#[cfg(feature = "dynamic_linking")]
+#[allow(unused_imports)]
+use engine_dylib;
+
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(
     dylib = "game_logic",
@@ -24,13 +28,10 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 pub fn wasm_main() {
-    console_error_panic_hook::set_once();
-    console_log::init_with_level(log::Level::Info).ok();
     run_editor().unwrap();
 }
 
 pub fn run_editor() -> anyhow::Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
     engine::logging::init();
 
     let event_loop = winit::event_loop::EventLoop::with_user_event().build()?;
@@ -65,14 +66,18 @@ pub fn run_editor() -> anyhow::Result<()> {
             #[cfg(feature = "hot-reload")]
             {
                 std::process::Command::new("cargo")
-                    .args(["build", "-p", "game-logic"])
-                    .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
-                    .spawn()
-                    .ok();
-
-                std::process::Command::new("cargo")
-                    .args(["build", "-p", "editor-logic"])
-                    .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+                    .args([
+                        "build",
+                        "-p",
+                        "editor-runner",
+                        "-p",
+                        "game-logic",
+                        "-p",
+                        "editor-logic",
+                        "--features",
+                        "editor-runner/hot-reload",
+                    ])
+                    .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
                     .spawn()
                     .ok();
             }

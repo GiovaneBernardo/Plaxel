@@ -1,3 +1,4 @@
+use crate::engine_info;
 use crate::renderer::texture;
 
 #[cfg(target_arch = "wasm32")]
@@ -28,7 +29,7 @@ pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     #[cfg(not(target_arch = "wasm32"))]
     let txt = {
         let path = resource_path(file_name);
-        eprintln!("Loading: {}", path.display());
+        engine_info!("Loading: {}", path.display());
         std::fs::read_to_string(path)?
     };
 

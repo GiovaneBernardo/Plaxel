@@ -8,7 +8,12 @@ name = "editor-runner-bin"
 path = "src/main.rs"
 
 [features]
-hot-reload = ["dep:hot-lib-reloader"]
+dynamic_linking = [
+    "dep:engine-dylib",
+    "editor-logic/dynamic_linking",
+    "game-logic/dynamic_linking",
+]
+hot-reload = ["dep:hot-lib-reloader", "dynamic_linking"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -16,6 +21,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 game-logic = { path = "../../game/logic" }
 editor-logic = { path = "../logic" }
+engine-dylib = { path = "../../engine_dylib", optional = true }
 anyhow = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
