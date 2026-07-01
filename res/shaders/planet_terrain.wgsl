@@ -122,7 +122,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.4));
     let diffuse = max(dot(normal, light_dir), 0.0);
-    let lighting = 0.35 + 0.65 * diffuse;
+    let lighting = 0.35 + 0.95 * diffuse;
 
     let distance = length(in.world_position - in.camera_position);
     let start = 5000.0;

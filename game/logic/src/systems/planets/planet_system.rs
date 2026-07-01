@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    thread,
 };
 
 use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Vector3, point3, vec3};
@@ -18,28 +19,40 @@ use web_time::{Duration, Instant};
 
 use crate::{
     CHUNK_SIZE, GameCamera, GameState, octree,
-    sdf::{EarthHeightmap, sdf_at_center},
+    sdf::{EarthHeightmap, base_sdf_at_center, sample_terrain_edit, sdf_at_center},
     systems::planets::PlanetExt,
 };
 
 use crossbeam_channel::{Receiver, Sender};
+
+type DensityGrid = Vec<Vec<Vec<f32>>>;
 
 pub struct MeshJobResults {
     pub sender: Sender<GeneratedMesh>,
     pub receiver: Receiver<GeneratedMesh>,
     pub wanted: HashSet<NodeKey>,
     pub in_flight: HashSet<NodeKey>,
+    pub in_flight_counts: HashMap<NodeKey, usize>,
     pub versions: HashMap<NodeKey, u64>,
+    pub pending_requests: HashMap<NodeKey, PendingMeshRequest>,
+    pub base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    pub ready_meshes: Vec<GeneratedMesh>,
 }
 
 pub struct GeneratedMesh {
     pub key: NodeKey,
     pub version: u64,
+    pub urgent: bool,
     pub vertices: Vec<PlanetVertex>,
     pub indices: Vec<u32>,
 }
 
-const MESH_UPLOAD_BUDGET: Duration = Duration::from_millis(2);
+pub struct PendingMeshRequest {
+    pub request: PlanetMeshRequest,
+    pub urgent: bool,
+}
+
+const MESH_UPLOAD_BUDGET: Duration = Duration::from_millis(6);
 const TERRAIN_EDIT_BRICK_SIZE: f32 = 32.0;
 const TERRAIN_EDIT_LEVEL: u32 = 0;
 
@@ -123,12 +136,17 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
     let mut mesh_requests = Vec::new();
 
     let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded();
+    let base_grid_cache = Arc::new(Mutex::new(HashMap::new()));
     world.insert_resource(MeshJobResults {
         sender: mesh_tx,
         receiver: mesh_rx,
         wanted: HashSet::new(),
         in_flight: HashSet::new(),
+        in_flight_counts: HashMap::new(),
         versions: HashMap::new(),
+        pending_requests: HashMap::new(),
+        base_grid_cache,
+        ready_meshes: Vec::new(),
     });
 
     for i in 0..PLANET_COUNT {
@@ -240,8 +258,10 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
 pub fn build_requested_mesh(
     request: PlanetMeshRequest,
     version: u64,
+    urgent: bool,
     heightmap: Option<Arc<EarthHeightmap>>,
     terrain_edits: &PlanetTerrainEdits,
+    base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
 ) -> GeneratedMesh {
     let planet_position = request.planet_position;
     let size = request.node_size;
@@ -252,7 +272,14 @@ pub fn build_requested_mesh(
     );
 
     let resolution = size / CHUNK_SIZE as f32;
-    let grid = generate_grid_from_min(
+    let key = NodeKey {
+        x: min_corner.x as i32,
+        y: min_corner.y as i32,
+        z: min_corner.z as i32,
+        size: size as i32,
+    };
+    let base_grid = get_or_build_base_grid(
+        key,
         34,
         34,
         34,
@@ -261,10 +288,23 @@ pub fn build_requested_mesh(
         planet_position,
         request.planet_size,
         heightmap.as_deref(),
-        terrain_edits,
+        &base_grid_cache,
     );
+    let grid;
+    let grid_ref = if terrain_edits.modified_chunks.is_empty() {
+        base_grid.as_ref()
+    } else {
+        grid = generate_grid_from_base(
+            base_grid.as_ref(),
+            resolution,
+            min_corner.to_vec(),
+            planet_position,
+            terrain_edits,
+        );
+        &grid
+    };
     let (vertices, indices) = Planet::dual_contour_grid(
-        &grid,
+        grid_ref,
         min_corner,
         resolution,
         planet_position,
@@ -274,13 +314,9 @@ pub fn build_requested_mesh(
     );
 
     GeneratedMesh {
-        key: NodeKey {
-            x: min_corner.x as i32,
-            y: min_corner.y as i32,
-            z: min_corner.z as i32,
-            size: size as i32,
-        },
+        key,
         version,
+        urgent,
         vertices,
         indices,
     }
@@ -339,29 +375,73 @@ fn edits_for_mesh_request(
     }
 }
 
-pub(crate) fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
-    let key = NodeKey {
+fn mesh_request_key(request: &PlanetMeshRequest) -> NodeKey {
+    NodeKey {
         x: request.node_min_corner.x as i32,
         y: request.node_min_corner.y as i32,
         z: request.node_min_corner.z as i32,
         size: request.node_size as i32,
-    };
+    }
+}
 
-    let (sender, version) = {
+pub(crate) fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMeshRequest) {
+    submit_requested_mesh_internal(ctx, request, false);
+}
+
+pub(crate) fn submit_requested_mesh_urgent(ctx: &mut SystemContext, request: PlanetMeshRequest) {
+    submit_requested_mesh_internal(ctx, request, true);
+}
+
+fn submit_requested_mesh_internal(
+    ctx: &mut SystemContext,
+    request: PlanetMeshRequest,
+    urgent: bool,
+) {
+    let key = mesh_request_key(&request);
+
+    let (sender, version, base_grid_cache) = {
         let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
             return;
         };
 
         mesh_jobs.wanted.insert(key);
-        if !mesh_jobs.in_flight.insert(key) {
-            return;
-        }
         let version = mesh_jobs.versions.entry(key).or_insert(0);
         *version += 1;
         let version = *version;
 
-        (mesh_jobs.sender.clone(), version)
+        if mesh_jobs.in_flight.contains(&key) && !urgent {
+            mesh_jobs
+                .pending_requests
+                .entry(key)
+                .and_modify(|pending| {
+                    pending.request = request;
+                    pending.urgent |= urgent;
+                })
+                .or_insert(PendingMeshRequest { request, urgent });
+            return;
+        }
+
+        mesh_jobs.in_flight.insert(key);
+        *mesh_jobs.in_flight_counts.entry(key).or_insert(0) += 1;
+
+        (
+            mesh_jobs.sender.clone(),
+            version,
+            Arc::clone(&mesh_jobs.base_grid_cache),
+        )
     };
+
+    start_mesh_job(ctx, sender, request, version, urgent, base_grid_cache);
+}
+
+fn start_mesh_job(
+    ctx: &mut SystemContext,
+    sender: Sender<GeneratedMesh>,
+    request: PlanetMeshRequest,
+    version: u64,
+    urgent: bool,
+    base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+) {
     let heightmap = ctx
         .world
         .get_resource::<Arc<EarthHeightmap>>()
@@ -375,20 +455,29 @@ pub(crate) fn submit_requested_mesh(ctx: &mut SystemContext, request: PlanetMesh
         edits_for_mesh_request(&terrain_edits, &request)
     };
 
-    let _ = ctx.globals.job_system.spawn(move || {
-        let mesh = build_requested_mesh(request, version, heightmap, &terrain_edits);
+    let job = move || {
+        let mesh = build_requested_mesh(
+            request,
+            version,
+            urgent,
+            heightmap,
+            &terrain_edits,
+            base_grid_cache,
+        );
         let _ = sender.send(mesh);
-    });
+    };
+
+    if urgent {
+        let _ = thread::Builder::new()
+            .name("urgent-terrain-mesh".to_string())
+            .spawn(job);
+    } else {
+        let _ = ctx.globals.job_system.spawn(job);
+    }
 }
 
 pub fn drain_generated_meshes(ctx: &mut SystemContext) {
-    let start = Instant::now();
-
     loop {
-        if start.elapsed() >= MESH_UPLOAD_BUDGET {
-            break;
-        }
-
         let mesh = {
             let Some(mesh_jobs) = ctx.world.get_resource::<MeshJobResults>() else {
                 return;
@@ -400,23 +489,87 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             }
         };
 
-        let still_wanted = {
+        let (still_wanted, next_request) = {
             let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
                 return;
             };
 
-            mesh_jobs.in_flight.remove(&mesh.key);
-            mesh_jobs.wanted.contains(&mesh.key)
+            let remaining_in_flight =
+                if let Some(count) = mesh_jobs.in_flight_counts.get_mut(&mesh.key) {
+                    *count = count.saturating_sub(1);
+                    *count
+                } else {
+                    0
+                };
+            if remaining_in_flight == 0 {
+                mesh_jobs.in_flight_counts.remove(&mesh.key);
+                mesh_jobs.in_flight.remove(&mesh.key);
+            }
+
+            let still_wanted = mesh_jobs.wanted.contains(&mesh.key)
                 && mesh_jobs
                     .versions
                     .get(&mesh.key)
-                    .is_some_and(|version| *version == mesh.version)
+                    .is_some_and(|version| *version == mesh.version);
+
+            let next_request = if remaining_in_flight == 0 {
+                mesh_jobs
+                    .pending_requests
+                    .remove(&mesh.key)
+                    .and_then(|pending| {
+                        if !mesh_jobs.wanted.contains(&mesh.key) {
+                            return None;
+                        }
+
+                        mesh_jobs.in_flight.insert(mesh.key);
+                        *mesh_jobs.in_flight_counts.entry(mesh.key).or_insert(0) += 1;
+                        let version = *mesh_jobs.versions.get(&mesh.key)?;
+                        Some((
+                            mesh_jobs.sender.clone(),
+                            pending.request,
+                            version,
+                            pending.urgent,
+                            Arc::clone(&mesh_jobs.base_grid_cache),
+                        ))
+                    })
+            } else {
+                None
+            };
+
+            (still_wanted, next_request)
         };
 
-        if !still_wanted || mesh.vertices.is_empty() {
-            continue;
+        if let Some((sender, request, version, urgent, base_grid_cache)) = next_request {
+            start_mesh_job(ctx, sender, request, version, urgent, base_grid_cache);
         }
 
+        if still_wanted && !mesh.vertices.is_empty() {
+            let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
+                return;
+            };
+            mesh_jobs.ready_meshes.push(mesh);
+        }
+    }
+
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() >= MESH_UPLOAD_BUDGET {
+            break;
+        }
+
+        let mesh = {
+            let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
+                return;
+            };
+
+            if mesh_jobs.ready_meshes.is_empty() {
+                break;
+            }
+
+            mesh_jobs.ready_meshes.sort_by_key(|mesh| !mesh.urgent);
+            mesh_jobs.ready_meshes.remove(0)
+        };
         let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
         let render_data = ctx.globals.renderer.renderer_api.create_render_data(
@@ -437,6 +590,7 @@ pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
         OctreeChanges::RemoveMesh { key } => {
             if let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() {
                 mesh_jobs.wanted.remove(key);
+                mesh_jobs.pending_requests.remove(key);
             }
 
             let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
@@ -479,5 +633,119 @@ pub fn generate_grid_from_min(
         }
         grid.push(plane);
     }
+    grid
+}
+
+fn get_or_build_base_grid(
+    key: NodeKey,
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    resolution: f32,
+    min: Vector3<f32>,
+    planet_position: Vector3<f32>,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    base_grid_cache: &Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+) -> Arc<DensityGrid> {
+    if let Some(grid) = base_grid_cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return grid;
+    }
+
+    let grid = Arc::new(generate_base_grid_from_min(
+        nx,
+        ny,
+        nz,
+        resolution,
+        min,
+        planet_position,
+        planet_size,
+        heightmap,
+    ));
+
+    if let Ok(mut cache) = base_grid_cache.lock() {
+        cache
+            .entry(key)
+            .or_insert_with(|| Arc::clone(&grid))
+            .clone()
+    } else {
+        grid
+    }
+}
+
+fn generate_base_grid_from_min(
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    resolution: f32,
+    min: Vector3<f32>,
+    planet_position: Vector3<f32>,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+) -> DensityGrid {
+    let mut grid = Vec::with_capacity(nx as usize);
+    for xi in 0..nx {
+        let mut plane = Vec::with_capacity(ny as usize);
+        for yi in 0..ny {
+            let mut row = Vec::with_capacity(nz as usize);
+            for zi in 0..nz {
+                let position = vec3(
+                    min.x + xi as f32 * resolution,
+                    min.y + yi as f32 * resolution,
+                    min.z + zi as f32 * resolution,
+                );
+                row.push(base_sdf_at_center(
+                    position,
+                    planet_position,
+                    planet_size,
+                    heightmap,
+                ));
+            }
+            plane.push(row);
+        }
+        grid.push(plane);
+    }
+    grid
+}
+
+fn generate_grid_from_base(
+    base_grid: &DensityGrid,
+    resolution: f32,
+    min: Vector3<f32>,
+    planet_position: Vector3<f32>,
+    terrain_edits: &PlanetTerrainEdits,
+) -> DensityGrid {
+    let nx = base_grid.len();
+    let ny = base_grid.first().map_or(0, Vec::len);
+    let nz = base_grid
+        .first()
+        .and_then(|plane| plane.first())
+        .map_or(0, Vec::len);
+    let mut grid = Vec::with_capacity(nx);
+
+    for xi in 0..nx {
+        let mut plane = Vec::with_capacity(ny);
+        for yi in 0..ny {
+            let mut row = Vec::with_capacity(nz);
+            for zi in 0..nz {
+                let position = vec3(
+                    min.x + xi as f32 * resolution,
+                    min.y + yi as f32 * resolution,
+                    min.z + zi as f32 * resolution,
+                );
+                row.push(
+                    base_grid[xi][yi][zi]
+                        + sample_terrain_edit(position - planet_position, terrain_edits),
+                );
+            }
+            plane.push(row);
+        }
+        grid.push(plane);
+    }
+
     grid
 }

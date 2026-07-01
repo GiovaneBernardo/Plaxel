@@ -14,7 +14,7 @@ use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
 use game_types::assembly::Assembly;
-use game_types::octree::{NodeKey, OctreeNode, PlanetMeshRequest};
+use game_types::octree::{OctreeNode, PlanetMeshRequest};
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use rand::Rng;
 
@@ -28,7 +28,7 @@ use game_types::game_mode::{GameMode, GameModeState};
 use crate::{
     GameCamera, GameState, octree,
     sdf::{EarthHeightmap, sdf_at_center},
-    systems::planets::{MeshJobResults, submit_requested_mesh},
+    systems::planets::submit_requested_mesh_urgent,
 };
 
 #[allow(dead_code)]
@@ -270,15 +270,6 @@ fn collect_dirty_mesh_requests(
         node_min_corner: node.min,
         node_size: node.size,
     });
-}
-
-fn mesh_request_key(request: &PlanetMeshRequest) -> NodeKey {
-    NodeKey {
-        x: request.node_min_corner.x as i32,
-        y: request.node_min_corner.y as i32,
-        z: request.node_min_corner.z as i32,
-        size: request.node_size as i32,
-    }
 }
 
 pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Commands) {
@@ -624,24 +615,19 @@ pub fn player_interaction_system(ctx: &mut SystemContext, commands: &mut Command
                                     hit_pos
                                 );
 
+                                dirty_mesh_requests.sort_by(|a, b| {
+                                    let a_center = a.node_min_corner
+                                        + vec3(a.node_size, a.node_size, a.node_size) * 0.5;
+                                    let b_center = b.node_min_corner
+                                        + vec3(b.node_size, b.node_size, b.node_size) * 0.5;
+                                    (a_center - hit_world)
+                                        .magnitude2()
+                                        .total_cmp(&(b_center - hit_world).magnitude2())
+                                });
+
                                 commands.push(move |ctx| {
                                     for request in dirty_mesh_requests {
-                                        let key = mesh_request_key(&request);
-
-                                        if let Some(mut mesh_jobs) =
-                                            ctx.world.get_resource_mut::<MeshJobResults>()
-                                        {
-                                            mesh_jobs.wanted.remove(&key);
-                                            mesh_jobs.in_flight.remove(&key);
-                                        }
-
-                                        if let Some(mut game_state) =
-                                            ctx.world.get_resource_mut::<GameState>()
-                                        {
-                                            //game_state.planets_meshes.remove(&key);
-                                        }
-
-                                        submit_requested_mesh(ctx, request);
+                                        submit_requested_mesh_urgent(ctx, request);
                                     }
                                 });
                             }

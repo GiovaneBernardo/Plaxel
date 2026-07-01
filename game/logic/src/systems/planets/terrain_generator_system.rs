@@ -1,20 +1,10 @@
-use std::sync::atomic::Ordering;
-
 use cgmath::{EuclideanSpace, InnerSpace, Point3, Vector3, vec3};
-use engine::{
-    assets::material::Material,
-    renderer::{DebugPassNode, GeometryPassNode, PipelineHandle},
-};
 use game_types::{
     octree::OctreeNode,
-    planet::{Planet, PlanetMesh, PlanetTerrainEdits, PlanetVertex},
+    planet::{Planet, PlanetTerrainEdits, PlanetVertex},
 };
 
-use crate::{
-    octree,
-    sdf::{self, EarthHeightmap},
-    systems::planets::generate_grid_from_min,
-};
+use crate::{octree, sdf::EarthHeightmap};
 
 pub trait PlanetExt {
     fn dual_contour_grid(
@@ -47,9 +37,9 @@ impl PlanetExt for Planet {
         offset: Point3<f32>,
         resolution: f32,
         planet_position: Vector3<f32>,
-        planet_size: u32,
+        _planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
-        terrain_edits: &PlanetTerrainEdits,
+        _terrain_edits: &PlanetTerrainEdits,
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -144,53 +134,16 @@ impl PlanetExt for Planet {
                     let index = vertices.len() as u32;
                     let avg_pos: Point3<f32> = Point3::from_vec(avg);
 
-                    let normal_at = |p: Vector3<f32>| -> [f32; 3] {
-                        let eps = resolution * 0.5;
-                        let dx = sdf::sdf_at_center(
-                            p + vec3(eps, 0.0, 0.0),
-                            planet_position,
-                            planet_size,
-                            heightmap,
-                            terrain_edits,
-                        ) - sdf::sdf_at_center(
-                            p - vec3(eps, 0.0, 0.0),
-                            planet_position,
-                            planet_size,
-                            heightmap,
-                            terrain_edits,
-                        );
-                        let dy = sdf::sdf_at_center(
-                            p + vec3(0.0, eps, 0.0),
-                            planet_position,
-                            planet_size,
-                            heightmap,
-                            terrain_edits,
-                        ) - sdf::sdf_at_center(
-                            p - vec3(0.0, eps, 0.0),
-                            planet_position,
-                            planet_size,
-                            heightmap,
-                            terrain_edits,
-                        );
-                        let dz = sdf::sdf_at_center(
-                            p + vec3(0.0, 0.0, eps),
-                            planet_position,
-                            planet_size,
-                            heightmap,
-                            terrain_edits,
-                        ) - sdf::sdf_at_center(
-                            p - vec3(0.0, 0.0, eps),
-                            planet_position,
-                            planet_size,
-                            heightmap,
-                            terrain_edits,
-                        );
-
-                        let n = vec3(dx, dy, dz).normalize();
-                        [n.x, n.y, n.z]
+                    let dx = grid[(x + 1).min(size_x - 1)][y][z] - grid[x.saturating_sub(1)][y][z];
+                    let dy = grid[x][(y + 1).min(size_y - 1)][z] - grid[x][y.saturating_sub(1)][z];
+                    let dz = grid[x][y][(z + 1).min(size_z - 1)] - grid[x][y][z.saturating_sub(1)];
+                    let n = vec3(dx, dy, dz);
+                    let n = if n.magnitude2() > 1e-12 {
+                        n.normalize()
+                    } else {
+                        (avg_pos.to_vec() - planet_position).normalize()
                     };
-
-                    let avg_norm = normal_at(Vector3::new(avg_pos.x, avg_pos.y, avg_pos.z));
+                    let avg_norm = [n.x, n.y, n.z];
                     let avg_vec = avg_pos.to_vec() - planet_position;
                     let up = if avg_vec.magnitude2() > 1e-6 {
                         avg_vec.normalize()

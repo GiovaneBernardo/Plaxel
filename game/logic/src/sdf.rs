@@ -246,6 +246,17 @@ pub fn sdf_at_center(
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> f32 {
+    let local_p = p - planet_center;
+    base_sdf_at_center(p, planet_center, planet_size, heightmap)
+        + sample_terrain_edit(local_p, terrain_edits)
+}
+
+pub fn base_sdf_at_center(
+    p: cgmath::Vector3<f32>,
+    planet_center: cgmath::Vector3<f32>,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+) -> f32 {
     let planet_r = planet_radius(planet_size);
     let local_p = p - planet_center;
     let dist_from_center = local_p.magnitude();
@@ -259,7 +270,7 @@ pub fn sdf_at_center(
         .and_then(|heightmap| heightmap.sample_height(dir, planet_r))
         .unwrap_or_else(|| spherical_terrain_height(dir, planet_r));
     let terrain = dist_from_center - (planet_r + height);
-    return terrain + sample_terrain_edit(local_p, terrain_edits);
+    return terrain;
 
     // let depth_below_surface = -terrain;
     // let fade_zone = planet_r * 0.1;
