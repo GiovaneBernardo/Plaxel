@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 dynamic_linking = ["dep:engine-dylib"]
+puffin-ui = ["dep:puffin_egui", "engine/puffin", "engine-dylib?/puffin"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -14,6 +15,7 @@ engine = { path = "../../engine" }
 engine-dylib = { path = "../../engine_dylib", optional = true }
 game-logic = { path = "../../game/logic" }
 anyhow = { workspace = true }
+log = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
 egui = { workspace = true }
@@ -24,6 +26,7 @@ eframe = { workspace = true }
 rfd = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
+puffin_egui = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.33.3"

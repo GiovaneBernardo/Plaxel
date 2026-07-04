@@ -7,6 +7,7 @@ use crate::{
     core::input::InputState,
     frame_capturer::{self, FrameCapturer},
     multithreading::job_system::JobSystem,
+    profiling::ProfileSnapshot,
     renderer::{self, Renderer},
 };
 
@@ -16,6 +17,8 @@ pub struct GlobalResources {
     pub frame_capturer: FrameCapturer,
     pub input: InputState,
     pub job_system: JobSystem,
+    pub profiling_enabled: bool,
+    pub profiler_snapshot: ProfileSnapshot,
 }
 
 impl GlobalResources {
@@ -30,6 +33,8 @@ impl GlobalResources {
             input: InputState::new(),
             renderer,
             job_system: JobSystem::new(worker_count),
+            profiling_enabled: true,
+            profiler_snapshot: ProfileSnapshot::default(),
         }
     }
 }

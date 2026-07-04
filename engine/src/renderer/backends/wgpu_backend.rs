@@ -616,6 +616,7 @@ impl RendererAPI for WgpuBackend {
         render_graph: &mut RenderGraph,
         render_resources: &mut RenderResources,
     ) -> anyhow::Result<()> {
+        crate::profile_scope!("wgpu.render");
         //match state.render(&mut self.on_render) {
         //    Ok(_) => {}
         //    // Reconfigure the surface if it's lost or outdated
@@ -660,6 +661,8 @@ impl RendererAPI for WgpuBackend {
             if disabled_nodes.contains(index) {
                 continue;
             }
+            let _profile_scope =
+                crate::profiling::Scope::new_owned(format!("render_node.run.{index}"));
             self.render_node(
                 node.as_mut(),
                 &render_graph.resources,
@@ -670,6 +673,7 @@ impl RendererAPI for WgpuBackend {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        crate::profile_counter!("render.nodes", render_graph.nodes.len() as f64);
         output.present();
         Ok(())
     }
@@ -1667,6 +1671,7 @@ impl WgpuBackend {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
+        crate::profile_scope!("wgpu.render_node");
         let render_node_descriptor = node.describe_pass();
         let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
             Vec::with_capacity(render_node_descriptor.color_attachments.len());

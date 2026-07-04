@@ -33,6 +33,8 @@ pub fn wasm_main() {
 
 pub fn run_editor() -> anyhow::Result<()> {
     engine::logging::init();
+    engine::profiling::init(true);
+    log::info!("Editor profiling initialized");
 
     let event_loop = winit::event_loop::EventLoop::with_user_event().build()?;
     let mut app = engine::App::new(

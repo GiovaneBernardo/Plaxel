@@ -9,3 +9,9 @@ crate-type = ["dylib"]
 
 [dependencies]
 engine = { path = "../engine" }
+
+[features]
+profiling = ["engine/profiling"]
+puffin = ["engine/puffin"]
+tracy = ["engine/tracy"]
+renderdoc = ["engine/renderdoc"]

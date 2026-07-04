@@ -52,7 +52,22 @@ fn main() {
         }
         let src = entry.path();
         let dest = target_profile_dir.join(&*name_str);
-        std::fs::copy(&src, &dest).expect("copy std artifact");
+        if let Err(error) = std::fs::copy(&src, &dest) {
+            let src_len = std::fs::metadata(&src).map(|metadata| metadata.len()).ok();
+            let dest_len = std::fs::metadata(&dest).map(|metadata| metadata.len()).ok();
+            if src_len.is_some() && src_len == dest_len {
+                println!(
+                    "cargo:warning=keeping existing locked std artifact {}: {error}",
+                    dest.display()
+                );
+            } else {
+                panic!(
+                    "copy std artifact {} -> {}: {error}",
+                    src.display(),
+                    dest.display()
+                );
+            }
+        }
         println!("cargo:rerun-if-changed={}", src.display());
     }
 }

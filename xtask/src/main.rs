@@ -19,7 +19,8 @@ fn main() {
 }
 
 fn play(renderdoc: bool) {
-    let mut features = String::from("game-runner/hot-reload");
+    let mut features =
+        String::from("game-runner/hot-reload,game-runner/profiling,game-runner/tracy");
     if renderdoc {
         features.push_str(",game-runner/renderdoc");
     }
@@ -39,7 +40,8 @@ fn play(renderdoc: bool) {
 }
 
 fn editor() {
-    let features = String::from("editor-runner/hot-reload");
+    let features =
+        String::from("editor-runner/hot-reload,editor-runner/profiling,editor-runner/tracy");
     //features.push_str(",editor-runner/renderdoc");
 
     run(&[
@@ -78,6 +80,9 @@ pub fn wasm() -> std::io::Result<()> {
             "--out-dir",
             "../../pkg",
             "--dev",
+            "--no-default-features",
+            "--features",
+            "profiling",
         ])
         .status()?;
 

@@ -54,6 +54,8 @@ impl Physics {
     }
 
     pub fn step(&mut self) {
+        crate::profile_counter!("physics.bodies", self.rigid_body_set.len() as f64);
+        crate::profile_counter!("physics.colliders", self.collider_set.len() as f64);
         self.physics_pipeline.step(
             &self.gravity,
             &self.integration_parameters,

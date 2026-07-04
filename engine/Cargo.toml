@@ -22,6 +22,8 @@ image = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-log = { workspace = true }
+tracy-client = { workspace = true, optional = true }
+puffin = { workspace = true, optional = true }
 ron = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
@@ -52,3 +54,12 @@ glob = "0.3"
 
 [features]
 renderdoc = []
+profiling = []
+tracy = [
+    "profiling",
+    "dep:tracy-client",
+    "tracy-client/enable",
+    "tracy-client/ondemand",
+    "tracy-client/only-localhost",
+]
+puffin = ["profiling", "dep:puffin"]

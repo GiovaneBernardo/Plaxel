@@ -46,6 +46,7 @@ pub struct EditorUi {
     floating_hierarchy: bool,
     floating_inspector: bool,
     selected_render_node: Option<i8>,
+    show_puffin_profiler: bool,
     style_applied: bool,
     last_layout_text: Option<String>,
     last_layout_save_time: f64,
@@ -77,6 +78,7 @@ impl EditorUi {
                 floating_hierarchy: layout.floating_hierarchy,
                 floating_inspector: layout.floating_inspector,
                 selected_render_node: None,
+                show_puffin_profiler: false,
                 style_applied: false,
                 last_layout_text,
                 last_layout_save_time: 0.0,
@@ -115,6 +117,7 @@ impl EditorUi {
             floating_hierarchy: true,
             floating_inspector: true,
             selected_render_node: None,
+            show_puffin_profiler: false,
             style_applied: false,
             last_layout_text: None,
             last_layout_save_time: 0.0,
@@ -145,6 +148,7 @@ impl EditorUi {
                     state,
                     selected_entity: &mut self.selected_entity,
                     selected_render_node: &mut self.selected_render_node,
+                    show_puffin_profiler: &mut self.show_puffin_profiler,
                     assets: &mut self.assets,
                 };
                 let style = Style::from_egui(ui.style().as_ref());
@@ -544,6 +548,7 @@ struct EditorTabViewer<'a> {
     state: &'a mut engine::State,
     selected_entity: &'a mut Option<Entity>,
     selected_render_node: &'a mut Option<i8>,
+    show_puffin_profiler: &'a mut bool,
     assets: &'a mut AssetEditorState,
 }
 
@@ -563,7 +568,7 @@ impl TabViewer for EditorTabViewer<'_> {
             EditorTab::Assets => draw_asset_browser(ui, self.state, self.assets),
             EditorTab::Textures => draw_texture_explorer(ui, self.state, self.assets),
             EditorTab::RenderGraph => draw_render_graph(ui, self.state, self.selected_render_node),
-            EditorTab::Profiler => draw_profiler(ui, self.state),
+            EditorTab::Profiler => draw_profiler(ui, self.state, self.show_puffin_profiler),
             EditorTab::Timeline => draw_timeline(ui),
             EditorTab::Physics => draw_physics(ui),
         }
@@ -1251,9 +1256,56 @@ fn comma_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
     }
 }
 
-fn draw_profiler(ui: &mut Ui, state: &engine::State) {
+fn draw_profiler(ui: &mut Ui, state: &mut engine::State, show_puffin_profiler: &mut bool) {
+    let snapshot = state.global_resources.profiler_snapshot.clone();
+
     ui.horizontal(|ui| {
         ui.label(RichText::new("Profiler").strong());
+        ui.separator();
+        if state.global_resources.profiling_enabled {
+            if ui.button("Pause").clicked() {
+                state.global_resources.profiling_enabled = false;
+            }
+        } else if ui.button("Record").clicked() {
+            state.global_resources.profiling_enabled = true;
+        }
+        if ui.button("Capture GPU Frame").clicked() {
+            state.global_resources.frame_capturer.request_capture();
+        }
+        #[cfg(feature = "puffin-ui")]
+        {
+            let label = if *show_puffin_profiler {
+                "Hide Puffin"
+            } else {
+                "Show Puffin"
+            };
+            if ui.button(label).clicked() {
+                *show_puffin_profiler = !*show_puffin_profiler;
+            }
+        }
+        ui.separator();
+        ui.label(if state.global_resources.profiling_enabled {
+            "recording"
+        } else {
+            "paused"
+        });
+        ui.separator();
+        ui.label(format!(
+            "Tracy {}",
+            if snapshot.tracy_enabled {
+                "compiled"
+            } else {
+                "off"
+            }
+        ));
+        ui.label(format!(
+            "Puffin {}",
+            if snapshot.puffin_enabled {
+                "compiled"
+            } else {
+                "off"
+            }
+        ));
         ui.separator();
         if let Some(scene) = state.active_scene() {
             ui.label(format!(
@@ -1263,7 +1315,134 @@ fn draw_profiler(ui: &mut Ui, state: &engine::State) {
         }
     });
     ui.separator();
-    ui.label("Frame, render, physics, and job timings can be added here.");
+
+    #[cfg(feature = "puffin-ui")]
+    if *show_puffin_profiler {
+        puffin_egui::profiler_window(ui.ctx());
+    }
+
+    if snapshot.frames.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.label("No profiler frames recorded yet.");
+        });
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        metric_pill(
+            ui,
+            "Latest",
+            snapshot
+                .latest_frame
+                .as_ref()
+                .map(|frame| ms_text(frame.total_us))
+                .unwrap_or_else(|| "0.00 ms".to_string()),
+        );
+        metric_pill(ui, "Average", ms_text(snapshot.average_frame_us));
+        metric_pill(ui, "Max", ms_text(snapshot.max_frame_us));
+        metric_pill(ui, "Frames", snapshot.frames.len().to_string());
+    });
+
+    ui.add_space(8.0);
+    draw_frame_time_graph(ui, &snapshot.frames);
+    ui.add_space(8.0);
+
+    ui.columns(2, |columns| {
+        columns[0].vertical(|ui| {
+            ui.label(RichText::new("Scopes").strong());
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("profiler_scope_grid")
+                        .num_columns(4)
+                        .spacing(egui::vec2(12.0, 4.0))
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Name").strong());
+                            ui.label(RichText::new("Calls").strong());
+                            ui.label(RichText::new("Total").strong());
+                            ui.label(RichText::new("Max").strong());
+                            ui.end_row();
+
+                            for scope in snapshot.latest_scopes.iter().take(48) {
+                                ui.label(scope.name.as_str());
+                                ui.label(scope.calls.to_string());
+                                ui.label(ms_text(scope.total_us));
+                                ui.label(ms_text(scope.max_us));
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+
+        columns[1].vertical(|ui| {
+            ui.label(RichText::new("Counters").strong());
+            ui.separator();
+            if let Some(frame) = &snapshot.latest_frame {
+                egui::Grid::new("profiler_counter_grid")
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 4.0))
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Name").strong());
+                        ui.label(RichText::new("Value").strong());
+                        ui.end_row();
+                        for counter in &frame.counters {
+                            ui.label(counter.name.as_str());
+                            ui.label(format!("{:.0}", counter.value));
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+    });
+}
+
+fn metric_pill(ui: &mut Ui, label: &str, value: String) {
+    ui.group(|ui| {
+        ui.set_min_width(112.0);
+        ui.label(RichText::new(label).color(Color32::from_rgb(165, 176, 188)));
+        ui.label(RichText::new(value).strong());
+    });
+}
+
+fn draw_frame_time_graph(ui: &mut Ui, frames: &[engine::profiling::FrameSample]) {
+    let desired_size = egui::vec2(ui.available_width(), 96.0);
+    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 21, 25));
+
+    let max_us = frames
+        .iter()
+        .map(|frame| frame.total_us)
+        .fold(16_666.0_f64, f64::max);
+    let bar_width = (rect.width() / frames.len().max(1) as f32).max(1.0);
+
+    for (index, frame) in frames.iter().enumerate() {
+        let height = ((frame.total_us / max_us) as f32 * rect.height()).clamp(1.0, rect.height());
+        let x0 = rect.left() + index as f32 * bar_width;
+        let x1 = (x0 + bar_width - 1.0).min(rect.right());
+        let y0 = rect.bottom() - height;
+        let color = if frame.total_us > 33_333.0 {
+            Color32::from_rgb(230, 105, 95)
+        } else if frame.total_us > 16_666.0 {
+            Color32::from_rgb(230, 185, 90)
+        } else {
+            Color32::from_rgb(96, 190, 135)
+        };
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, rect.bottom())),
+            0.0,
+            color,
+        );
+    }
+}
+
+fn ms_text(us: f64) -> String {
+    format!("{:.2} ms", us / 1000.0)
 }
 
 fn draw_timeline(ui: &mut Ui) {

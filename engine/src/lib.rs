@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub mod assets;
 pub mod core;
@@ -6,6 +10,7 @@ pub mod frame_capturer;
 pub mod global_resources;
 pub mod logging;
 pub mod multithreading;
+pub mod profiling;
 pub mod renderer;
 
 use cgmath::Point3;
@@ -863,6 +868,7 @@ impl State {
     }
 
     fn update(&mut self) {
+        crate::profile_scope!("engine.update");
         if let Some(scene_index) = self.active_scene_index.map(|i| i as usize) {
             if let Some(scene) = self.scenes.get_mut(scene_index) {
                 scene.update(&mut self.global_resources);
@@ -873,6 +879,7 @@ impl State {
         let Some(mut physics) = world.get_resource_mut::<Physics>() else {
             return;
         };
+        crate::profile_scope!("physics.step");
         physics.step();
         //self.camera_controller.update_camera(&mut self.camera);
         //self.camera_uniform.update_view_proj(&self.camera);
@@ -882,11 +889,13 @@ impl State {
     }
 
     fn update_after_render(&mut self) {
+        crate::profile_scope!("engine.update_after_render");
         let world = self.active_scene_mut().unwrap().world_mut();
         Self::clear_input_system(world);
     }
 
     fn sync_render_queues(&mut self) {
+        crate::profile_scope!("renderer.sync_render_queues");
         let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
             return;
         };
@@ -952,6 +961,9 @@ pub struct App {
     on_mouse_button: Option<Box<dyn FnMut(&mut State, MouseButton, bool)>>,
     on_mouse_motion: Option<Box<dyn FnMut(&mut State, f64, f64)>>,
     on_mouse_scroll: Option<Box<dyn FnMut(&mut State, MouseScrollDelta)>>,
+    should_pause_frame: Option<Box<dyn FnMut(&mut State) -> bool>>,
+    paused_redraw_at: Option<Instant>,
+    pending_resize: Option<winit::dpi::PhysicalSize<u32>>,
     on_render: Option<
         Box<dyn FnMut(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, &mut wgpu::CommandEncoder)>,
     >,
@@ -970,6 +982,9 @@ impl App {
             on_mouse_button: None,
             on_mouse_motion: None,
             on_mouse_scroll: None,
+            should_pause_frame: None,
+            paused_redraw_at: None,
+            pending_resize: None,
             on_render: None,
             #[cfg(target_arch = "wasm32")]
             proxy,
@@ -1014,6 +1029,11 @@ impl App {
         f: impl FnMut(&mut State, MouseScrollDelta) + 'static,
     ) -> Self {
         self.on_mouse_scroll = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_should_pause_frame(mut self, f: impl FnMut(&mut State) -> bool + 'static) -> Self {
+        self.should_pause_frame = Some(Box::new(f));
         self
     }
 
@@ -1098,6 +1118,23 @@ impl ApplicationHandler<State> for App {
         self.state = Some(event);
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(state) = &self.state else {
+            return;
+        };
+
+        if let Some(redraw_at) = self.paused_redraw_at {
+            if Instant::now() < redraw_at {
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
+                return;
+            }
+
+            self.paused_redraw_at = None;
+        }
+
+        state.window.request_redraw();
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1116,28 +1153,72 @@ impl ApplicationHandler<State> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                if self
+                    .should_pause_frame
+                    .as_mut()
+                    .is_some_and(|should_pause| should_pause(state))
+                {
+                    self.pending_resize = Some(size);
+                    return;
+                }
+
                 state.resize(size.width, size.height);
                 if let Some(f) = &mut self.on_resize {
                     f(state, size.width, size.height);
                 }
             }
             WindowEvent::RedrawRequested => {
+                if self
+                    .should_pause_frame
+                    .as_mut()
+                    .is_some_and(|should_pause| should_pause(state))
+                {
+                    let redraw_at = Instant::now() + Duration::from_millis(16);
+                    self.paused_redraw_at = Some(redraw_at);
+                    event_loop
+                        .set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
+                    state.events.clear();
+                    state.update_after_render();
+                    return;
+                }
+
+                self.paused_redraw_at = None;
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
+                if let Some(size) = self.pending_resize.take() {
+                    state.resize(size.width, size.height);
+                    if let Some(f) = &mut self.on_resize {
+                        f(state, size.width, size.height);
+                    }
+                }
+
+                crate::profiling::sync_enabled(state.global_resources.profiling_enabled);
+                let frame_index = state.frame_index as u64;
+                crate::profiling::begin_frame(frame_index);
                 if !state.registered_systems {
+                    crate::profile_scope!("engine.register_systems");
                     if let Some(f) = &mut self.on_register_system {
                         f(state);
                     }
                     state.init_active_scene();
                     state.registered_systems = true;
                 }
-                state.window.request_redraw();
-                state.update();
-                state.global_resources.renderer.clear_geometry_render_data();
+                {
+                    crate::profile_scope!("frame.update");
+                    state.update();
+                }
+                {
+                    crate::profile_scope!("renderer.clear_geometry_render_data");
+                    state.global_resources.renderer.clear_geometry_render_data();
+                }
                 if let Some(f) = &mut self.on_update {
+                    crate::profile_scope!("app.update");
                     f(state);
                 }
                 state.sync_render_queues();
                 state.events.clear();
                 let state = self.state.as_mut().unwrap();
+                crate::profile_counter!("frame.index", state.frame_index as f64);
                 match state.global_resources.renderer.render() {
                     Ok(_) => {
                         state
@@ -1151,6 +1232,9 @@ impl ApplicationHandler<State> for App {
                 }
 
                 state.update_after_render();
+                crate::profiling::end_frame();
+                state.global_resources.profiler_snapshot = crate::profiling::snapshot();
+                state.frame_index = state.frame_index.wrapping_add(1);
             }
             WindowEvent::KeyboardInput {
                 event:

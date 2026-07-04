@@ -699,16 +699,20 @@ impl Renderer {
     }
 
     pub fn prepare(&mut self) {
+        crate::profile_scope!("renderer.prepare");
         let disabled_nodes = self.render_graph.disabled_nodes.clone();
         for (index, node) in &mut self.render_graph.nodes {
             if disabled_nodes.contains(index) {
                 continue;
             }
+            let _profile_scope =
+                crate::profiling::Scope::new_owned(format!("render_node.prepare.{index}"));
             node.prepare(&mut self.render_resources, self.renderer_api.as_mut());
         }
     }
 
     pub fn render(&mut self) -> anyhow::Result<()> {
+        crate::profile_scope!("renderer.render");
         self.prepare();
         self.renderer_api
             .render(&mut self.render_graph, &mut self.render_resources)
@@ -1273,6 +1277,7 @@ impl GeometryRenderQueue {
 }
 
 pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands) {
+    crate::profile_scope!("renderer.get_render_data_system");
     let world = &mut ctx.world;
     let asset_manager = &ctx.globals.asset_manager;
     let mut transforms = Vec::new();

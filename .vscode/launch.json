@@ -15,7 +15,7 @@
                 }
             ],
             "stopAtEntry": false,
-            "preLaunchTask": "cargo build"
+            "preLaunchTask": "cargo build-editor"
         },
         {
             "name": "Debug Game (MSVC)",

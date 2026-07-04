@@ -15,6 +15,9 @@ pub const EGUI_NODE_INDEX: i8 = 10;
 
 #[unsafe(no_mangle)]
 pub fn register_editor(state: &mut engine::State) {
+    engine::profiling::init(true);
+    log::info!("Editor logic profiling initialized");
+
     if let Some(scene) = state.active_scene_mut() {
         scene
             .world_mut()

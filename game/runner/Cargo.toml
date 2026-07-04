@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["profiling", "tracy"]
 dynamic_linking = ["dep:engine-dylib", "game-logic/dynamic_linking"]
 hot-reload = ["dep:hot-lib-reloader", "dynamic_linking"]
 renderdoc = ["engine/renderdoc"]
+profiling = [
+    "engine/profiling",
+    "engine/puffin",
+    "engine-dylib?/profiling",
+    "engine-dylib?/puffin",
+]
+tracy = ["engine/tracy", "engine-dylib?/tracy"]
 
 [dependencies]
 engine = { path = "../../engine" }
@@ -16,3 +24,4 @@ game-types = { path = "../types" }
 hot-lib-reloader = { workspace = true, optional = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
+log = { workspace = true }

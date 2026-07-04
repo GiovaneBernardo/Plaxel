@@ -1,5 +1,6 @@
+use engine::MouseButton;
 use engine::core::components::core::{CameraComponent, TransformComponent};
-use engine::core::input::KeyCode;
+use engine::core::input::{InputState, KeyCode};
 use engine::ecs::entity::Entity;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
@@ -314,6 +315,7 @@ pub fn update(state: &mut engine::State) {
 
 fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
     let world = &mut ctx.world;
+    let camera_input = camera_input_from_world(world);
     let Some(mut camera) = world.get_resource_mut::<GameCamera>() else {
         return;
     };
@@ -327,6 +329,7 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
         &mut camera.controller,
         engine::camera::CameraController::new(0.2),
     );
+    apply_camera_input(&mut controller, camera_input);
     controller.update_camera(&mut camera.camera);
     camera.camera.position = cgmath::point3::<f32>(
         camera_transform.position.x,
@@ -348,6 +351,67 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
     };
 
     camera.uniform.update_view_proj(&camera_copy);
+}
+
+#[derive(Clone, Copy, Default)]
+struct CameraInput {
+    forward: bool,
+    backward: bool,
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    shift: bool,
+    roll_left: bool,
+    roll_right: bool,
+    right_mouse: bool,
+    mouse_delta: (f32, f32),
+    scroll: f32,
+}
+
+fn camera_input_from_world(world: &World) -> CameraInput {
+    let Some(input) = world.get_resource::<InputState>() else {
+        return CameraInput::default();
+    };
+
+    CameraInput {
+        forward: input.pressed.contains(&KeyCode::KeyW)
+            || input.pressed.contains(&KeyCode::ArrowUp),
+        backward: input.pressed.contains(&KeyCode::KeyS)
+            || input.pressed.contains(&KeyCode::ArrowDown),
+        left: input.pressed.contains(&KeyCode::KeyA) || input.pressed.contains(&KeyCode::ArrowLeft),
+        right: input.pressed.contains(&KeyCode::KeyD)
+            || input.pressed.contains(&KeyCode::ArrowRight),
+        up: input.pressed.contains(&KeyCode::Space) || input.pressed.contains(&KeyCode::PageUp),
+        down: input.pressed.contains(&KeyCode::KeyC) || input.pressed.contains(&KeyCode::PageDown),
+        shift: input.pressed.contains(&KeyCode::ShiftLeft),
+        roll_left: input.pressed.contains(&KeyCode::KeyQ),
+        roll_right: input.pressed.contains(&KeyCode::KeyE),
+        right_mouse: input.mouse_pressed.contains(&MouseButton::Right),
+        mouse_delta: input.mouse_delta,
+        scroll: input.scroll,
+    }
+}
+
+fn apply_camera_input(controller: &mut engine::camera::CameraController, input: CameraInput) {
+    controller.handle_key(KeyCode::KeyW, input.forward);
+    controller.handle_key(KeyCode::KeyS, input.backward);
+    controller.handle_key(KeyCode::KeyA, input.left);
+    controller.handle_key(KeyCode::KeyD, input.right);
+    controller.handle_key(KeyCode::Space, input.up);
+    controller.handle_key(KeyCode::KeyC, input.down);
+    controller.handle_key(KeyCode::ShiftLeft, input.shift);
+    controller.handle_key(KeyCode::KeyQ, input.roll_left);
+    controller.handle_key(KeyCode::KeyE, input.roll_right);
+    controller.handle_mouse_click(input.right_mouse);
+
+    if input.mouse_delta.0 != 0.0 || input.mouse_delta.1 != 0.0 {
+        controller.handle_mouse(input.mouse_delta.0, input.mouse_delta.1);
+    }
+
+    if input.scroll != 0.0 {
+        controller.handle_mouse_scroll(engine::MouseScrollDelta::LineDelta(0.0, input.scroll));
+    }
 }
 
 fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Point3<f32>) {
