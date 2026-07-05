@@ -138,7 +138,9 @@ impl Physics {
     */
     pub fn create_missing_rapier_bodies_system(ctx: &mut SystemContext, commands: &mut Commands) {
         let world = &mut ctx.world;
-        let mut physics = world.get_resource_mut::<Physics>().unwrap();
+        let Some(mut physics) = world.get_resource_mut::<Physics>() else {
+            return;
+        };
         let Physics {
             rigid_body_set,
             collider_set,

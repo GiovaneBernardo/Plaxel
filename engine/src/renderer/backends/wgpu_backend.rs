@@ -568,6 +568,12 @@ impl RendererAPI for WgpuBackend {
     fn resize(&mut self, width: u32, height: u32) {
         self.surface_config.width = width.max(1);
         self.surface_config.height = height.max(1);
+        if let Err(error) = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        }) {
+            log::warn!("Unable to wait for GPU before surface resize: {error}");
+        }
         self.surface.configure(&self.device, &self.surface_config);
         self.depth_texture = texture::Texture::create_depth_texture(
             &self.device,
