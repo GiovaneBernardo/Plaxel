@@ -4,9 +4,6 @@ use engine::core::input::{InputState, KeyCode};
 use engine::ecs::entity::Entity;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
-#[cfg(feature = "dynamic_linking")]
-#[allow(unused_imports)]
-use engine_dylib;
 
 use cgmath::{self, EuclideanSpace, Quaternion, Vector3, vec3};
 use cgmath::{InnerSpace, Point3};
@@ -135,7 +132,7 @@ const MAX_TERRAIN_PHYSICS_BRICK_SIZE: f32 = 64.0;
 const COARSE_PLANET_BRICK_LEVEL: u8 = 6;
 
 #[unsafe(no_mangle)]
-pub fn register_systems(state: &mut engine::State) {
+pub fn initialize_game_state(state: &mut engine::State) {
     let size = state.window.inner_size();
     let aspect = size.width as f32 / size.height.max(1) as f32;
 
@@ -278,6 +275,18 @@ pub fn register_systems(state: &mut engine::State) {
         last_requested_camera_pos: initial_camera_pos,
         terrain_brush_radius: 10.0,
     });
+}
+
+#[unsafe(no_mangle)]
+pub fn register_systems(state: &mut engine::State) {
+    initialize_game_state(state);
+    register_static_schedule_systems(state);
+}
+
+fn register_static_schedule_systems(state: &mut engine::State) {
+    let Some(scene) = state.active_scene_mut() else {
+        return;
+    };
 
     let init_schedule_mut = scene.init_schedule_mut();
     init_schedule_mut.add_system(systems::planets::planet_system_init);
@@ -292,6 +301,38 @@ pub fn register_systems(state: &mut engine::State) {
 }
 
 #[unsafe(no_mangle)]
+pub fn hot_planet_system_init(
+    ctx: &mut engine::ecs::system::SystemContext,
+    commands: &mut engine::ecs::commands::Commands,
+) {
+    systems::planets::planet_system_init(ctx, commands);
+}
+
+#[unsafe(no_mangle)]
+pub fn hot_planet_system_update(
+    ctx: &mut engine::ecs::system::SystemContext,
+    commands: &mut engine::ecs::commands::Commands,
+) {
+    systems::planets::planet_system_update(ctx, commands);
+}
+
+#[unsafe(no_mangle)]
+pub fn hot_player_interaction_system(
+    ctx: &mut engine::ecs::system::SystemContext,
+    commands: &mut engine::ecs::commands::Commands,
+) {
+    player_interaction_system(ctx, commands);
+}
+
+#[unsafe(no_mangle)]
+pub fn hot_camera_update_system(
+    ctx: &mut engine::ecs::system::SystemContext,
+    commands: &mut engine::ecs::commands::Commands,
+) {
+    camera_update_system(ctx, commands);
+}
+
+#[unsafe(no_mangle)]
 pub fn render() {}
 
 #[unsafe(no_mangle)]
@@ -300,11 +341,14 @@ pub fn update(state: &mut engine::State) {
         return;
     };
 
-    let (renderer, scenes) = (&mut state.global_resources.renderer, &mut state.scenes);
+    // avoid simultaneous mutable borrows of state.global_resources
+    let scenes = &mut state.scenes;
     let Some(scene) = scenes.get_mut(scene_index) else {
         return;
     };
 
+    // borrow renderer after using scenes to avoid overlapping mutable borrows
+    let renderer = &mut state.global_resources.renderer;
     sync_camera_to_renderer(renderer, scene.world());
     sync_planet_debug(renderer, scene.world());
     sync_planet_octree_debug(renderer, scene.world());

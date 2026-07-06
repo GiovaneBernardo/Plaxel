@@ -96,7 +96,9 @@ macro_rules! game_error {
 pub fn init() {
     let filter = EnvFilter::builder()
         .with_default_directive(tracing::Level::WARN.into())
-        .parse_lossy("engine=info,game=info,wgpu=error,wgpu_hal=error,naga=error");
+        .parse_lossy(
+            "engine=info,game=info,hot_lib_reloader=trace,wgpu=error,wgpu_hal=error,naga=error",
+        );
 
     let _ = LogTracer::init();
 

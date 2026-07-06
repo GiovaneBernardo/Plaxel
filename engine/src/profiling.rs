@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_FRAMES: usize = 360;
+const MAX_FRAMES: usize = 120;
 const MAX_SCOPES_PER_FRAME: usize = 1024;
 const MAX_COUNTERS_PER_FRAME: usize = 256;
 

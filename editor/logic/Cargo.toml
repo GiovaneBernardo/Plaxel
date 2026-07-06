@@ -4,16 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-dynamic_linking = ["dep:engine-dylib"]
-puffin-ui = ["dep:puffin_egui", "engine/puffin", "engine-dylib?/puffin"]
+dynamic_linking = []
+puffin-ui = ["dep:puffin_egui", "engine/puffin"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 engine = { path = "../../engine" }
-engine-dylib = { path = "../../engine_dylib", optional = true }
-game-logic = { path = "../../game/logic" }
 anyhow = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }

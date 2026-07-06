@@ -2,6 +2,7 @@
 /target/
 /res/imported
 /ignored/
+/third_party/hot-lib-reloader/
 
 # Rust package manager lock file
 Cargo.lock

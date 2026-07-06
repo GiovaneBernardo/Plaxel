@@ -1,22 +1,22 @@
 use crate::ecs::component::Component;
 use crate::ecs::entity::Entity;
-use std::any::{Any, TypeId};
+use std::any::type_name;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 trait ErasedStorage {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn as_ptr(&self) -> *const ();
+    fn as_mut_ptr(&mut self) -> *mut ();
     fn remove_entity(&mut self, entity: Entity);
 }
 
 impl<T: 'static> ErasedStorage for Storage<T> {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn as_ptr(&self) -> *const () {
+        self as *const Storage<T> as *const ()
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
+    fn as_mut_ptr(&mut self) -> *mut () {
+        self as *mut Storage<T> as *mut ()
     }
 
     fn remove_entity(&mut self, entity: Entity) {
@@ -148,7 +148,7 @@ impl<T> Storage<T> {
 }
 
 pub struct Storages {
-    map: HashMap<TypeId, RefCell<Box<dyn ErasedStorage>>>,
+    map: HashMap<&'static str, RefCell<Box<dyn ErasedStorage>>>,
 }
 
 impl Storages {
@@ -159,33 +159,30 @@ impl Storages {
     }
 
     pub fn get_storage<T: Component>(&self) -> Option<std::cell::Ref<'_, Storage<T>>> {
-        self.map.get(&TypeId::of::<T>()).map(|cell| {
-            std::cell::Ref::map(cell.borrow(), |boxed| {
-                boxed
-                    .as_any()
-                    .downcast_ref::<Storage<T>>()
-                    .expect("TypeId mismatch")
+        self.map.get(type_name::<T>()).map(|cell| {
+            std::cell::Ref::map(cell.borrow(), |boxed| unsafe {
+                // Hot-reloaded DLL generations get different TypeIds for the same
+                // source component. The stable key above is the guard; changing
+                // component layout still requires a restart.
+                &*(boxed.as_ptr() as *const Storage<T>)
             })
         })
     }
 
     pub fn get_storage_mut<T: Component>(&self) -> Option<std::cell::RefMut<'_, Storage<T>>> {
-        self.map.get(&TypeId::of::<T>()).map(|cell| {
-            std::cell::RefMut::map(cell.borrow_mut(), |boxed| {
-                boxed.as_any_mut().downcast_mut::<Storage<T>>().unwrap()
+        self.map.get(type_name::<T>()).map(|cell| {
+            std::cell::RefMut::map(cell.borrow_mut(), |boxed| unsafe {
+                // See `get_storage` for the hot-reload TypeId rationale.
+                &mut *(boxed.as_mut_ptr() as *mut Storage<T>)
             })
         })
     }
 
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
-        let cell = self.map.get_mut(&TypeId::of::<T>())?;
+        let cell = self.map.get_mut(type_name::<T>())?;
         let mut storage = cell.borrow_mut();
 
-        storage
-            .as_any_mut()
-            .downcast_mut::<Storage<T>>()
-            .expect("TypeId mismatch")
-            .remove(entity)
+        unsafe { &mut *(storage.as_mut_ptr() as *mut Storage<T>) }.remove(entity)
     }
 
     pub fn remove_entity_from_all(&mut self, entity: Entity) {
@@ -195,15 +192,16 @@ impl Storages {
     }
 
     pub fn ensure_storage<T: Component>(&mut self) -> std::cell::RefMut<'_, Storage<T>> {
-        let type_id = TypeId::of::<T>();
+        let type_name = type_name::<T>();
 
         let cell = self
             .map
-            .entry(type_id)
+            .entry(type_name)
             .or_insert_with(|| RefCell::new(Box::new(Storage::<T>::new())));
 
-        std::cell::RefMut::map(cell.borrow_mut(), |boxed| {
-            boxed.as_any_mut().downcast_mut::<Storage<T>>().unwrap()
+        std::cell::RefMut::map(cell.borrow_mut(), |boxed| unsafe {
+            // See `get_storage` for the hot-reload TypeId rationale.
+            &mut *(boxed.as_mut_ptr() as *mut Storage<T>)
         })
     }
 }

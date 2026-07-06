@@ -1,3 +1,6 @@
 fn main() {
-    editor_runner::run_editor().unwrap();
+    if let Err(error) = editor_runner::run_editor() {
+        eprintln!("editor failed: {error:?}");
+        std::process::exit(1);
+    }
 }

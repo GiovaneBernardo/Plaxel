@@ -8,29 +8,26 @@ name = "editor-runner-bin"
 path = "src/main.rs"
 
 [features]
-default = ["profiling", "tracy"]
+default = ["profiling", "tracy", "renderdoc"]
 dynamic_linking = [
-    "dep:engine-dylib",
     "editor-logic/dynamic_linking",
-    "game-logic/dynamic_linking",
 ]
 hot-reload = ["dep:hot-lib-reloader", "dynamic_linking"]
+static-game-logic = ["dep:static-game-logic"]
 profiling = [
     "engine/profiling",
     "engine/puffin",
-    "engine-dylib?/profiling",
-    "engine-dylib?/puffin",
     "editor-logic/puffin-ui",
 ]
-tracy = ["engine/tracy", "engine-dylib?/tracy"]
+tracy = ["engine/tracy"]
+renderdoc = ["engine/renderdoc"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-game-logic = { path = "../../game/logic" }
+static-game-logic = { package = "game-logic", path = "../../game/logic", optional = true }
 editor-logic = { path = "../logic" }
-engine-dylib = { path = "../../engine_dylib", optional = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }
@@ -40,7 +37,7 @@ egui-wgpu = { workspace = true }
 hot-lib-reloader = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-engine = { path = "../../engine", features = ["renderdoc"] }
+engine = { path = "../../engine" }
 egui-winit = "0.33.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

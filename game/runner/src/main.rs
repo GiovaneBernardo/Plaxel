@@ -1,7 +1,10 @@
 use engine::core::input::KeyCode;
-#[cfg(feature = "dynamic_linking")]
-#[allow(unused_imports)]
-use engine_dylib;
+
+#[cfg(all(not(feature = "hot-reload"), not(feature = "static-game-logic")))]
+compile_error!("game-runner without hot-reload requires the static-game-logic feature");
+
+#[cfg(all(not(feature = "hot-reload"), feature = "static-game-logic"))]
+use static_game_logic as game_logic;
 
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(
@@ -9,8 +12,38 @@ use engine_dylib;
     lib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug")
 )]
 mod game {
-    use engine::{MouseButton, MouseScrollDelta, core::input::KeyCode};
+    use engine::core::input::KeyCode;
     hot_functions_from_file!("game/logic/src/lib.rs");
+}
+
+#[cfg(feature = "hot-reload")]
+fn register_hot_game_systems(state: &mut engine::State) {
+    game::initialize_game_state(state);
+
+    let Some(scene) = state.active_scene_mut() else {
+        return;
+    };
+
+    scene
+        .init_schedule_mut()
+        .add_named_system("game.planet_init", game::hot_planet_system_init);
+
+    let schedule = scene.update_schedule_mut();
+    schedule.add_named_system("game.planet_update", game::hot_planet_system_update);
+    schedule.add_named_system(
+        "game.create_missing_rapier_bodies",
+        engine::core::physics::physics::Physics::create_missing_rapier_bodies_system,
+    );
+    schedule.add_named_system(
+        "game.player_interaction",
+        game::hot_player_interaction_system,
+    );
+    schedule.add_named_system("game.camera_update", game::hot_camera_update_system);
+    schedule.add_named_system("game.render_data", engine::renderer::get_render_data_system);
+    schedule.add_named_system(
+        "game.engine_input",
+        engine::core::systems::systems::engine_input_system,
+    );
 }
 
 fn main() {
@@ -22,7 +55,7 @@ fn main() {
     let mut app = engine::App::new()
         .with_register_system(|state| {
             #[cfg(feature = "hot-reload")]
-            game::register_systems(state);
+            register_hot_game_systems(state);
 
             #[cfg(not(feature = "hot-reload"))]
             game_logic::register_systems(state);
@@ -39,22 +72,46 @@ fn main() {
                 #[cfg(feature = "hot-reload")]
                 {
                     let mut features = String::from("game-runner/hot-reload");
+                    features.push_str(",game-logic/dynamic_linking");
+                    #[cfg(feature = "profiling")]
+                    features.push_str(",game-runner/profiling");
+                    #[cfg(feature = "profiling")]
+                    features.push_str(",game-logic/profiling");
+                    #[cfg(feature = "profiling")]
+                    features.push_str(",game-logic/puffin");
+                    #[cfg(feature = "tracy")]
+                    features.push_str(",game-runner/tracy");
+                    #[cfg(feature = "tracy")]
+                    features.push_str(",game-logic/tracy");
                     #[cfg(feature = "renderdoc")]
                     features.push_str(",game-runner/renderdoc");
+                    #[cfg(feature = "renderdoc")]
+                    features.push_str(",game-logic/renderdoc");
 
-                    std::process::Command::new("cargo")
-                        .args([
-                            "build",
-                            "-p",
-                            "game-runner",
-                            "-p",
-                            "game-logic",
-                            "--features",
-                            &features,
-                        ])
+                    let args = [
+                        "build",
+                        "-p",
+                        "game-runner",
+                        "-p",
+                        "game-logic",
+                        "--features",
+                        &features,
+                    ];
+                    log::info!("hot reload build starting: cargo {}", args.join(" "));
+
+                    match std::process::Command::new("cargo")
+                        .args(args)
                         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
                         .spawn()
-                        .ok();
+                    {
+                        Ok(mut child) => {
+                            std::thread::spawn(move || match child.wait() {
+                                Ok(status) => log::info!("hot reload build finished: {status}"),
+                                Err(error) => log::warn!("hot reload build wait failed: {error}"),
+                            });
+                        }
+                        Err(error) => log::warn!("hot reload build spawn failed: {error}"),
+                    }
                 }
             }
 

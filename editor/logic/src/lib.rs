@@ -4,10 +4,6 @@ pub mod egui_node;
 pub mod hierarchy;
 pub mod viewport_context_menu;
 
-#[cfg(feature = "dynamic_linking")]
-#[allow(unused_imports)]
-use engine_dylib;
-
 use egui_node::EguiRenderNode;
 use viewport_context_menu::{EditorSpawnRequests, editor_spawn_system};
 

@@ -2,7 +2,6 @@
 members = [
     "engine",
     "engine_inspector_derive",
-    "engine_dylib",
     "editor/runner",
     "editor/logic",
     "game/logic",
@@ -96,3 +95,6 @@ codegen-units = 32
 [profile.release]
 strip = true
 codegen-units = 1
+
+[patch.crates-io]
+hot-lib-reloader = { path = "third_party/hot-lib-reloader" }

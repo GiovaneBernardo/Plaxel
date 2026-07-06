@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-dynamic_linking = ["dep:engine-dylib"]
-profiling = ["engine/profiling", "engine-dylib?/profiling"]
+dynamic_linking = []
+profiling = ["engine/profiling"]
+puffin = ["engine/puffin"]
+tracy = ["engine/tracy"]
+renderdoc = ["engine/renderdoc"]
 
 [dependencies]
 engine = { path = "../../engine" }
-engine-dylib = { path = "../../engine_dylib", optional = true }
 game-types = { path = "../types" }
 cgmath = { workspace = true }
 bytemuck = { workspace = true }

@@ -4,11 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
-    println!("cargo:rerun-if-changed=../res");
-
     let out_dir = env::var("OUT_DIR")?;
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
     let res_dir = Path::new(&manifest_dir).join("../res");
+    let shaders_dir = res_dir.join("shaders");
+
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", shaders_dir.display());
 
     generate_embedded_shaders(&res_dir, Path::new(&out_dir))?;
 
@@ -22,6 +24,7 @@ fn generate_embedded_shaders(res_dir: &Path, out_dir: &Path) -> Result<()> {
     if shaders_dir.exists() {
         for entry in glob::glob(&format!("{}/**/*.wgsl", shaders_dir.display()))? {
             let path = entry?;
+            println!("cargo:rerun-if-changed={}", path.display());
             let relative_path = path
                 .strip_prefix(res_dir)?
                 .to_string_lossy()
