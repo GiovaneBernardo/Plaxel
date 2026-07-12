@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["dylib"]
+crate-type = ["rlib"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -33,6 +33,7 @@ rapier3d = { workspace = true }
 crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }
+subsecond = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 renderdoc = { workspace = true }

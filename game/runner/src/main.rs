@@ -34,7 +34,7 @@ fn register_hot_game_systems(state: &mut engine::State) {
         "game.create_missing_rapier_bodies",
         engine::core::physics::physics::Physics::create_missing_rapier_bodies_system,
     );
-    schedule.add_named_system(
+    schedule.add_static_named_system(
         "game.player_interaction",
         game::hot_player_interaction_system,
     );
@@ -47,6 +47,9 @@ fn register_hot_game_systems(state: &mut engine::State) {
 }
 
 fn main() {
+    #[cfg(not(target_family = "wasm"))]
+    dioxus_devtools::connect_subsecond();
+
     engine::logging::init();
 
     let event_loop = winit::event_loop::EventLoop::with_user_event()

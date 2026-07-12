@@ -3,6 +3,12 @@
 /res/imported
 /ignored/
 /third_party/hot-lib-reloader/
+/.plaxel_editor_console.log
+/errors.txt
+/res/skybox/HDR_multi_nebulae_1_10kres.hdr
+/res/terrain_textures/Grass001_2K-JPG_Color.jpg
+/res/terrain_textures/Rock061_2K-JPG_Color.jpg
+/res/terrain_textures/terry_cloth_diff_1k.jpg
 
 # Rust package manager lock file
 Cargo.lock

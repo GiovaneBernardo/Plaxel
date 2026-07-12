@@ -3,7 +3,12 @@ use crate::{
     ecs::{commands::Commands, system::SystemContext},
 };
 
-pub fn engine_input_system(ctx: &mut SystemContext, _commands: &mut Commands) {
+#[inline(never)]
+pub fn engine_input_system(ctx: &mut SystemContext, commands: &mut Commands) {
+    engine_input_system_impl(ctx, commands);
+}
+
+fn engine_input_system_impl(ctx: &mut SystemContext, _commands: &mut Commands) {
     let Some(input) = ctx.world.get_resource::<InputState>() else {
         return;
     };

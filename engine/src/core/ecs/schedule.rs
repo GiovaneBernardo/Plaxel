@@ -1,6 +1,6 @@
 use crate::ecs::{
     commands::Commands,
-    system::{System, SystemContext},
+    system::{HotSystem, StaticSystem, System, SystemContext},
 };
 
 struct ScheduledSystem {
@@ -33,7 +33,25 @@ impl Schedule {
     ) {
         self.systems.push(ScheduledSystem {
             name,
-            system: Box::new(system),
+            system: Box::new(HotSystem::new(name, system)),
+        });
+    }
+
+    pub fn add_static_system<F>(&mut self, system: F)
+    where
+        F: FnMut(&mut SystemContext, &mut Commands) + 'static,
+    {
+        self.add_static_named_system(std::any::type_name::<F>(), system);
+    }
+
+    pub fn add_static_named_system(
+        &mut self,
+        name: &'static str,
+        system: impl FnMut(&mut SystemContext, &mut Commands) + 'static,
+    ) {
+        self.systems.push(ScheduledSystem {
+            name,
+            system: Box::new(StaticSystem::new(system)),
         });
     }
 
@@ -43,7 +61,7 @@ impl Schedule {
             let _profile_scope =
                 crate::profiling::Scope::new_owned(format!("ecs.system.{}", scheduled.name));
             let mut commands = Commands::new();
-            (scheduled.system)(ctx, &mut commands);
+            scheduled.system.run(ctx, &mut commands);
             commands.apply(ctx);
         }
     }

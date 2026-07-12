@@ -18,7 +18,10 @@ pub fn register_editor(state: &mut engine::State) {
         scene
             .world_mut()
             .insert_resource(EditorSpawnRequests::default());
-        scene.update_schedule_mut().add_system(editor_spawn_system);
+        #[cfg(not(feature = "dynamic_linking"))]
+        scene
+            .update_schedule_mut()
+            .add_named_system("editor.spawn", hot_editor_spawn_system);
     }
 
     let egui_node = EguiRenderNode::new();
@@ -35,7 +38,20 @@ pub fn register_editor(state: &mut engine::State) {
 }
 
 #[unsafe(no_mangle)]
+#[inline(never)]
+pub fn hot_editor_spawn_system(
+    ctx: &mut engine::ecs::system::SystemContext,
+    commands: &mut engine::ecs::commands::Commands,
+) {
+    editor_spawn_system(ctx, commands);
+}
+
+#[unsafe(no_mangle)]
 pub fn update_editor(state: &mut engine::State) {
+    update_editor_impl(state);
+}
+
+fn update_editor_impl(state: &mut engine::State) {
     if let Some(mut node_box) = state
         .global_resources
         .renderer

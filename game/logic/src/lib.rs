@@ -5,24 +5,23 @@ use engine::ecs::entity::Entity;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
 
-use cgmath::{self, EuclideanSpace, Quaternion, Vector3, vec3};
+use cgmath::{self, EuclideanSpace, Quaternion, vec3};
 use cgmath::{InnerSpace, Point3};
 use engine::assets::material::Material;
 use engine::core::components::physics::RapierColliderHandle;
 use engine::core::physics::physics::Physics;
 use engine::model::Vertex;
 use engine::renderer;
+use engine::renderer::CullMode;
 use engine::renderer::Topology;
 use engine::renderer::{CameraData, FrameBindings, RenderData};
-use engine::renderer::{CullMode, PipelineHandle};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
-use game_types::octree::{NodeKey, OctreeNode};
+use game_types::octree::NodeKey;
+use game_types::planet::PlanetInstance;
 use game_types::planet::{Planet, PlanetVertex};
-use game_types::planet::{PlanetInstance, PlanetMesh};
 pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::Arc;
 use web_time::{Duration, Instant};
 
 pub mod octree;
@@ -34,7 +33,7 @@ use systems::{InputMap, player_interaction_system};
 
 use crate::octree::depth_color;
 use crate::sdf::EarthHeightmap;
-use crate::systems::planets::{self, PlanetExt, planet_debug};
+use crate::systems::planets::planet_debug;
 
 struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
@@ -289,18 +288,19 @@ fn register_static_schedule_systems(state: &mut engine::State) {
     };
 
     let init_schedule_mut = scene.init_schedule_mut();
-    init_schedule_mut.add_system(systems::planets::planet_system_init);
+    init_schedule_mut.add_system(hot_planet_system_init);
 
     let update_schedule_mut = scene.update_schedule_mut();
-    update_schedule_mut.add_system(systems::planets::planet_system_update);
+    update_schedule_mut.add_system(hot_planet_system_update);
     update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
-    update_schedule_mut.add_system(player_interaction_system);
-    update_schedule_mut.add_system(camera_update_system);
+    update_schedule_mut.add_static_system(hot_player_interaction_system);
+    update_schedule_mut.add_system(hot_camera_update_system);
     update_schedule_mut.add_system(renderer::get_render_data_system);
     update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
 }
 
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn hot_planet_system_init(
     ctx: &mut engine::ecs::system::SystemContext,
     commands: &mut engine::ecs::commands::Commands,
@@ -309,6 +309,7 @@ pub fn hot_planet_system_init(
 }
 
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn hot_planet_system_update(
     ctx: &mut engine::ecs::system::SystemContext,
     commands: &mut engine::ecs::commands::Commands,
@@ -317,6 +318,7 @@ pub fn hot_planet_system_update(
 }
 
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn hot_player_interaction_system(
     ctx: &mut engine::ecs::system::SystemContext,
     commands: &mut engine::ecs::commands::Commands,
@@ -325,6 +327,7 @@ pub fn hot_player_interaction_system(
 }
 
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn hot_camera_update_system(
     ctx: &mut engine::ecs::system::SystemContext,
     commands: &mut engine::ecs::commands::Commands,
@@ -337,6 +340,11 @@ pub fn render() {}
 
 #[unsafe(no_mangle)]
 pub fn update(state: &mut engine::State) {
+    let mut update = subsecond::HotFn::current(update_impl);
+    update.call((state,));
+}
+
+fn update_impl(state: &mut engine::State) {
     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
         return;
     };
@@ -601,6 +609,11 @@ fn sync_planet_geometry(renderer: &mut engine::renderer::Renderer, world: &World
 // Or maybe not, as it works well for debugging stuff
 #[unsafe(no_mangle)]
 pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
+    let mut handler = subsecond::HotFn::current(handle_key_press_impl);
+    handler.call((state, key_code, pressed));
+}
+
+fn handle_key_press_impl(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
         return;
     };
@@ -718,6 +731,11 @@ fn cook_terrain_collider_mesh(
 
 #[unsafe(no_mangle)]
 pub fn handle_mouse_button(state: &mut engine::State, button: engine::MouseButton, pressed: bool) {
+    let mut handler = subsecond::HotFn::current(handle_mouse_button_impl);
+    handler.call((state, button, pressed));
+}
+
+fn handle_mouse_button_impl(state: &mut engine::State, button: engine::MouseButton, pressed: bool) {
     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
         return;
     };
@@ -734,6 +752,11 @@ pub fn handle_mouse_button(state: &mut engine::State, button: engine::MouseButto
 
 #[unsafe(no_mangle)]
 pub fn handle_mouse_motion(state: &mut engine::State, dx: f64, dy: f64) {
+    let mut handler = subsecond::HotFn::current(handle_mouse_motion_impl);
+    handler.call((state, dx, dy));
+}
+
+fn handle_mouse_motion_impl(state: &mut engine::State, dx: f64, dy: f64) {
     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
         return;
     };
@@ -748,6 +771,11 @@ pub fn handle_mouse_motion(state: &mut engine::State, dx: f64, dy: f64) {
 
 #[unsafe(no_mangle)]
 pub fn handle_mouse_scroll(state: &mut engine::State, delta: engine::MouseScrollDelta) {
+    let mut handler = subsecond::HotFn::current(handle_mouse_scroll_impl);
+    handler.call((state, delta));
+}
+
+fn handle_mouse_scroll_impl(state: &mut engine::State, delta: engine::MouseScrollDelta) {
     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
         return;
     };
@@ -762,6 +790,11 @@ pub fn handle_mouse_scroll(state: &mut engine::State, delta: engine::MouseScroll
 
 #[unsafe(no_mangle)]
 pub fn handle_resize(state: &mut engine::State, width: u32, height: u32) {
+    let mut handler = subsecond::HotFn::current(handle_resize_impl);
+    handler.call((state, width, height));
+}
+
+fn handle_resize_impl(state: &mut engine::State, width: u32, height: u32) {
     if width == 0 || height == 0 {
         return;
     }

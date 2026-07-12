@@ -136,7 +136,12 @@ impl Physics {
            let ball_rigid_body_handle = physics.add_rigid_body_dynamic();
            physics.add_sphere_collider(params.radius, ball_rigid_body_handle);
     */
+    #[inline(never)]
     pub fn create_missing_rapier_bodies_system(ctx: &mut SystemContext, commands: &mut Commands) {
+        Self::create_missing_rapier_bodies_system_impl(ctx, commands);
+    }
+
+    fn create_missing_rapier_bodies_system_impl(ctx: &mut SystemContext, commands: &mut Commands) {
         let world = &mut ctx.world;
         let Some(mut physics) = world.get_resource_mut::<Physics>() else {
             return;
@@ -233,13 +238,6 @@ impl Physics {
                     RapierColliderHandle(collider_set.insert(rapier_collider)),
                 );
             }
-        });
-
-        let mut query = Query::<(&mut RapierRigidBodyHandle,)>::new(world);
-        query.for_each(|_entity, (handle,)| {
-            let ball_body = &mut physics.rigid_body_set[handle.0];
-            //ball_body.set_gravity_scale(1.0, true);
-            //ball_body.set_position(nalgebra::Isometry3::translation(1.0, 0.0, 50.0), true);
         });
     }
 }

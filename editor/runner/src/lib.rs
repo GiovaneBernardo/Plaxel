@@ -34,7 +34,7 @@ fn register_hot_game_systems(state: &mut engine::State) {
         "game.create_missing_rapier_bodies",
         engine::core::physics::physics::Physics::create_missing_rapier_bodies_system,
     );
-    schedule.add_named_system(
+    schedule.add_static_named_system(
         "game.player_interaction",
         game::hot_player_interaction_system,
     );
@@ -53,6 +53,17 @@ fn register_hot_game_systems(state: &mut engine::State) {
 )]
 mod editor_hot {
     hot_functions_from_file!("editor/logic/src/lib.rs");
+}
+
+#[cfg(feature = "hot-reload")]
+fn register_hot_editor(state: &mut engine::State) {
+    editor_hot::register_editor(state);
+
+    if let Some(scene) = state.active_scene_mut() {
+        scene
+            .update_schedule_mut()
+            .add_named_system("editor.spawn", editor_hot::hot_editor_spawn_system);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -76,7 +87,7 @@ pub fn run_editor() -> anyhow::Result<()> {
     )
     .with_register_system(|state| {
         #[cfg(feature = "hot-reload")]
-        editor_hot::register_editor(state);
+        register_hot_editor(state);
         #[cfg(not(feature = "hot-reload"))]
         editor_logic::register_editor(state);
 

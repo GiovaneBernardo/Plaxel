@@ -1276,8 +1276,24 @@ impl GeometryRenderQueue {
     }
 }
 
+#[inline(never)]
 pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands) {
     crate::profile_scope!("renderer.get_render_data_system");
+    let (render_data, transforms) = collect_geometry_render_data(ctx);
+
+    let Some(mut queue) = ctx.world.get_resource_mut::<GeometryRenderQueue>() else {
+        return;
+    };
+
+    queue.items.clear();
+    queue.transforms.clear();
+    queue.items.extend(render_data);
+    queue.transforms.extend(transforms);
+}
+
+fn collect_geometry_render_data(
+    ctx: &mut SystemContext,
+) -> (Vec<RenderData>, Vec<TransformInstance>) {
     let world = &mut ctx.world;
     let asset_manager = &ctx.globals.asset_manager;
     let mut transforms = Vec::new();
@@ -1315,12 +1331,5 @@ pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands)
         items
     };
 
-    let Some(mut queue) = world.get_resource_mut::<GeometryRenderQueue>() else {
-        return;
-    };
-
-    queue.items.clear();
-    queue.transforms.clear();
-    queue.items.extend(render_data);
-    queue.transforms.extend(transforms);
+    (render_data, transforms)
 }

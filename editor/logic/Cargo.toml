@@ -8,7 +8,7 @@ dynamic_linking = []
 puffin-ui = ["dep:puffin_egui", "engine/puffin"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 engine = { path = "../../engine" }
@@ -24,6 +24,7 @@ eframe = { workspace = true }
 rfd = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
+subsecond = { workspace = true }
 puffin_egui = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

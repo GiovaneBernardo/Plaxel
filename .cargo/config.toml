@@ -1,13 +1,9 @@
 [target.x86_64-pc-windows-msvc]
-linker = "rust-lld.exe"
-rustflags = ["-Zshare-generics=n", "-C", "target-feature=+crt-static"]
+linker = "lld-link.exe"
+rustflags = ["-Zshare-generics=n"]
 
-# `cargo run -p game-runner` only needs `game-logic`'s rlib, so cargo skips
-# producing the cdylib that hot-reload loads at runtime. These aliases build
-# both packages (and `engine_dylib.dll`) in one go with consistent feature
-# unification. Use `cargo run-game` to launch, `cargo build-game` for F5.
 [alias]
-build-game = "build -p game-runner -p game-logic --features game-runner/hot-reload"
+build-game = "build -p game-runner"
 xtask = "run --package xtask --quiet --"
 play = "xtask play"
 play-editor = "xtask play-editor"

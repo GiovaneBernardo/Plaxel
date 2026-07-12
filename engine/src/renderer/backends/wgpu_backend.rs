@@ -463,7 +463,7 @@ pub struct WgpuBackend {
     uploaded_textures: Vec<TextureHandle>,
     uploaded_textures_last_available_index: u32,
     uploaded_materials: Vec<GpuMaterialData>,
-    pipeline_cache: PipelineCache,
+    pipeline_cache: Option<PipelineCache>,
 }
 
 pub struct WgpuRenderContext<'a> {
@@ -1517,7 +1517,9 @@ impl WgpuBackend {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+            backends: wgpu::Backends::DX12,
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
             backends: wgpu::Backends::BROWSER_WEBGPU,
@@ -1630,11 +1632,15 @@ impl WgpuBackend {
             let depth_texture =
                 texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
-            let pipeline_cache = device.create_pipeline_cache(&PipelineCacheDescriptor {
-                label: Some("pipeline_cache"),
-                data: None,
-                fallback: true,
-            });
+            let pipeline_cache = enabled_features
+                .contains(wgpu::Features::PIPELINE_CACHE)
+                .then(|| {
+                    device.create_pipeline_cache(&PipelineCacheDescriptor {
+                        label: Some("pipeline_cache"),
+                        data: None,
+                        fallback: true,
+                    })
+                });
 
             Ok(Self {
                 window,
@@ -1936,7 +1942,7 @@ impl WgpuBackend {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview: None,
-                cache: Some(&self.pipeline_cache),
+                cache: self.pipeline_cache.as_ref(),
             })
     }
 

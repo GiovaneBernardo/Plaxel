@@ -7,7 +7,6 @@ use std::hash::Hash;
 use std::hash::Hasher;
 pub use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::{collections::HashMap, fs};
 pub use uuid::Uuid;
 

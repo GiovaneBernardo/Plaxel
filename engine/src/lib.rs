@@ -1052,268 +1052,347 @@ impl ApplicationHandler<State> for App {
         // Run the loop continuously instead of sleeping between OS events —
         // we want every frame to tick update() so background workers can
         // make progress even when the player isn't moving.
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-
-        #[allow(unused_mut)]
-        let mut window_attributes = Window::default_attributes();
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            window_attributes = window_attributes.with_maximized(true);
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            use wasm_bindgen::JsCast;
-            use winit::platform::web::WindowAttributesExtWebSys;
-
-            const CANVAS_ID: &str = "canvas";
-
-            let window = wgpu::web_sys::window().unwrap_throw();
-            let document = window.document().unwrap_throw();
-            let canvas = document.get_element_by_id(CANVAS_ID).unwrap_throw();
-            let html_canvas_element = canvas.unchecked_into();
-            window_attributes = window_attributes.with_canvas(Some(html_canvas_element));
-        }
-
-        let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // If we are not on web we can use pollster to
-            // await the
-            self.state = Some(pollster::block_on(State::new(window)).unwrap());
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Run the future asynchronously and use the
-            // proxy to send the results to the event loop
-            if let Some(proxy) = self.proxy.take() {
-                wasm_bindgen_futures::spawn_local(async move {
-                    assert!(
-                        proxy
-                            .send_event(
-                                State::new(window)
-                                    .await
-                                    .expect("Unable to create canvas!!!")
-                            )
-                            .is_ok()
-                    )
-                });
-            }
-        }
+        let mut handler = subsecond::HotFn::current(app_resumed);
+        handler.call((self, event_loop));
     }
 
-    #[allow(unused_mut)]
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            event.window.request_redraw();
-            event.resize(
-                event.window.inner_size().width,
-                event.window.inner_size().height,
-            );
-        }
-        self.state = Some(event);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: State) {
+        let mut handler = subsecond::HotFn::current(app_user_event);
+        handler.call((self, event_loop, event));
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(state) = &self.state else {
-            return;
-        };
-
-        if let Some(redraw_at) = self.paused_redraw_at {
-            if Instant::now() < redraw_at {
-                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
-                return;
-            }
-
-            self.paused_redraw_at = None;
-        }
-
-        state.window.request_redraw();
+        let mut handler = subsecond::HotFn::current(app_about_to_wait);
+        handler.call((self, event_loop));
     }
 
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: winit::window::WindowId,
+        window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let state = match &mut self.state {
-            Some(canvas) => canvas,
-            None => return,
-        };
-
-        if !matches!(event, WindowEvent::RedrawRequested) {
-            state.events.push(event.clone());
+        if matches!(event, WindowEvent::RedrawRequested) {
+            if app_redraw_requested(self, event_loop) {
+                finish_app_redraw(self);
+            }
+            return;
         }
 
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                if self
-                    .should_pause_frame
-                    .as_mut()
-                    .is_some_and(|should_pause| should_pause(state))
-                {
-                    self.pending_resize = Some(size);
-                    return;
-                }
-
-                state.resize(size.width, size.height);
-                if let Some(f) = &mut self.on_resize {
-                    f(state, size.width, size.height);
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                if self
-                    .should_pause_frame
-                    .as_mut()
-                    .is_some_and(|should_pause| should_pause(state))
-                {
-                    let redraw_at = Instant::now() + Duration::from_millis(16);
-                    self.paused_redraw_at = Some(redraw_at);
-                    event_loop
-                        .set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
-                    state.events.clear();
-                    state.update_after_render();
-                    return;
-                }
-
-                self.paused_redraw_at = None;
-                event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-
-                if let Some(size) = self.pending_resize.take() {
-                    state.resize(size.width, size.height);
-                    if let Some(f) = &mut self.on_resize {
-                        f(state, size.width, size.height);
-                    }
-                }
-
-                crate::profiling::sync_enabled(state.global_resources.profiling_enabled);
-                let frame_index = state.frame_index as u64;
-                crate::profiling::begin_frame(frame_index);
-                if !state.registered_systems {
-                    crate::profile_scope!("engine.register_systems");
-                    if let Some(f) = &mut self.on_register_system {
-                        f(state);
-                    }
-                    state.init_active_scene();
-                    state.registered_systems = true;
-                }
-                {
-                    crate::profile_scope!("frame.update");
-                    state.update();
-                }
-                {
-                    crate::profile_scope!("renderer.clear_geometry_render_data");
-                    state.global_resources.renderer.clear_geometry_render_data();
-                }
-                if let Some(f) = &mut self.on_update {
-                    crate::profile_scope!("app.update");
-                    f(state);
-                }
-                state.sync_render_queues();
-                state.events.clear();
-                let state = self.state.as_mut().unwrap();
-                crate::profile_counter!("frame.index", state.frame_index as f64);
-                match state.global_resources.renderer.render() {
-                    Ok(_) => {
-                        state
-                            .global_resources
-                            .frame_capturer
-                            .finish_capture_after_frame();
-                    }
-                    Err(e) => {
-                        log::error!("Unable to render {}", e);
-                    }
-                }
-
-                state.update_after_render();
-                crate::profiling::end_frame();
-                state.global_resources.profiler_snapshot = crate::profiling::snapshot();
-                state.frame_index = state.frame_index.wrapping_add(1);
-            }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        physical_key: PhysicalKey::Code(code),
-                        state: key_state,
-                        ..
-                    },
-                ..
-            } => {
-                state.handle_key(event_loop, code, key_state.is_pressed());
-                if let Some(f) = &mut self.on_key {
-                    f(state, code, key_state.is_pressed());
-                }
-            }
-            WindowEvent::CursorMoved {
-                position: winit::dpi::PhysicalPosition { x, y },
-                ..
-            } => {
-                state.handle_cursor_moved(x, y);
-                // state.camera_controller.handle_mouse(x, y);
-            }
-            WindowEvent::MouseInput {
-                device_id: _,
-                state: key_state,
-                button,
-            } => {
-                state.handle_mouse_click(button, key_state.is_pressed());
-                if let Some(f) = &mut self.on_mouse_button {
-                    f(state, button, key_state.is_pressed());
-                }
-            }
-
-            WindowEvent::MouseWheel {
-                device_id: _,
-                delta,
-                phase: _,
-            } => {
-                state.handle_mouse_scroll(delta);
-                if let Some(f) = &mut self.on_mouse_scroll {
-                    f(state, delta);
-                }
-            }
-            WindowEvent::DroppedFile(path) => {
-                state.handle_dropped_file(&path);
-            }
-            _ => {}
-        }
+        let mut handler = subsecond::HotFn::current(app_window_event);
+        handler.call((self, event_loop, window_id, event));
     }
 
     fn device_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: DeviceId,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        if let Some(state) = &mut self.state {
-            if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-                state.handle_mouse_motion(dx, dy);
-                if let Some(f) = &mut self.on_mouse_motion {
-                    f(state, dx, dy);
-                }
-                //if state.camera_controller.is_right_click_pressed {
-                //    state.camera_controller.handle_mouse(dx as f32, dy as f32);
-                //    state
-                //        .window
-                //        .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                //        .ok();
-                //    state.window.set_cursor_visible(false);
-                //} else {
-                //    state.window.set_cursor_visible(true);
-                //    state
-                //        .window
-                //        .set_cursor_grab(winit::window::CursorGrabMode::None)
-                //        .ok();
-                //}
+        let mut handler = subsecond::HotFn::current(app_device_event);
+        handler.call((self, event_loop, device_id, event));
+    }
+}
+
+fn app_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
+    #[allow(unused_mut)]
+    let mut window_attributes = Window::default_attributes();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        window_attributes = window_attributes.with_maximized(true);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        use winit::platform::web::WindowAttributesExtWebSys;
+
+        const CANVAS_ID: &str = "canvas";
+
+        let window = wgpu::web_sys::window().unwrap_throw();
+        let document = window.document().unwrap_throw();
+        let canvas = document.get_element_by_id(CANVAS_ID).unwrap_throw();
+        let html_canvas_element = canvas.unchecked_into();
+        window_attributes = window_attributes.with_canvas(Some(html_canvas_element));
+    }
+
+    let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        app.state = Some(pollster::block_on(State::new(window)).unwrap());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(proxy) = app.proxy.take() {
+            wasm_bindgen_futures::spawn_local(async move {
+                assert!(
+                    proxy
+                        .send_event(
+                            State::new(window)
+                                .await
+                                .expect("Unable to create canvas!!!"),
+                        )
+                        .is_ok()
+                )
+            });
+        }
+    }
+}
+
+#[allow(unused_mut)]
+fn app_user_event(app: &mut App, _event_loop: &ActiveEventLoop, mut event: State) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        event.window.request_redraw();
+        event.resize(
+            event.window.inner_size().width,
+            event.window.inner_size().height,
+        );
+    }
+    app.state = Some(event);
+}
+
+fn app_about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
+    let Some(state) = &app.state else {
+        return;
+    };
+
+    if let Some(redraw_at) = app.paused_redraw_at {
+        if Instant::now() < redraw_at {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
+            return;
+        }
+
+        app.paused_redraw_at = None;
+    }
+
+    state.window.request_redraw();
+}
+
+fn app_window_event(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+    _window_id: winit::window::WindowId,
+    event: WindowEvent,
+) {
+    let state = match &mut app.state {
+        Some(canvas) => canvas,
+        None => return,
+    };
+
+    state.events.push(event.clone());
+
+    match event {
+        WindowEvent::CloseRequested => event_loop.exit(),
+        WindowEvent::Resized(size) => {
+            if app
+                .should_pause_frame
+                .as_mut()
+                .is_some_and(|should_pause| should_pause(state))
+            {
+                app.pending_resize = Some(size);
+                return;
+            }
+
+            state.resize(size.width, size.height);
+            if let Some(f) = &mut app.on_resize {
+                f(state, size.width, size.height);
+            }
+        }
+        WindowEvent::KeyboardInput {
+            event:
+                KeyEvent {
+                    physical_key: PhysicalKey::Code(code),
+                    state: key_state,
+                    ..
+                },
+            ..
+        } => {
+            state.handle_key(event_loop, code, key_state.is_pressed());
+            if let Some(f) = &mut app.on_key {
+                f(state, code, key_state.is_pressed());
+            }
+        }
+        WindowEvent::CursorMoved {
+            position: winit::dpi::PhysicalPosition { x, y },
+            ..
+        } => {
+            state.handle_cursor_moved(x, y);
+        }
+        WindowEvent::MouseInput {
+            device_id: _,
+            state: key_state,
+            button,
+        } => {
+            state.handle_mouse_click(button, key_state.is_pressed());
+            if let Some(f) = &mut app.on_mouse_button {
+                f(state, button, key_state.is_pressed());
+            }
+        }
+        WindowEvent::MouseWheel {
+            device_id: _,
+            delta,
+            phase: _,
+        } => {
+            state.handle_mouse_scroll(delta);
+            if let Some(f) = &mut app.on_mouse_scroll {
+                f(state, delta);
+            }
+        }
+        WindowEvent::DroppedFile(path) => {
+            state.handle_dropped_file(&path);
+        }
+        _ => {}
+    }
+}
+
+fn app_device_event(
+    app: &mut App,
+    _event_loop: &ActiveEventLoop,
+    _device_id: DeviceId,
+    event: DeviceEvent,
+) {
+    if let Some(state) = &mut app.state {
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            state.handle_mouse_motion(dx, dy);
+            if let Some(f) = &mut app.on_mouse_motion {
+                f(state, dx, dy);
             }
         }
     }
+}
+
+fn app_redraw_requested(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
+    let mut prepare = subsecond::HotFn::current(prepare_app_redraw);
+    if !prepare.call((app, event_loop)) {
+        return false;
+    }
+
+    {
+        let Some(state) = app.state.as_mut() else {
+            return false;
+        };
+        crate::profile_scope!("frame.update");
+        state.update();
+    }
+
+    {
+        let Some(state) = app.state.as_mut() else {
+            return false;
+        };
+        let mut after_systems = subsecond::HotFn::current(after_frame_systems);
+        after_systems.call((state,));
+    }
+
+    if let Some(f) = &mut app.on_update {
+        let Some(state) = app.state.as_mut() else {
+            return false;
+        };
+        crate::profile_scope!("app.update");
+        f(state);
+    }
+
+    let Some(state) = app.state.as_mut() else {
+        return false;
+    };
+
+    let mut before_render = subsecond::HotFn::current(before_frame_render);
+    before_render.call((state,));
+
+    let mut render = subsecond::HotFn::current(render_frame);
+    render.call((state,));
+
+    let mut after_render = subsecond::HotFn::current(after_frame_render);
+    after_render.call((state,));
+    true
+}
+
+fn prepare_app_redraw(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
+    let state = match &mut app.state {
+        Some(state) => state,
+        None => return false,
+    };
+
+    if app
+        .should_pause_frame
+        .as_mut()
+        .is_some_and(|should_pause| should_pause(state))
+    {
+        let redraw_at = Instant::now() + Duration::from_millis(16);
+        app.paused_redraw_at = Some(redraw_at);
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
+        state.events.clear();
+        state.update_after_render();
+        return false;
+    }
+
+    app.paused_redraw_at = None;
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
+    if let Some(size) = app.pending_resize.take() {
+        state.resize(size.width, size.height);
+        if let Some(f) = &mut app.on_resize {
+            f(state, size.width, size.height);
+        }
+    }
+
+    crate::profiling::sync_enabled(state.global_resources.profiling_enabled);
+    let frame_index = state.frame_index as u64;
+    crate::profiling::begin_frame(frame_index);
+    if !state.registered_systems {
+        crate::profile_scope!("engine.register_systems");
+        if let Some(f) = &mut app.on_register_system {
+            f(state);
+        }
+        state.init_active_scene();
+        state.registered_systems = true;
+    }
+
+    true
+}
+
+fn after_frame_systems(state: &mut State) {
+    crate::profile_scope!("renderer.clear_geometry_render_data");
+    state.global_resources.renderer.clear_geometry_render_data();
+}
+
+fn before_frame_render(state: &mut State) {
+    state.sync_render_queues();
+    state.events.clear();
+    crate::profile_counter!("frame.index", state.frame_index as f64);
+}
+
+fn render_frame(state: &mut State) {
+    match state.global_resources.renderer.render() {
+        Ok(_) => {
+            state
+                .global_resources
+                .frame_capturer
+                .finish_capture_after_frame();
+        }
+        Err(e) => {
+            log::error!("Unable to render {}", e);
+        }
+    }
+}
+
+fn after_frame_render(state: &mut State) {
+    state.update_after_render();
+}
+
+fn finish_app_redraw(app: &mut App) {
+    let Some(state) = app.state.as_mut() else {
+        return;
+    };
+
+    crate::profiling::end_frame();
+    state.global_resources.profiler_snapshot = crate::profiling::snapshot();
+    state.frame_index = state.frame_index.wrapping_add(1);
 }
 
 pub fn run() -> anyhow::Result<()> {

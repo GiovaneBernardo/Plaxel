@@ -5,7 +5,6 @@ use engine::ecs::entity::Entity;
 use game_types::{
     octree::{NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest},
     planet::PlanetTerrainEdits,
-    terrain,
 };
 
 use crate::{
@@ -661,7 +660,7 @@ pub fn traverse_octree(
         })
         .collect();
 
-    children.sort_by(|a, b| a.1.total_cmp(&b.1));
+    children.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
     for (child, _) in children {
         traverse_octree(ray_origin, ray_direction, child, best_t, last_node);

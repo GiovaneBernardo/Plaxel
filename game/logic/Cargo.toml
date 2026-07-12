@@ -24,9 +24,10 @@ rand = { workspace = true }
 web-time = { workspace = true }
 crossbeam-channel = { workspace = true }
 image = { workspace = true }
+subsecond = { workspace = true }
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

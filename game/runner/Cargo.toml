@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["profiling", "tracy"]
+default = ["static-game-logic", "profiling", "tracy"]
 dynamic_linking = []
 hot-reload = ["dep:hot-lib-reloader", "dynamic_linking"]
 static-game-logic = ["dep:static-game-logic"]
@@ -23,3 +23,4 @@ hot-lib-reloader = { workspace = true, optional = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
+dioxus-devtools = { workspace = true }

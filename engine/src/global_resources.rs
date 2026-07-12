@@ -1,11 +1,11 @@
-use std::{sync::Arc, thread};
+use std::sync::Arc;
 
 use winit::window::Window;
 
 use crate::{
     assets::manager::AssetManager,
     core::input::InputState,
-    frame_capturer::{self, FrameCapturer},
+    frame_capturer::FrameCapturer,
     multithreading::job_system::JobSystem,
     profiling::ProfileSnapshot,
     renderer::{self, Renderer},

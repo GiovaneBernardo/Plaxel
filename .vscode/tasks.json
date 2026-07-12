@@ -19,8 +19,8 @@
         {
             "label": "cargo build-editor",
             "type": "shell",
-            "command": "cargo build -p editor-runner -p game-logic -p editor-logic --features editor-runner/hot-reload,editor-runner/profiling,editor-runner/tracy",
+            "command": "cargo build -p editor-runner",
             "group": "build"
-        },
+        }
     ]
 }

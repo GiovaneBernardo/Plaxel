@@ -8,25 +8,20 @@ name = "editor-runner-bin"
 path = "src/main.rs"
 
 [features]
-default = ["profiling", "tracy", "renderdoc"]
-dynamic_linking = [
-    "editor-logic/dynamic_linking",
-]
+default = ["static-game-logic", "profiling", "renderdoc"]
+dynamic_linking = ["editor-logic/dynamic_linking"]
 hot-reload = ["dep:hot-lib-reloader", "dynamic_linking"]
 static-game-logic = ["dep:static-game-logic"]
-profiling = [
-    "engine/profiling",
-    "engine/puffin",
-    "editor-logic/puffin-ui",
-]
+profiling = ["engine/profiling", "engine/puffin", "editor-logic/puffin-ui"]
 tracy = ["engine/tracy"]
 renderdoc = ["engine/renderdoc"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 static-game-logic = { package = "game-logic", path = "../../game/logic", optional = true }
+game-runner = { path = "../../game/runner", default-features = false }
 editor-logic = { path = "../logic" }
 anyhow = { workspace = true }
 log = { workspace = true }
@@ -35,6 +30,8 @@ wgpu = { workspace = true }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 hot-lib-reloader = { workspace = true, optional = true }
+subsecond = { workspace = true }
+dioxus-devtools = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 engine = { path = "../../engine" }

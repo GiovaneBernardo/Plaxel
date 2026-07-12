@@ -289,9 +289,12 @@ fn push_console_entry(level: ConsoleLevel, target: impl Into<String>, message: i
 
 #[cfg(not(target_arch = "wasm32"))]
 fn console_log_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(CONSOLE_LOG_PATH)
+    // Keep runtime writes outside the hotpatch watch tree.
+    std::env::temp_dir().join(format!(
+        "{}_{}",
+        std::process::id(),
+        CONSOLE_LOG_PATH.trim_start_matches('.')
+    ))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

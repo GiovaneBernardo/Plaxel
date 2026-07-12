@@ -8,6 +8,7 @@ use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Vector3, point3, vec3};
 use engine::{
     core::components::core::TransformComponent,
     ecs::{commands::Commands, query::Query, system::SystemContext},
+    game_info,
     renderer::PipelineHandle,
 };
 use game_types::{
@@ -567,8 +568,13 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
                 break;
             }
 
-            mesh_jobs.ready_meshes.sort_by_key(|mesh| !mesh.urgent);
-            mesh_jobs.ready_meshes.remove(0)
+            // Urgent meshes first, preserving FIFO order within each priority.
+            let next_index = mesh_jobs
+                .ready_meshes
+                .iter()
+                .position(|mesh| mesh.urgent)
+                .unwrap_or(0);
+            mesh_jobs.ready_meshes.remove(next_index)
         };
         let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();

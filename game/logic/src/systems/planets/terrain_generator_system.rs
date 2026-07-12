@@ -8,7 +8,7 @@ use crate::{octree, sdf::EarthHeightmap};
 
 pub trait PlanetExt {
     fn dual_contour_grid(
-        grid: &Vec<Vec<Vec<f32>>>,
+        grid: &[Vec<Vec<f32>>],
         offset: Point3<f32>,
         resolution: f32,
         planet_position: Vector3<f32>,
@@ -31,9 +31,237 @@ pub trait PlanetExt {
     );
 }
 
+type CellVertexGrid = Vec<Vec<Vec<Option<u32>>>>;
+
+const CELL_EDGES: [(usize, usize); 12] = [
+    (0, 1),
+    (1, 3),
+    (3, 2),
+    (2, 0),
+    (4, 5),
+    (5, 7),
+    (7, 6),
+    (6, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
+
+// Avoid large Windows hotpatch stack frames.
+#[inline(never)]
+fn contour_cell_vertex(
+    grid: &[Vec<Vec<f32>>],
+    x: usize,
+    y: usize,
+    z: usize,
+    offset: Point3<f32>,
+    resolution: f32,
+    planet_position: Vector3<f32>,
+    heightmap: Option<&EarthHeightmap>,
+) -> Option<PlanetVertex> {
+    let corners = [
+        grid[x][y][z],
+        grid[x + 1][y][z],
+        grid[x][y + 1][z],
+        grid[x + 1][y + 1][z],
+        grid[x][y][z + 1],
+        grid[x + 1][y][z + 1],
+        grid[x][y + 1][z + 1],
+        grid[x + 1][y + 1][z + 1],
+    ];
+
+    let has_negative = corners.iter().any(|&density| density < 0.0);
+    let has_positive = corners.iter().any(|&density| density > 0.0);
+    if !(has_negative && has_positive) {
+        return None;
+    }
+
+    let base = vec3(
+        x as f32 * resolution + offset.x,
+        y as f32 * resolution + offset.y,
+        z as f32 * resolution + offset.z,
+    );
+    let positions = [
+        base,
+        base + vec3(resolution, 0.0, 0.0),
+        base + vec3(0.0, resolution, 0.0),
+        base + vec3(resolution, resolution, 0.0),
+        base + vec3(0.0, 0.0, resolution),
+        base + vec3(resolution, 0.0, resolution),
+        base + vec3(0.0, resolution, resolution),
+        base + vec3(resolution, resolution, resolution),
+    ];
+
+    let mut intersection_sum = vec3(0.0, 0.0, 0.0);
+    let mut intersection_count = 0;
+    for (first, second) in CELL_EDGES {
+        let first_density = corners[first];
+        let second_density = corners[second];
+        let denominator = first_density - second_density;
+        if denominator.abs() < 1e-6 || first_density * second_density >= 0.0 {
+            continue;
+        }
+
+        let first_position = positions[first];
+        let second_position = positions[second];
+        let t = (first_density / denominator).clamp(0.0, 1.0);
+        intersection_sum += first_position + (second_position - first_position) * t;
+        intersection_count += 1;
+    }
+
+    if intersection_count == 0 {
+        return None;
+    }
+
+    let average = intersection_sum / intersection_count as f32;
+
+    if !average.x.is_finite() || !average.y.is_finite() || !average.z.is_finite() {
+        return None;
+    }
+
+    let size_x = grid.len();
+    let size_y = grid[0].len();
+    let size_z = grid[0][0].len();
+    let average_position = Point3::from_vec(average);
+    let dx = grid[(x + 1).min(size_x - 1)][y][z] - grid[x.saturating_sub(1)][y][z];
+    let dy = grid[x][(y + 1).min(size_y - 1)][z] - grid[x][y.saturating_sub(1)][z];
+    let dz = grid[x][y][(z + 1).min(size_z - 1)] - grid[x][y][z.saturating_sub(1)];
+    let gradient = vec3(dx, dy, dz);
+    let normal = if gradient.magnitude2() > 1e-12 {
+        gradient.normalize()
+    } else {
+        (average_position.to_vec() - planet_position).normalize()
+    };
+    let average_normal = [normal.x, normal.y, normal.z];
+    let radial = average_position.to_vec() - planet_position;
+    let up = if radial.magnitude2() > 1e-6 {
+        radial.normalize()
+    } else {
+        vec3(0.0, 1.0, 0.0)
+    };
+    let slope = average_normal[0] * up.x + average_normal[1] * up.y + average_normal[2] * up.z;
+    let is_ocean = heightmap
+        .and_then(|heightmap| heightmap.sample_unit_height(up))
+        .is_some_and(|height| height == 0.0);
+
+    let (mat_a, mat_b, blend) = if is_ocean {
+        (3u16, 3u16, 0u8)
+    } else if slope > 0.7 {
+        (0u16, 1u16, 0u8)
+    } else if slope > 0.4 {
+        let blend = ((0.7 - slope) / 0.3 * 255.0) as u8;
+        (0u16, 1u16, blend)
+    } else {
+        (1u16, 1u16, 0u8)
+    };
+
+    Some(PlanetVertex {
+        position: [average_position.x, average_position.y, average_position.z],
+        normal: average_normal,
+        mat_a,
+        mat_b,
+        blend,
+        _pad: [0, 0, 0],
+    })
+}
+
+#[inline(never)]
+fn append_x_edge_indices(
+    grid: &[Vec<Vec<f32>>],
+    cell_vertex: &CellVertexGrid,
+    indices: &mut Vec<u32>,
+) {
+    let size_x = grid.len();
+    let size_y = grid[0].len();
+    let size_z = grid[0][0].len();
+
+    for x in 0..(size_x - 1) {
+        for y in 1..(size_y - 1) {
+            for z in 1..(size_z - 1) {
+                if grid[x][y][z] * grid[x + 1][y][z] >= 0.0 {
+                    continue;
+                }
+
+                let vertices = [
+                    cell_vertex[x][y][z],
+                    cell_vertex[x][y - 1][z],
+                    cell_vertex[x][y][z - 1],
+                    cell_vertex[x][y - 1][z - 1],
+                ];
+                if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
+                    indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+                }
+            }
+        }
+    }
+}
+
+#[inline(never)]
+fn append_y_edge_indices(
+    grid: &[Vec<Vec<f32>>],
+    cell_vertex: &CellVertexGrid,
+    indices: &mut Vec<u32>,
+) {
+    let size_x = grid.len();
+    let size_y = grid[0].len();
+    let size_z = grid[0][0].len();
+
+    for x in 1..(size_x - 1) {
+        for y in 0..(size_y - 1) {
+            for z in 1..(size_z - 1) {
+                if grid[x][y][z] * grid[x][y + 1][z] >= 0.0 {
+                    continue;
+                }
+
+                let vertices = [
+                    cell_vertex[x][y][z],
+                    cell_vertex[x - 1][y][z],
+                    cell_vertex[x][y][z - 1],
+                    cell_vertex[x - 1][y][z - 1],
+                ];
+                if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
+                    indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+                }
+            }
+        }
+    }
+}
+
+#[inline(never)]
+fn append_z_edge_indices(
+    grid: &[Vec<Vec<f32>>],
+    cell_vertex: &CellVertexGrid,
+    indices: &mut Vec<u32>,
+) {
+    let size_x = grid.len();
+    let size_y = grid[0].len();
+    let size_z = grid[0][0].len();
+
+    for x in 1..(size_x - 1) {
+        for y in 1..(size_y - 1) {
+            for z in 0..(size_z - 1) {
+                if grid[x][y][z] * grid[x][y][z + 1] >= 0.0 {
+                    continue;
+                }
+
+                let vertices = [
+                    cell_vertex[x][y][z],
+                    cell_vertex[x - 1][y][z],
+                    cell_vertex[x][y - 1][z],
+                    cell_vertex[x - 1][y - 1][z],
+                ];
+                if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
+                    indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+                }
+            }
+        }
+    }
+}
+
 impl PlanetExt for Planet {
     fn dual_contour_grid(
-        grid: &Vec<Vec<Vec<f32>>>,
+        grid: &[Vec<Vec<f32>>],
         offset: Point3<f32>,
         resolution: f32,
         planet_position: Vector3<f32>,
@@ -53,194 +281,28 @@ impl PlanetExt for Planet {
         for x in 0..(size_x - 1) {
             for y in 0..(size_y - 1) {
                 for z in 0..(size_z - 1) {
-                    let corners = [
-                        grid[x][y][z],
-                        grid[x + 1][y][z],
-                        grid[x][y + 1][z],
-                        grid[x + 1][y + 1][z],
-                        grid[x][y][z + 1],
-                        grid[x + 1][y][z + 1],
-                        grid[x][y + 1][z + 1],
-                        grid[x + 1][y + 1][z + 1],
-                    ];
-
-                    let has_neg = corners.iter().any(|&d| d < 0.0);
-                    let has_pos = corners.iter().any(|&d| d > 0.0);
-
-                    if !(has_neg && has_pos) {
+                    let Some(vertex) = contour_cell_vertex(
+                        grid,
+                        x,
+                        y,
+                        z,
+                        offset,
+                        resolution,
+                        planet_position,
+                        heightmap,
+                    ) else {
                         continue;
-                    }
-
-                    let bx = x as f32 * resolution + offset.x;
-                    let by = y as f32 * resolution + offset.y;
-                    let bz = z as f32 * resolution + offset.z;
-                    let positions = [
-                        vec3(bx, by, bz),
-                        vec3(bx + resolution, by, bz),
-                        vec3(bx, by + resolution, bz),
-                        vec3(bx + resolution, by + resolution, bz),
-                        vec3(bx, by, bz + resolution),
-                        vec3(bx + resolution, by, bz + resolution),
-                        vec3(bx, by + resolution, bz + resolution),
-                        vec3(bx + resolution, by + resolution, bz + resolution),
-                    ];
-
-                    let edges = [
-                        (0, 1),
-                        (1, 3),
-                        (3, 2),
-                        (2, 0),
-                        (4, 5),
-                        (5, 7),
-                        (7, 6),
-                        (6, 4),
-                        (0, 4),
-                        (1, 5),
-                        (2, 6),
-                        (3, 7),
-                    ];
-
-                    let mut intersections = Vec::new();
-                    for (i1, i2) in edges {
-                        let d1 = corners[i1];
-                        let d2 = corners[i2];
-                        let denom = d1 - d2;
-                        if denom.abs() < 1e-6 {
-                            continue;
-                        }
-                        if d1 * d2 < 0.0 {
-                            let p1 = positions[i1];
-                            let p2 = positions[i2];
-                            let t = (d1 / denom).clamp(0.0, 1.0);
-                            let p = p1 + (p2 - p1) * t;
-                            intersections.push(p);
-                        }
-                    }
-
-                    if intersections.is_empty() {
-                        continue;
-                    }
-
-                    let mut avg = vec3(0.0, 0.0, 0.0);
-                    for p in &intersections {
-                        avg += *p;
-                    }
-                    avg /= intersections.len() as f32;
-
-                    if !avg.x.is_finite() || !avg.y.is_finite() || !avg.z.is_finite() {
-                        continue;
-                    }
-
+                    };
                     let index = vertices.len() as u32;
-                    let avg_pos: Point3<f32> = Point3::from_vec(avg);
-
-                    let dx = grid[(x + 1).min(size_x - 1)][y][z] - grid[x.saturating_sub(1)][y][z];
-                    let dy = grid[x][(y + 1).min(size_y - 1)][z] - grid[x][y.saturating_sub(1)][z];
-                    let dz = grid[x][y][(z + 1).min(size_z - 1)] - grid[x][y][z.saturating_sub(1)];
-                    let n = vec3(dx, dy, dz);
-                    let n = if n.magnitude2() > 1e-12 {
-                        n.normalize()
-                    } else {
-                        (avg_pos.to_vec() - planet_position).normalize()
-                    };
-                    let avg_norm = [n.x, n.y, n.z];
-                    let avg_vec = avg_pos.to_vec() - planet_position;
-                    let up = if avg_vec.magnitude2() > 1e-6 {
-                        avg_vec.normalize()
-                    } else {
-                        vec3(0.0, 1.0, 0.0)
-                    };
-                    let slope = avg_norm[0] * up.x + avg_norm[1] * up.y + avg_norm[2] * up.z;
-                    let is_ocean = heightmap
-                        .and_then(|heightmap| heightmap.sample_unit_height(up))
-                        .is_some_and(|height| height == 0.0);
-
-                    let (mat_a, mat_b, blend) = if is_ocean {
-                        (3u16, 3u16, 0u8)
-                    } else if slope > 0.7 {
-                        (0u16, 1u16, 0u8)
-                    } else if slope > 0.4 {
-                        let t = (0.7 - slope) / 0.3;
-                        (0u16, 1u16, (t * 255.0) as u8)
-                    } else {
-                        (1u16, 1u16, 0u8)
-                    };
-
-                    vertices.push(PlanetVertex {
-                        position: [avg_pos.x, avg_pos.y, avg_pos.z],
-                        normal: avg_norm,
-                        mat_a,
-                        mat_b,
-                        blend,
-                        _pad: [0, 0, 0],
-                    });
+                    vertices.push(vertex);
                     cell_vertex[x][y][z] = Some(index);
                 }
             }
         }
 
-        // X edges
-        for x in 0..(size_x - 1) {
-            for y in 1..(size_y - 1) {
-                for z in 1..(size_z - 1) {
-                    let d1 = grid[x][y][z];
-                    let d2 = grid[x + 1][y][z];
-                    if d1 * d2 >= 0.0 {
-                        continue;
-                    }
-                    let v0 = cell_vertex[x][y][z];
-                    let v1 = cell_vertex[x][y - 1][z];
-                    let v2 = cell_vertex[x][y][z - 1];
-                    let v3 = cell_vertex[x][y - 1][z - 1];
-                    if let (Some(v0), Some(v1), Some(v2), Some(v3)) = (v0, v1, v2, v3) {
-                        indices.extend_from_slice(&[v0, v1, v2]);
-                        indices.extend_from_slice(&[v2, v1, v3]);
-                    }
-                }
-            }
-        }
-
-        // Y edges
-        for x in 1..(size_x - 1) {
-            for y in 0..(size_y - 1) {
-                for z in 1..(size_z - 1) {
-                    let d1 = grid[x][y][z];
-                    let d2 = grid[x][y + 1][z];
-                    if d1 * d2 >= 0.0 {
-                        continue;
-                    }
-                    let v0 = cell_vertex[x][y][z];
-                    let v1 = cell_vertex[x - 1][y][z];
-                    let v2 = cell_vertex[x][y][z - 1];
-                    let v3 = cell_vertex[x - 1][y][z - 1];
-                    if let (Some(v0), Some(v1), Some(v2), Some(v3)) = (v0, v1, v2, v3) {
-                        indices.extend_from_slice(&[v0, v1, v2]);
-                        indices.extend_from_slice(&[v2, v1, v3]);
-                    }
-                }
-            }
-        }
-
-        // Z edges
-        for x in 1..(size_x - 1) {
-            for y in 1..(size_y - 1) {
-                for z in 0..(size_z - 1) {
-                    let d1 = grid[x][y][z];
-                    let d2 = grid[x][y][z + 1];
-                    if d1 * d2 >= 0.0 {
-                        continue;
-                    }
-                    let v0 = cell_vertex[x][y][z];
-                    let v1 = cell_vertex[x - 1][y][z];
-                    let v2 = cell_vertex[x][y - 1][z];
-                    let v3 = cell_vertex[x - 1][y - 1][z];
-                    if let (Some(v0), Some(v1), Some(v2), Some(v3)) = (v0, v1, v2, v3) {
-                        indices.extend_from_slice(&[v0, v1, v2]);
-                        indices.extend_from_slice(&[v2, v1, v3]);
-                    }
-                }
-            }
-        }
+        append_x_edge_indices(grid, &cell_vertex, &mut indices);
+        append_y_edge_indices(grid, &cell_vertex, &mut indices);
+        append_z_edge_indices(grid, &cell_vertex, &mut indices);
 
         (vertices, indices)
     }

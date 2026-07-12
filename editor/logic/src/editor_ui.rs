@@ -126,18 +126,32 @@ impl EditorUi {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, state: &mut engine::State) {
+        self.show_impl(ctx, state);
+    }
+
+    #[inline(never)]
+    fn show_impl(&mut self, ctx: &egui::Context, state: &mut engine::State) {
         if !self.style_applied {
-            apply_editor_style(ctx);
+            let mut apply_style = subsecond::HotFn::current(apply_editor_style);
+            apply_style.call((ctx,));
             self.style_applied = true;
         }
 
-        self.sanitize_selection(state);
-        self.top_toolbar(ctx);
-        self.status_bar(ctx, state);
+        let mut sanitize_selection = subsecond::HotFn::current(Self::sanitize_selection);
+        sanitize_selection.call((self, state));
+
+        let mut top_toolbar = subsecond::HotFn::current(Self::top_toolbar);
+        top_toolbar.call((self, ctx));
+
+        let mut status_bar = subsecond::HotFn::current(Self::status_bar);
+        status_bar.call((&*self, ctx, &*state));
 
         if self.maximize_viewport {
-            self.show_maximized_viewport(ctx, state);
-            self.save_layout_if_changed(ctx);
+            let mut show_maximized = subsecond::HotFn::current(Self::show_maximized_viewport);
+            show_maximized.call((self, ctx, state));
+
+            let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
+            save_layout.call((self, ctx));
             return;
         }
 
@@ -157,7 +171,8 @@ impl EditorUi {
                     .show_inside(ui, &mut viewer);
             });
 
-        self.save_layout_if_changed(ctx);
+        let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
+        save_layout.call((self, ctx));
     }
 
     fn top_toolbar(&mut self, ctx: &egui::Context) {
@@ -561,16 +576,46 @@ impl TabViewer for EditorTabViewer<'_> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
-            EditorTab::Viewport => draw_viewport_tab(ui),
-            EditorTab::Hierarchy => draw_hierarchy(ui, self.state, self.selected_entity),
-            EditorTab::Inspector => draw_inspector(ui, self.state, self.selected_entity),
-            EditorTab::Console => draw_console(ui),
-            EditorTab::Assets => draw_asset_browser(ui, self.state, self.assets),
-            EditorTab::Textures => draw_texture_explorer(ui, self.state, self.assets),
-            EditorTab::RenderGraph => draw_render_graph(ui, self.state, self.selected_render_node),
-            EditorTab::Profiler => draw_profiler(ui, self.state, self.show_puffin_profiler),
-            EditorTab::Timeline => draw_timeline(ui),
-            EditorTab::Physics => draw_physics(ui),
+            EditorTab::Viewport => {
+                let mut draw = subsecond::HotFn::current(draw_viewport_tab);
+                draw.call((ui,));
+            }
+            EditorTab::Hierarchy => {
+                let mut draw = subsecond::HotFn::current(draw_hierarchy);
+                draw.call((ui, &mut *self.state, &mut *self.selected_entity));
+            }
+            EditorTab::Inspector => {
+                let mut draw = subsecond::HotFn::current(draw_inspector);
+                draw.call((ui, &mut *self.state, &mut *self.selected_entity));
+            }
+            EditorTab::Console => {
+                let mut draw = subsecond::HotFn::current(draw_console);
+                draw.call((ui,));
+            }
+            EditorTab::Assets => {
+                let mut draw = subsecond::HotFn::current(draw_asset_browser);
+                draw.call((ui, &mut *self.state, &mut *self.assets));
+            }
+            EditorTab::Textures => {
+                let mut draw = subsecond::HotFn::current(draw_texture_explorer);
+                draw.call((ui, &mut *self.state, &mut *self.assets));
+            }
+            EditorTab::RenderGraph => {
+                let mut draw = subsecond::HotFn::current(draw_render_graph);
+                draw.call((ui, &mut *self.state, &mut *self.selected_render_node));
+            }
+            EditorTab::Profiler => {
+                let mut draw = subsecond::HotFn::current(draw_profiler);
+                draw.call((ui, &mut *self.state, &mut *self.show_puffin_profiler));
+            }
+            EditorTab::Timeline => {
+                let mut draw = subsecond::HotFn::current(draw_timeline);
+                draw.call((ui,));
+            }
+            EditorTab::Physics => {
+                let mut draw = subsecond::HotFn::current(draw_physics);
+                draw.call((ui,));
+            }
         }
     }
 
