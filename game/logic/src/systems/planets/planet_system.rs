@@ -9,11 +9,15 @@ use engine::{
     core::components::core::TransformComponent,
     ecs::{commands::Commands, query::Query, system::SystemContext},
     game_info,
+    multithreading::job_system::JobPriorityHandle,
     renderer::{AtmospherePassNode, PipelineHandle},
 };
 use game_types::{
-    octree::{NodeKey, OctreeChanges, PlanetMeshRequest},
-    planet::{Planet, PlanetTerrainEdits, PlanetVertex, SolarSystemComponent},
+    octree::{
+        GeneratedMesh, GeneratedReplacement, NodeKey, NodeState, OctreeChanges, OctreeNode,
+        PlanetMeshRequest,
+    },
+    planet::{Planet, PlanetTerrainEdits, SolarSystemComponent},
 };
 use rand::Rng;
 use web_time::{Duration, Instant};
@@ -38,14 +42,23 @@ pub struct MeshJobResults {
     pub pending_requests: HashMap<NodeKey, PendingMeshRequest>,
     pub base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
     pub ready_meshes: Vec<GeneratedMesh>,
+    pub replacement_sender: Sender<GeneratedReplacement>,
+    pub replacement_receiver: Receiver<GeneratedReplacement>,
+    pub ready_replacements: Vec<GeneratedReplacement>,
+    pub next_replacement_id: u64,
+    pub prioritized_jobs: Vec<PrioritizedMeshJob>,
 }
 
-pub struct GeneratedMesh {
-    pub key: NodeKey,
-    pub version: u64,
-    pub urgent: bool,
-    pub vertices: Vec<PlanetVertex>,
-    pub indices: Vec<u32>,
+pub struct PrioritizedMeshJob {
+    pub handle: JobPriorityHandle,
+    pub target: MeshPriorityTarget,
+    pub requests: Vec<PlanetMeshRequest>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MeshPriorityTarget {
+    Single { key: NodeKey, version: u64 },
+    Replacement(u64),
 }
 
 pub struct PendingMeshRequest {
@@ -137,6 +150,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
     let mut mesh_requests = Vec::new();
 
     let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded();
+    let (replacement_tx, replacement_rx) = crossbeam_channel::unbounded();
     let base_grid_cache = Arc::new(Mutex::new(HashMap::new()));
     world.insert_resource(MeshJobResults {
         sender: mesh_tx,
@@ -148,6 +162,11 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         pending_requests: HashMap::new(),
         base_grid_cache,
         ready_meshes: Vec::new(),
+        replacement_sender: replacement_tx,
+        replacement_receiver: replacement_rx,
+        ready_replacements: Vec::new(),
+        next_replacement_id: 0,
+        prioritized_jobs: Vec::new(),
     });
 
     // Create solar system
@@ -303,11 +322,32 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         .into();
     }
 
+    changes.sort_by(|a, b| {
+        let size_a = change_node_size(a);
+        let size_b = change_node_size(b);
+
+        // Smaller chunks—deeper octree levels—first.
+        size_a.total_cmp(&size_b)
+    });
+
     for change in changes {
         apply_change(ctx, &change);
     }
 
     drain_generated_meshes(ctx);
+    reprioritize_mesh_jobs(ctx, camera_pos);
+}
+
+fn change_node_size(change: &OctreeChanges) -> f32 {
+    match change {
+        OctreeChanges::ReplaceMeshes { requests, .. } => requests
+            .first()
+            .map_or(f32::MAX, |request| request.node_size),
+
+        OctreeChanges::AddMesh { request } => request.node_size,
+
+        OctreeChanges::RemoveMeshes { .. } => f32::MAX,
+    }
 }
 
 pub fn build_requested_mesh(
@@ -527,11 +567,64 @@ fn start_mesh_job(
             .name("urgent-terrain-mesh".to_string())
             .spawn(job);
     } else {
-        let _ = ctx.globals.job_system.spawn(job);
+        let priority = mesh_job_priority(ctx, &[request]);
+        if let Ok(handle) = ctx.globals.job_system.spawn_prioritized(priority, job) {
+            let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
+            mesh_jobs.prioritized_jobs.push(PrioritizedMeshJob {
+                handle,
+                target: MeshPriorityTarget::Single {
+                    key: mesh_request_key(&request),
+                    version,
+                },
+                requests: vec![request],
+            });
+        }
     }
 }
 
 pub fn drain_generated_meshes(ctx: &mut SystemContext) {
+    loop {
+        let replacement = {
+            let Some(mesh_jobs) = ctx.world.get_resource::<MeshJobResults>() else {
+                return;
+            };
+            match mesh_jobs.replacement_receiver.try_recv() {
+                Ok(replacement) => replacement,
+                Err(_) => break,
+            }
+        };
+
+        let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
+        mesh_jobs.prioritized_jobs.retain(|job| {
+            job.target != MeshPriorityTarget::Replacement(replacement.replacement_id)
+        });
+        for mesh in &replacement.meshes {
+            let remaining = mesh_jobs
+                .in_flight_counts
+                .get_mut(&mesh.key)
+                .map(|count| {
+                    *count = count.saturating_sub(1);
+                    *count
+                })
+                .unwrap_or(0);
+            if remaining == 0 {
+                mesh_jobs.in_flight_counts.remove(&mesh.key);
+                mesh_jobs.in_flight.remove(&mesh.key);
+            }
+        }
+
+        let still_current = replacement.meshes.iter().all(|mesh| {
+            mesh_jobs.wanted.contains(&mesh.key)
+                && mesh_jobs
+                    .versions
+                    .get(&mesh.key)
+                    .is_some_and(|version| *version == mesh.version)
+        });
+        if still_current {
+            mesh_jobs.ready_replacements.push(replacement);
+        }
+    }
+
     loop {
         let mesh = {
             let Some(mesh_jobs) = ctx.world.get_resource::<MeshJobResults>() else {
@@ -548,6 +641,14 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
                 return;
             };
+
+            mesh_jobs.prioritized_jobs.retain(|job| {
+                job.target
+                    != MeshPriorityTarget::Single {
+                        key: mesh.key,
+                        version: mesh.version,
+                    }
+            });
 
             let remaining_in_flight =
                 if let Some(count) = mesh_jobs.in_flight_counts.get_mut(&mesh.key) {
@@ -613,6 +714,72 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             break;
         }
 
+        let replacement = {
+            let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
+                return;
+            };
+            if mesh_jobs.ready_replacements.is_empty() {
+                break;
+            }
+            mesh_jobs.ready_replacements.remove(0)
+        };
+
+        let still_current = {
+            let mesh_jobs = ctx.world.get_resource::<MeshJobResults>().unwrap();
+            replacement.meshes.iter().all(|mesh| {
+                mesh_jobs.wanted.contains(&mesh.key)
+                    && mesh_jobs
+                        .versions
+                        .get(&mesh.key)
+                        .is_some_and(|version| *version == mesh.version)
+            })
+        };
+        if !still_current {
+            continue;
+        }
+
+        let transition = (
+            replacement.planet_entity,
+            replacement.transition_key,
+            replacement.completed_state,
+        );
+
+        // Create every new GPU mesh before changing the visible mesh map.
+        let mut uploaded = Vec::new();
+        for mesh in replacement.meshes {
+            if mesh.vertices.is_empty() {
+                continue;
+            }
+            let game_state = ctx.world.get_resource::<GameState>().unwrap();
+            let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
+            let mut render_data = ctx.globals.renderer.renderer_api.create_render_data(
+                &vertex_bytes,
+                &mesh.indices,
+                game_state.solid_material.clone(),
+                &PipelineHandle(0),
+            );
+            render_data
+                .extra_bind_groups
+                .push((2, game_state.terrain_materials_bind_group));
+            uploaded.push((mesh.key, render_data));
+        }
+
+        let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
+        for key in replacement.keys_to_remove {
+            game_state.planets_meshes.remove(&key);
+        }
+        for (key, render_data) in uploaded {
+            game_state.planets_meshes.insert(key, render_data);
+        }
+        drop(game_state);
+        complete_replacement_transition(ctx, transition.0, transition.1, transition.2);
+    }
+
+    loop {
+        if start.elapsed() >= MESH_UPLOAD_BUDGET {
+            break;
+        }
+
         let mesh = {
             let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
                 return;
@@ -647,16 +814,21 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
 
 pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
     match change {
-        OctreeChanges::ReplaceMesh {
+        OctreeChanges::ReplaceMeshes {
+            planet_entity,
+            transition_key,
+            completed_state,
             keys_to_remove,
             requests,
         } => {
-            for key in keys_to_remove {
-                apply_change(ctx, &OctreeChanges::RemoveMeshes { key: *key });
-            }
-            for request in requests {
-                submit_requested_mesh(ctx, *request);
-            }
+            submit_replacement(
+                ctx,
+                *planet_entity,
+                *transition_key,
+                *completed_state,
+                keys_to_remove.clone(),
+                requests.clone(),
+            );
         }
         OctreeChanges::AddMesh { request } => {
             submit_requested_mesh(ctx, *request);
@@ -671,6 +843,167 @@ pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
             game_state.planets_meshes.remove(key);
         }
     }
+}
+
+fn submit_replacement(
+    ctx: &mut SystemContext,
+    planet_entity: engine::ecs::entity::Entity,
+    transition_key: NodeKey,
+    completed_state: NodeState,
+    keys_to_remove: Vec<NodeKey>,
+    requests: Vec<PlanetMeshRequest>,
+) {
+    if requests.is_empty() {
+        for key in keys_to_remove {
+            apply_change(ctx, &OctreeChanges::RemoveMeshes { key });
+        }
+        complete_replacement_transition(ctx, planet_entity, transition_key, completed_state);
+        return;
+    }
+
+    let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
+    // Invalidate old CPU jobs now, but keep their already uploaded meshes visible.
+    for key in &keys_to_remove {
+        mesh_jobs.wanted.remove(key);
+        mesh_jobs.pending_requests.remove(key);
+    }
+    drop(mesh_jobs);
+
+    // Prepare ECS-owned data on the main thread. The worker only receives owned data.
+    let prepared: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            let terrain_edits = ctx
+                .world
+                .get::<PlanetTerrainEdits>(request.planet_entity)
+                .unwrap();
+            (*request, edits_for_mesh_request(&terrain_edits, request))
+        })
+        .collect();
+
+    let (replacement_id, sender, base_grid_cache, versions) = {
+        let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
+
+        mesh_jobs.next_replacement_id += 1;
+        let replacement_id = mesh_jobs.next_replacement_id;
+        let mut versions = Vec::with_capacity(requests.len());
+        for request in &requests {
+            let key = mesh_request_key(request);
+            mesh_jobs.wanted.insert(key);
+            let version = mesh_jobs.versions.entry(key).or_insert(0);
+            *version += 1;
+            versions.push(*version);
+            mesh_jobs.in_flight.insert(key);
+            *mesh_jobs.in_flight_counts.entry(key).or_insert(0) += 1;
+        }
+        (
+            replacement_id,
+            mesh_jobs.replacement_sender.clone(),
+            Arc::clone(&mesh_jobs.base_grid_cache),
+            versions,
+        )
+    };
+
+    let priority = mesh_job_priority(ctx, &requests);
+    let priority_requests = requests.clone();
+    let job = move || {
+        let meshes = prepared
+            .into_iter()
+            .zip(versions)
+            .map(|((request, terrain_edits), version)| {
+                build_requested_mesh(
+                    request,
+                    version,
+                    false,
+                    None,
+                    &terrain_edits,
+                    Arc::clone(&base_grid_cache),
+                )
+            })
+            .collect();
+
+        let _ = sender.send(GeneratedReplacement {
+            replacement_id,
+            planet_entity,
+            transition_key,
+            completed_state,
+            keys_to_remove,
+            meshes,
+        });
+    };
+    if let Ok(handle) = ctx.globals.job_system.spawn_prioritized(priority, job) {
+        let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
+        mesh_jobs.prioritized_jobs.push(PrioritizedMeshJob {
+            handle,
+            target: MeshPriorityTarget::Replacement(replacement_id),
+            requests: priority_requests,
+        });
+    }
+}
+
+fn mesh_job_priority(ctx: &SystemContext, requests: &[PlanetMeshRequest]) -> u32 {
+    let camera_pos = ctx
+        .world
+        .get_resource::<GameCamera>()
+        .and_then(|camera| ctx.world.get::<TransformComponent>(camera.entity))
+        .map(|transform| transform.position)
+        .unwrap_or(Vec3::ZERO);
+    priority_for_requests(requests, camera_pos)
+}
+
+fn reprioritize_mesh_jobs(ctx: &mut SystemContext, camera_pos: Vec3) {
+    let Some(mesh_jobs) = ctx.world.get_resource::<MeshJobResults>() else {
+        return;
+    };
+    for job in &mesh_jobs.prioritized_jobs {
+        job.handle
+            .set(priority_for_requests(&job.requests, camera_pos));
+    }
+}
+
+fn priority_for_requests(requests: &[PlanetMeshRequest], camera_pos: Vec3) -> u32 {
+    let distance = requests
+        .iter()
+        .map(|request| {
+            let half = request.node_size * 0.5;
+            let center = request.node_min_corner + vec3(half, half, half);
+            center.distance(camera_pos)
+        })
+        .min_by(f32::total_cmp)
+        .unwrap_or(f32::MAX);
+    let node_size = requests
+        .first()
+        .map_or(f32::MAX, |request| request.node_size);
+
+    // Distance is primary. The low byte breaks ties in favor of deeper LODs.
+    let distance_bucket = (distance * 4.0).clamp(0.0, 0x00ff_ffff as f32) as u32;
+    let depth_tie_breaker = 255_u32.saturating_sub(node_size.max(1.0).log2() as u32);
+    ((0x00ff_ffff - distance_bucket) << 8) | depth_tie_breaker
+}
+
+fn complete_replacement_transition(
+    ctx: &mut SystemContext,
+    planet_entity: engine::ecs::entity::Entity,
+    transition_key: NodeKey,
+    completed_state: NodeState,
+) {
+    let Some(mut planet) = ctx.world.get_mut::<Planet>(planet_entity) else {
+        return;
+    };
+    set_octree_node_state(&mut planet.octree_root, transition_key, completed_state);
+}
+
+fn set_octree_node_state(node: &mut OctreeNode, key: NodeKey, state: NodeState) -> bool {
+    if node.key == key {
+        node.state = state;
+        return true;
+    }
+    let Some(children) = node.children.as_mut() else {
+        return false;
+    };
+    children
+        .iter_mut()
+        .any(|child| set_octree_node_state(child, key, state))
 }
 
 pub fn generate_grid_from_min(

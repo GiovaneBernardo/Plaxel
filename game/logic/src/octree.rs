@@ -342,6 +342,13 @@ pub fn update(
     let min_node_size = 32.0;
     let is_root_node = node.size >= planet_size as f32 * 0.5;
 
+    // Do not refine a topology that has not become visible yet. Otherwise a
+    // child replacement can supersede its parent replacement before anything
+    // takes responsibility for removing the currently rendered ancestor.
+    if matches!(node.state, NodeState::Splitting | NodeState::Merging) {
+        return;
+    }
+
     if is_root_node && node.children.is_none() {
         split_node(
             node,
@@ -525,19 +532,23 @@ fn split_node(
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    changes.push(OctreeChanges::RemoveMeshes { key: node.key });
-
     let children = create_children(node, planet_position, planet_size, heightmap, terrain_edits);
 
-    for child in children.iter() {
-        if child.has_surface {
-            changes.push(OctreeChanges::AddMesh {
-                request: mesh_request(child, planet_entity, planet_position, planet_size),
-            });
-        }
-    }
+    let requests = children
+        .iter()
+        .filter(|child| child.has_surface)
+        .map(|child| mesh_request(child, planet_entity, planet_position, planet_size))
+        .collect();
 
-    node.state = NodeState::Internal;
+    changes.push(OctreeChanges::ReplaceMeshes {
+        planet_entity,
+        transition_key: node.key,
+        completed_state: NodeState::Internal,
+        keys_to_remove: vec![node.key],
+        requests,
+    });
+
+    node.state = NodeState::Splitting;
     node.children = Some(children);
 }
 
@@ -548,17 +559,42 @@ fn merge_node(
     planet_position: Vec3,
     planet_size: u32,
 ) {
-    if let Some(children) = node.children.as_ref() {
-        collect_child_mesh_removals(children, changes);
+    let mut keys_to_remove = Vec::new();
+
+    if let Some(children) = &node.children {
+        collect_leaf_keys(children, &mut keys_to_remove);
     }
 
-    node.children = None;
-    node.state = NodeState::Leaf;
+    let requests = if node.has_surface {
+        vec![mesh_request(
+            node,
+            planet_entity,
+            planet_position,
+            planet_size,
+        )]
+    } else {
+        Vec::new()
+    };
 
-    if node.has_surface {
-        changes.push(OctreeChanges::AddMesh {
-            request: mesh_request(node, planet_entity, planet_position, planet_size),
-        });
+    changes.push(OctreeChanges::ReplaceMeshes {
+        planet_entity,
+        transition_key: node.key,
+        completed_state: NodeState::Leaf,
+        keys_to_remove,
+        requests,
+    });
+
+    node.state = NodeState::Merging;
+    node.children = None;
+}
+
+fn collect_leaf_keys(children: &[Box<OctreeNode>; 8], output: &mut Vec<NodeKey>) {
+    for child in children {
+        match &child.children {
+            Some(children) => collect_leaf_keys(children, output),
+            None if child.has_surface => output.push(child.key),
+            None => {}
+        }
     }
 }
 

@@ -1,6 +1,8 @@
 use engine::ecs::entity::Entity;
 use engine::math::Vec3;
 
+use crate::planet::PlanetVertex;
+
 #[derive(Copy, Clone, Debug)]
 pub enum NodeState {
     Leaf,
@@ -13,7 +15,10 @@ pub enum NodeState {
 #[derive(Debug, Clone)]
 pub enum OctreeChanges {
     // Always prefer ReplaceMesh over Add and Remove, as the later can first remove to only in a few frames add the mesh, making it flicker
-    ReplaceMesh {
+    ReplaceMeshes {
+        planet_entity: Entity,
+        transition_key: NodeKey,
+        completed_state: NodeState,
         keys_to_remove: Vec<NodeKey>,
         requests: Vec<PlanetMeshRequest>,
     },
@@ -41,6 +46,25 @@ pub struct QueuedMeshRequest {
     pub replacement_id: Option<u64>,
     pub priority: u32,
     pub sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedReplacement {
+    pub replacement_id: u64,
+    pub planet_entity: Entity,
+    pub transition_key: NodeKey,
+    pub completed_state: NodeState,
+    pub keys_to_remove: Vec<NodeKey>,
+    pub meshes: Vec<GeneratedMesh>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedMesh {
+    pub key: NodeKey,
+    pub version: u64,
+    pub urgent: bool,
+    pub vertices: Vec<PlanetVertex>,
+    pub indices: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
