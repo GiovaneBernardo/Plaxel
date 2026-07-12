@@ -767,7 +767,7 @@ impl RendererAPI for WgpuBackend {
         self.default_sampler.unwrap()
     }
 
-    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor) {
+    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor, index: Option<u32>) {
         // Load JPG from disk
         let img = image::open(path)
             .expect("Failed to load texture")
@@ -810,7 +810,7 @@ impl RendererAPI for WgpuBackend {
         );
 
         let handle = self.add_texture(wgpu_texture);
-        self.upload_texture(&handle, None);
+        self.upload_texture(&handle, index);
     }
 
     fn load_material(&mut self, header: &crate::assets::manager::AssetHeader) -> Material {
@@ -913,6 +913,7 @@ impl RendererAPI for WgpuBackend {
             material,
             transform_index: 0,
             sort_key: 0,
+            extra_bind_groups: Vec::new(),
         }
     }
 

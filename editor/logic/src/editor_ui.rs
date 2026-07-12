@@ -1606,6 +1606,7 @@ fn collider_shape_row(ui: &mut Ui, shape: &mut ColliderShape) {
 }
 
 fn drag_value(ui: &mut Ui, value: &mut f32, speed: f64, prefix: &'static str) {
+    let speed = speed.max(f64::from(value.abs()) * 0.01);
     ui.add_sized(
         [64.0, 20.0],
         egui::DragValue::new(value)

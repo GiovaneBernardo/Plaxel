@@ -1,7 +1,7 @@
 use cgmath::Vector3;
 use engine::ecs::entity::Entity;
 
-#[derive(Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum NodeState {
     Leaf,
     Internal,
@@ -25,7 +25,7 @@ pub struct PlanetMeshRequest {
     pub node_size: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OctreeNode {
     pub key: NodeKey,
     pub min: Vector3<f32>, // corner

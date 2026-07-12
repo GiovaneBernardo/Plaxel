@@ -316,6 +316,7 @@ impl State {
                     mip_levels: 1,
                     sample_count: 1,
                 },
+                None,
             );
             return;
         }

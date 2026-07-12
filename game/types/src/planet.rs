@@ -2,13 +2,23 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::octree::OctreeNode;
 use cgmath::Vector3;
-use engine::model::*;
+use engine::{
+    assets::{manager::Handle, material::TextureAsset},
+    ecs::entity::Entity,
+    model::*,
+};
 
+#[derive(Clone, Debug)]
 pub struct Planet {
     pub id: u64,
     pub name: String,
     pub position: Vector3<f32>,
     pub octree_root: OctreeNode,
+    pub solar_system: Entity,
+}
+
+pub struct SolarSystemComponent {
+    pub planets: Vec<Entity>,
 }
 
 pub struct PlanetMesh {
@@ -116,4 +126,43 @@ pub struct TerrainBrickKey {
 pub struct TerrainBrickEdits {
     pub resolution: u32,
     pub offsets: Vec<f32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlanetTerrainMaterial {
+    pub name: String,
+    pub diffuse: Handle<TextureAsset>,
+    pub normal: Option<Handle<TextureAsset>>,
+    pub displacement: Option<Handle<TextureAsset>>,
+    pub roughness: Option<Handle<TextureAsset>>,
+    pub texture_scale: f32,
+    pub displacement_scale: f32,
+    pub roughness_factor: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuPlanetTerrainMaterial {
+    pub diffuse_texture_index: u32,
+    pub normal_texture_index: u32,
+    pub displacement_texture_index: u32,
+    pub roughness_texture_index: u32,
+
+    pub texture_scale: f32,
+    pub displacement_scale: f32,
+    pub roughness_factor: f32,
+    pub flags: u32,
+}
+
+pub enum VoxelMaterial {
+    Air,
+    Water,
+    Dirt,
+    Grass,
+    Stone,
+    Snow,
+    Sand,
+    Hillstone,
+    DeepStone,
+    IronOre,
 }

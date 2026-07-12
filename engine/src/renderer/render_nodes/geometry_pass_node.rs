@@ -172,6 +172,10 @@ impl RenderNode for GeometryPassNode {
 
             ctx.bind_pipeline(pipeline);
 
+            for &(group_index, bind_group) in &render_data.extra_bind_groups {
+                ctx.bind_bind_group(group_index, bind_group);
+            }
+
             let vertex_buffer = ctx.get_mesh_vertex_buffer(&render_data.mesh);
             ctx.bind_vertex_buffer(0, vertex_buffer);
 

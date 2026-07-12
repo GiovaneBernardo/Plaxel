@@ -46,7 +46,7 @@ pub trait RendererAPI {
     -> TextureHandle;
     fn is_texture_asset_uploaded(&self, uuid: Uuid) -> bool;
     fn upload_material_asset(&mut self, material: &Material, index: Option<u32>) -> u32;
-    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor);
+    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor, index: Option<u32>);
     fn load_material(&mut self, header: &AssetHeader) -> Material;
     fn create_pipeline(
         &mut self,

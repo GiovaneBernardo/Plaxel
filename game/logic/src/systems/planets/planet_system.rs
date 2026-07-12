@@ -9,11 +9,11 @@ use engine::{
     core::components::core::TransformComponent,
     ecs::{commands::Commands, query::Query, system::SystemContext},
     game_info,
-    renderer::PipelineHandle,
+    renderer::{AtmospherePassNode, PipelineHandle},
 };
 use game_types::{
     octree::{NodeKey, OctreeChanges, PlanetMeshRequest},
-    planet::{Planet, PlanetTerrainEdits, PlanetVertex},
+    planet::{Planet, PlanetTerrainEdits, PlanetVertex, SolarSystemComponent},
 };
 use rand::Rng;
 use web_time::{Duration, Instant};
@@ -150,6 +150,28 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         ready_meshes: Vec::new(),
     });
 
+    // Create solar system
+    let solar_system = world.spawn();
+    world.insert(
+        solar_system,
+        TransformComponent {
+            position: random_planet_position(&mut rng, &planet_positions, min_planet_distance)
+                .unwrap(),
+            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            scale: vec3(1.0, 1.0, 1.0),
+            velocity: vec3(0.0, 0.0, 0.0),
+        },
+    );
+
+    world.insert(
+        solar_system,
+        SolarSystemComponent {
+            planets: Vec::new(),
+        },
+    );
+
+    // Create planets
+    let mut created_planets = Vec::new();
     for i in 0..PLANET_COUNT {
         let Some(mut planet_position) =
             random_planet_position(&mut rng, &planet_positions, min_planet_distance)
@@ -190,7 +212,9 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
             name: format!("Planet {}", i + 1),
             position: planet_position,
             octree_root: octree,
+            solar_system,
         };
+        created_planets.push(new_planet);
         let mut leaf_nodes = Vec::new();
         octree::collect_leaf_nodes(&planet.octree_root, &mut leaf_nodes);
 
@@ -207,6 +231,10 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         world.insert(new_planet, planet);
         world.insert(new_planet, terrain_edits);
     }
+
+    let mut solar_system_component = world.get_mut::<SolarSystemComponent>(solar_system).unwrap();
+    solar_system_component.planets = created_planets;
+    drop(solar_system_component);
 
     for request in mesh_requests {
         submit_requested_mesh(ctx, request);
@@ -232,6 +260,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         .map(|heightmap| Arc::clone(&heightmap));
 
     let mut changes = Vec::new();
+    let mut atmosphere_planet = None;
     {
         let mut query = Query::<(&mut Planet, &PlanetTerrainEdits)>::new(&mut ctx.world);
         query.for_each(|entity, (planet, terrain_edits)| {
@@ -246,7 +275,32 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 heightmap.as_deref(),
                 terrain_edits,
             );
+
+            if atmosphere_planet.is_none() {
+                atmosphere_planet = Some(planet.clone());
+            }
         });
+    }
+
+    if atmosphere_planet.is_some() {
+        let plan = atmosphere_planet.unwrap();
+        let planet_position = plan.position;
+        let sun_position = ctx
+            .world
+            .get::<TransformComponent>(plan.solar_system)
+            .unwrap()
+            .position;
+
+        ctx.globals
+            .renderer
+            .render_graph
+            .get_node_mut::<AtmospherePassNode>(1)
+            .unwrap()
+            .settings
+            .sun_direction = (point3(sun_position.x, sun_position.y, sun_position.z)
+            - point3(planet_position.x, planet_position.y, planet_position.z))
+        .normalize()
+        .into();
     }
 
     for change in changes {
@@ -578,12 +632,15 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
         };
         let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
-        let render_data = ctx.globals.renderer.renderer_api.create_render_data(
+        let mut render_data = ctx.globals.renderer.renderer_api.create_render_data(
             &vertex_bytes,
             &mesh.indices,
             game_state.solid_material.clone(),
             &PipelineHandle(0),
         );
+        render_data
+            .extra_bind_groups
+            .push((2, game_state.terrain_materials_bind_group));
         game_state.planets_meshes.insert(mesh.key, render_data);
     }
 }

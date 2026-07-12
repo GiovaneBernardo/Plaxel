@@ -17,7 +17,7 @@
                         ),
                         fraction: 0.8325521,
                         fully_collapsed: false,
-                        collapsed_leaf_count: 1,
+                        collapsed_leaf_count: 0,
                     )),
                     Vertical((
                         rect: (
@@ -47,7 +47,7 @@
                         ),
                         fraction: 0.5,
                         fully_collapsed: false,
-                        collapsed_leaf_count: 1,
+                        collapsed_leaf_count: 0,
                     )),
                     Leaf((
                         rect: (
@@ -100,7 +100,7 @@
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 67.333336,
+                                y: 692.6667,
                             ),
                         ),
                         viewport: (
@@ -118,13 +118,13 @@
                         ],
                         active: (0),
                         scroll: 0.0,
-                        collapsed: true,
+                        collapsed: false,
                     )),
                     Leaf((
                         rect: (
                             min: (
                                 x: 2132.0,
-                                y: 68.666664,
+                                y: 693.3333,
                             ),
                             max: (
                                 x: 2560.0,
@@ -134,7 +134,7 @@
                         viewport: (
                             min: (
                                 x: 2132.0,
-                                y: 92.65625,
+                                y: 717.34375,
                             ),
                             max: (
                                 x: 2560.0,
@@ -216,7 +216,7 @@
                     Empty,
                     Empty,
                 ],
-                focused_node: Some((10)),
+                focused_node: Some((3)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),

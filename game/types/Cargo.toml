@@ -7,3 +7,4 @@ edition = "2024"
 cgmath = { workspace = true }
 engine = { path = "../../engine" }
 bytemuck = { workspace = true }
+serde = { workspace = true }

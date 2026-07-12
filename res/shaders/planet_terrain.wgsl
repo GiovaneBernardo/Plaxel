@@ -32,6 +32,17 @@ struct VertexOutput {
     @location(5) camera_position: vec3<f32>,
 };
 
+struct GpuPlanetTerrainMaterial {
+    diffuse_texture_index: u32,
+    normal_texture_index: u32,
+    displacement_texture_index: u32,
+    roughness_texture_index: u32,
+    texture_scale: f32,
+    displacement_scale: f32,
+    roughness_factor: f32,
+    flags: u32,
+}
+
 @vertex
 fn vs_main(
     model: VertexInput,
@@ -78,10 +89,10 @@ fn get_material_color(index: u32) -> vec4<f32> {
 var my_textures: binding_array<texture_2d<f32>, 512>;
 @group(1) @binding(1)
 var default_sampler: sampler;
+@group(2) @binding(0)
+var<storage, read> terrain_materials: array<GpuPlanetTerrainMaterial>;
 
-fn triplanar_sample(tex_index: u32, pos: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
-    let texture_scale = 1.0;//0.0025;
-
+fn triplanar_sample(tex_index: u32, pos: vec3<f32>, normal: vec3<f32>, texture_scale: f32) -> vec4<f32> {
     let n = safe_normal(normal, pos);
     let an = abs(n);
 
@@ -112,12 +123,22 @@ fn triplanar_sample(tex_index: u32, pos: vec3<f32>, normal: vec3<f32>) -> vec4<f
            z_sample * weights.z;
 }
 
+fn sample_terrain_albedo(material_index: u32, pos: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
+    let material = terrain_materials[material_index];
+    return triplanar_sample(
+        material.diffuse_texture_index,
+        pos,
+        normal,
+        material.texture_scale,
+    );
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = safe_normal(in.normal, in.world_position);
 
-    let material_a = triplanar_sample(in.mat_a, in.world_position, normal);
-    let material_b = triplanar_sample(in.mat_b, in.world_position, normal);
+    let material_a = sample_terrain_albedo(in.mat_a, in.world_position, normal);
+    let material_b = sample_terrain_albedo(in.mat_b, in.world_position, normal);
     let albedo = mix(material_a, material_b, in.blend);
 
     let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.4));

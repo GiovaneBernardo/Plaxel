@@ -14,11 +14,16 @@ use engine::model::Vertex;
 use engine::renderer;
 use engine::renderer::CullMode;
 use engine::renderer::Topology;
-use engine::renderer::{CameraData, FrameBindings, RenderData};
+use engine::renderer::{
+    BindGroupDescriptor, BindGroupEntry, BindGroupHandle, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingType, BufferDescriptor, BufferHandle, BufferUsages, CameraData,
+    FrameBindings, RenderData, ShaderStages, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureSize, TextureUsages,
+};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
 use game_types::octree::NodeKey;
 use game_types::planet::PlanetInstance;
-use game_types::planet::{Planet, PlanetVertex};
+use game_types::planet::{GpuPlanetTerrainMaterial, Planet, PlanetVertex};
 pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -50,6 +55,8 @@ struct GameState {
     empty_chunks: HashSet<NodeKey>,
     empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     solid_material: Material,
+    terrain_materials_buffer: BufferHandle,
+    terrain_materials_bind_group: BindGroupHandle,
     update_octree: bool,
     terrain_physics_enabled: bool,
     debug_nodes: Vec<(Point3<f32>, f32, u32)>,
@@ -129,6 +136,35 @@ const MAX_CHUNK_WORKER_SPAWNS_PER_FRAME: usize = 12;
 const TERRAIN_PHYSICS_RADIUS: f32 = 384.0;
 const MAX_TERRAIN_PHYSICS_BRICK_SIZE: f32 = 64.0;
 const COARSE_PLANET_BRICK_LEVEL: u8 = 6;
+const GRASS_TERRAIN_TEXTURE_INDEX: u32 = 510;
+const ROCK_TERRAIN_TEXTURE_INDEX: u32 = 511;
+
+fn load_terrain_diffuse_texture(
+    renderer: &mut engine::renderer::Renderer,
+    relative_path: &str,
+    label: &str,
+    texture_index: u32,
+) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../res/terrain_textures")
+        .join(relative_path);
+    renderer.renderer_api.load_texture(
+        &path.to_string_lossy().into_owned(),
+        &TextureDescriptor {
+            label: label.to_string(),
+            format: TextureFormat::Rgba8Srgb,
+            size: TextureSize::Custom {
+                width: 1,
+                height: 1,
+            },
+            dimension: TextureDimension::D2,
+            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+            mip_levels: 1,
+            sample_count: 1,
+        },
+        Some(texture_index),
+    );
+}
 
 #[unsafe(no_mangle)]
 pub fn initialize_game_state(state: &mut engine::State) {
@@ -185,6 +221,79 @@ pub fn initialize_game_state(state: &mut engine::State) {
             "Frame material bind group layout must be initialized before creating planet pipelines",
         );
 
+    load_terrain_diffuse_texture(
+        &mut state.global_resources.renderer,
+        "Grass001_2K-JPG_Color.jpg",
+        "terrain_grass_diffuse",
+        GRASS_TERRAIN_TEXTURE_INDEX,
+    );
+    load_terrain_diffuse_texture(
+        &mut state.global_resources.renderer,
+        "Rock061_2K-JPG_Color.jpg",
+        "terrain_rock_diffuse",
+        ROCK_TERRAIN_TEXTURE_INDEX,
+    );
+
+    // PlanetVertex material IDs address this palette directly: grass = 0, rock = 1.
+    let terrain_materials = [
+        GpuPlanetTerrainMaterial {
+            diffuse_texture_index: GRASS_TERRAIN_TEXTURE_INDEX,
+            normal_texture_index: 0,
+            displacement_texture_index: 0,
+            roughness_texture_index: 0,
+            texture_scale: 1.0,
+            displacement_scale: 0.0,
+            roughness_factor: 0.9,
+            flags: 0,
+        },
+        GpuPlanetTerrainMaterial {
+            diffuse_texture_index: ROCK_TERRAIN_TEXTURE_INDEX,
+            normal_texture_index: 0,
+            displacement_texture_index: 0,
+            roughness_texture_index: 0,
+            texture_scale: 1.0,
+            displacement_scale: 0.0,
+            roughness_factor: 0.75,
+            flags: 0,
+        },
+    ];
+    let terrain_materials_layout = state
+        .global_resources
+        .renderer
+        .renderer_api
+        .create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: "planet_terrain_materials_layout".to_string(),
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::Fragment,
+                entry_type: BindingType::StorageBuffer { read_only: true },
+                count: None,
+            }],
+        });
+    let terrain_materials_buffer =
+        state
+            .global_resources
+            .renderer
+            .renderer_api
+            .create_buffer(&BufferDescriptor {
+                label: "planet_terrain_materials".to_string(),
+                size: std::mem::size_of_val(&terrain_materials) as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            });
+    state.global_resources.renderer.renderer_api.write_buffer(
+        terrain_materials_buffer,
+        bytemuck::cast_slice(&terrain_materials),
+    );
+    let terrain_materials_bind_group = state
+        .global_resources
+        .renderer
+        .renderer_api
+        .create_bind_group(&BindGroupDescriptor {
+            label: "planet_terrain_materials_bind_group".to_string(),
+            layout: terrain_materials_layout,
+            entries: vec![(0, BindGroupEntry::Buffer(terrain_materials_buffer))],
+        });
+
     let target_info = {
         let renderer = &state.global_resources.renderer;
         let descriptor = GeometryPassNode::pass_descriptor();
@@ -199,7 +308,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
         .renderer_api
         .create_pipeline(
             &solid_material,
-            &[camera_layout, textures_layout],
+            &[camera_layout, textures_layout, terrain_materials_layout],
             &target_info,
         );
     state
@@ -265,6 +374,8 @@ pub fn initialize_game_state(state: &mut engine::State) {
         empty_chunks: HashSet::new(),
         empty_neighbor_signatures: HashMap::new(),
         solid_material,
+        terrain_materials_buffer,
+        terrain_materials_bind_group,
         update_octree: true,
         terrain_physics_enabled: true,
         debug_nodes: Vec::new(),

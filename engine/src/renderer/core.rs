@@ -406,6 +406,8 @@ pub struct RenderData {
     pub material: Material,
     pub transform_index: u32, // index into a GPU-side transform buffer
     pub sort_key: u64,        // for draw call sorting/batching
+
+    pub extra_bind_groups: Vec<(u32, BindGroupHandle)>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1312,6 +1314,7 @@ fn collect_geometry_render_data(
                 material: material.clone(),
                 transform_index: transforms.len() as u32,
                 sort_key: 0,
+                extra_bind_groups: Vec::new(),
             });
 
             let rotation: Matrix4<f32> = Matrix4::from(transform.rotation);
