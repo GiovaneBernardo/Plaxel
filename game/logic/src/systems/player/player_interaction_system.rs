@@ -345,9 +345,9 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
     let mouse_delta = input.mouse_delta;
     let scroll = input.scroll;
     let viewport_size = ctx.globals.renderer.renderer_api.get_surface_size();
-    let heightmap = world
-        .get_resource::<Arc<EarthHeightmap>>()
-        .map(|heightmap| Arc::clone(&*heightmap));
+    //let heightmap = world
+    //    .get_resource::<Arc<EarthHeightmap>>()
+    //    .map(|heightmap| Arc::clone(&*heightmap));
 
     drop(input_map);
     drop(input);
@@ -507,7 +507,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                 planet_exit_distance,
                                 planet.position,
                                 planet_size,
-                                heightmap.as_deref(),
+                                None, //heightmap.as_deref(),
                                 terrain_edits,
                             ) else {
                                 return;

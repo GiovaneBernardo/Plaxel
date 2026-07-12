@@ -328,7 +328,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
         mode: GameMode::Walking,
     });
     world.insert_resource(InputMap::default());
-    load_earth_heightmap_resource(world);
+    //load_earth_heightmap_resource(world);
 
     let velocity_sample_pos = camera.position;
     let velocity_sample_time = Instant::now();

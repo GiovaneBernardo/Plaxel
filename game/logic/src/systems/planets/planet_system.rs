@@ -254,10 +254,10 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         .get::<TransformComponent>(camera_entity)
         .unwrap()
         .position;
-    let heightmap = ctx
-        .world
-        .get_resource::<Arc<EarthHeightmap>>()
-        .map(|heightmap| Arc::clone(&heightmap));
+    //let heightmap = ctx
+    //    .world
+    //    .get_resource::<Arc<EarthHeightmap>>()
+    //    .map(|heightmap| Arc::clone(&heightmap));
 
     let mut changes = Vec::new();
     let mut atmosphere_planet = None;
@@ -272,7 +272,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 planet.position,
                 planet_size,
                 &mut changes,
-                heightmap.as_deref(),
+                None, //heightmap.as_deref(),
                 terrain_edits,
             );
 
@@ -497,10 +497,10 @@ fn start_mesh_job(
     urgent: bool,
     base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
 ) {
-    let heightmap = ctx
-        .world
-        .get_resource::<Arc<EarthHeightmap>>()
-        .map(|heightmap| Arc::clone(&heightmap));
+    //let heightmap = ctx
+    //    .world
+    //    .get_resource::<Arc<EarthHeightmap>>()
+    //    .map(|heightmap| Arc::clone(&heightmap));
 
     let terrain_edits = {
         let terrain_edits = ctx
@@ -515,7 +515,7 @@ fn start_mesh_job(
             request,
             version,
             urgent,
-            heightmap,
+            None, //heightmap,
             &terrain_edits,
             base_grid_cache,
         );
