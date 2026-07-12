@@ -10,6 +10,7 @@ use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::components::renderer::MeshRendererComponent;
 use engine::ecs::entity::Entity;
 use engine::ecs::query::Query;
+use engine::game_info;
 use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
