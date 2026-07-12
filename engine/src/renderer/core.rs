@@ -1,8 +1,8 @@
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 
+use crate::math::{Mat4, Vec3};
 use bytemuck::{Pod, Zeroable};
-use cgmath::{Matrix4, SquareMatrix};
 use uuid::Uuid;
 
 use crate::Arc;
@@ -854,18 +854,14 @@ pub struct CameraData {
 
 impl CameraData {
     pub fn from_camera(camera: &camera::Camera, uniform: camera::CameraUniform) -> Self {
-        let inverse_projection = (camera::OPENGL_TO_WGPU_MATRIX * camera.build_projection_matrix())
-            .invert()
-            .unwrap_or_else(Matrix4::identity);
-        let inverse_view = camera
-            .build_view_matrix()
-            .invert()
-            .unwrap_or_else(Matrix4::identity);
+        let inverse_projection =
+            (camera::OPENGL_TO_WGPU_MATRIX * camera.build_projection_matrix()).inverse();
+        let inverse_view = camera.build_view_matrix().inverse();
 
         Self {
             uniform,
-            inverse_projection: inverse_projection.into(),
-            inverse_view: inverse_view.into(),
+            inverse_projection: inverse_projection.to_cols_array_2d(),
+            inverse_view: inverse_view.to_cols_array_2d(),
         }
     }
 }
@@ -971,14 +967,14 @@ impl RenderGraph {
             },
         };
         let positions = vec![
-            cgmath::Point3::new(-0.5, -0.5, -0.5),
-            cgmath::Point3::new(0.5, -0.5, -0.5),
-            cgmath::Point3::new(0.5, 0.5, -0.5),
-            cgmath::Point3::new(-0.5, 0.5, -0.5),
-            cgmath::Point3::new(-0.5, -0.5, 0.5),
-            cgmath::Point3::new(0.5, -0.5, 0.5),
-            cgmath::Point3::new(0.5, 0.5, 0.5),
-            cgmath::Point3::new(-0.5, 0.5, 0.5),
+            crate::math::Vec3::new(-0.5, -0.5, -0.5),
+            crate::math::Vec3::new(0.5, -0.5, -0.5),
+            crate::math::Vec3::new(0.5, 0.5, -0.5),
+            crate::math::Vec3::new(-0.5, 0.5, -0.5),
+            crate::math::Vec3::new(-0.5, -0.5, 0.5),
+            crate::math::Vec3::new(0.5, -0.5, 0.5),
+            crate::math::Vec3::new(0.5, 0.5, 0.5),
+            crate::math::Vec3::new(-0.5, 0.5, 0.5),
         ];
 
         let indices: Vec<u32> = vec![
@@ -994,7 +990,7 @@ impl RenderGraph {
         let positions_raw: Vec<[f32; 3]> = positions.iter().map(|p| [p.x, p.y, p.z]).collect();
 
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&positions_raw).to_vec();
-        //let index_bytes: Vec<u8> = bytemuck::cast_slice(&indices).to_vec();
+        //let index_bytes: Vec<u8> = bytemuck::cast_slice(&indices);
 
         let mesh = MeshAsset {
             name: "Cube".to_string(),
@@ -1317,16 +1313,16 @@ fn collect_geometry_render_data(
                 extra_bind_groups: Vec::new(),
             });
 
-            let rotation: Matrix4<f32> = Matrix4::from(transform.rotation);
-            let model_matrix: Matrix4<f32> = Matrix4::from_translation(transform.position)
+            let rotation = Mat4::from_quat(transform.rotation);
+            let model_matrix: Mat4 = Mat4::from_translation(transform.position)
                 * rotation
-                * Matrix4::from_nonuniform_scale(
+                * Mat4::from_scale(Vec3::new(
                     transform.scale.x,
                     transform.scale.y,
                     transform.scale.z,
-                );
+                ));
             transforms.push(TransformInstance {
-                model_matrix: model_matrix.into(),
+                model_matrix: model_matrix.to_cols_array_2d(),
                 material_index: material.material_index,
             });
         });

@@ -1,4 +1,4 @@
 pub struct Block {
-    pub position: cgmath::Point3<f32>,
+    pub position: engine::math::Vec3,
     pub block_id: u64,
 }

@@ -187,12 +187,11 @@ impl ObjImporter {
                 format: descriptor.format,
                 width: width,
                 height: height,
-                mip_levels: [TextureMip {
+                mip_levels: vec![TextureMip {
                     width,
                     height,
                     bytes: data.to_vec(),
-                }]
-                .to_vec(),
+                }],
                 name: descriptor.label,
                 uuid,
             }),

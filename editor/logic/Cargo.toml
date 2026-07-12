@@ -19,7 +19,6 @@ wgpu = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 egui-wgpu = { workspace = true }
-cgmath = { workspace = true }
 eframe = { workspace = true }
 rfd = { workspace = true }
 ron = { workspace = true }

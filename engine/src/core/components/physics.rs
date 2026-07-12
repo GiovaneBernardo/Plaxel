@@ -11,10 +11,10 @@ pub enum ColliderShape {
         radius: f32,
     },
     Cuboid {
-        half_extents: cgmath::Vector3<f32>,
+        half_extents: crate::math::Vec3,
     },
     Trimesh {
-        vertices: Vec<cgmath::Point3<f32>>,
+        vertices: Vec<crate::math::Vec3>,
         indices: Vec<[u32; 3]>,
     },
 }
@@ -22,7 +22,7 @@ pub enum ColliderShape {
 pub struct RigidBodyComponent {
     pub kind: BodyKind,
     pub mass: f32,
-    pub velocity: cgmath::Vector3<f32>,
+    pub velocity: crate::math::Vec3,
 }
 
 pub struct ColliderComponent {

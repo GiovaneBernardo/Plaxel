@@ -15,7 +15,7 @@ wgpu = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }
-cgmath = { workspace = true }
+glam = { workspace = true }
 tobj = { workspace = true }
 rand = { workspace = true }
 image = { workspace = true }

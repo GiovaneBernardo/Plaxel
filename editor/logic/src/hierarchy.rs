@@ -1,4 +1,4 @@
-use cgmath::vec3;
+use engine::math::vec3;
 use engine::{core::components::core::TransformComponent, ecs::query::Query};
 
 #[unsafe(no_mangle)]
@@ -23,7 +23,7 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
                         entity,
                         TransformComponent {
                             position: vec3(0.0, 10.0, 0.0),
-                            rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+                            rotation: engine::math::Quat::IDENTITY,
                             scale: vec3(1.0, 1.0, 1.0),
                             velocity: vec3(0.0, 0.0, 0.0),
                         },
@@ -41,7 +41,7 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
                                 entity,
                                 TransformComponent {
                                     position: vec3(0.0, 10.0, 0.0),
-                                    rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+                                    rotation: engine::math::Quat::IDENTITY,
                                     scale: vec3(1.0, 1.0, 1.0),
                                     velocity: vec3(0.0, 0.0, 0.0),
                                 },
@@ -80,9 +80,9 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
             //             ui.add(egui::widgets::DragValue::new(&mut transform.position.y));
             //             ui.add(egui::widgets::DragValue::new(&mut transform.position.z));
 
-            //             let mut euler: cgmath::Euler<cgmath::Rad<f32>> =
-            //                 cgmath::Euler::from(transform.rotation);
-            //             let mut rot_deg = cgmath::Vector3::new(
+            //             let mut euler: engine::math::Euler<engine::math::Rad<f32>> =
+            //                 engine::math::Euler::from(transform.rotation);
+            //             let mut rot_deg = engine::math::Vec3::new(
             //                 euler.x.0.to_degrees(),
             //                 euler.y.0.to_degrees(),
             //                 euler.z.0.to_degrees(),
@@ -93,19 +93,19 @@ pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
             //             ui.add(egui::DragValue::new(&mut rot_deg.y));
             //             ui.add(egui::DragValue::new(&mut rot_deg.z));
 
-            //             let rot_rad = cgmath::Vector3::new(
+            //             let rot_rad = engine::math::Vec3::new(
             //                 rot_deg.x.to_radians(),
             //                 rot_deg.y.to_radians(),
             //                 rot_deg.z.to_radians(),
             //             );
 
-            //             let new_euler = cgmath::Euler {
-            //                 x: cgmath::Rad(rot_rad.x),
-            //                 y: cgmath::Rad(rot_rad.y),
-            //                 z: cgmath::Rad(rot_rad.z),
+            //             let new_euler = engine::math::Euler {
+            //                 x: rot_rad.x,
+            //                 y: rot_rad.y,
+            //                 z: rot_rad.z,
             //             };
 
-            //             transform.rotation = cgmath::Quaternion::from(new_euler);
+            //             transform.rotation = engine::math::Quat::from(new_euler);
 
             //             ui.label("Scaleleuio");
             //             ui.add(egui::widgets::DragValue::new(&mut transform.scale.x));

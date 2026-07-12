@@ -1,5 +1,5 @@
-use cgmath::Vector3;
 use engine::ecs::entity::Entity;
+use engine::math::Vec3;
 
 #[derive(Copy, Clone, Debug)]
 pub enum NodeState {
@@ -12,23 +12,41 @@ pub enum NodeState {
 
 #[derive(Debug, Clone)]
 pub enum OctreeChanges {
-    AddMesh { request: PlanetMeshRequest },
-    RemoveMesh { key: NodeKey },
+    // Always prefer ReplaceMesh over Add and Remove, as the later can first remove to only in a few frames add the mesh, making it flicker
+    ReplaceMesh {
+        keys_to_remove: Vec<NodeKey>,
+        requests: Vec<PlanetMeshRequest>,
+    },
+    AddMesh {
+        request: PlanetMeshRequest,
+    },
+    RemoveMeshes {
+        key: NodeKey,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PlanetMeshRequest {
     pub planet_entity: Entity,
-    pub planet_position: Vector3<f32>,
+    pub planet_position: Vec3,
     pub planet_size: u32,
-    pub node_min_corner: Vector3<f32>,
+    pub node_min_corner: Vec3,
     pub node_size: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueuedMeshRequest {
+    pub request: PlanetMeshRequest,
+    pub version: u64,
+    pub replacement_id: Option<u64>,
+    pub priority: u32,
+    pub sequence: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct OctreeNode {
     pub key: NodeKey,
-    pub min: Vector3<f32>, // corner
+    pub min: Vec3, // corner
     pub size: f32,
     pub children: Option<[Box<OctreeNode>; 8]>,
     pub vertex: Option<u32>,

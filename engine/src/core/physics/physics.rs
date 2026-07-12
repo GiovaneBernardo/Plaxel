@@ -1,4 +1,4 @@
-use cgmath::{Point3, Vector3};
+use crate::math::Vec3;
 use rapier3d::prelude::*;
 
 use crate::{
@@ -81,7 +81,7 @@ impl Physics {
 
     pub fn add_rigid_body_dynamic(
         &mut self,
-        translation: &Vector3<f32>,
+        translation: &Vec3,
     ) -> rapier3d::dynamics::RigidBodyHandle {
         let rigid_body = RigidBodyBuilder::dynamic()
             .translation(vector![translation.x, translation.y, translation.z])
@@ -107,7 +107,7 @@ impl Physics {
 
     pub fn add_trimesh_collider(
         &mut self,
-        vertices: Vec<Point3<f32>>,
+        vertices: Vec<Vec3>,
         indices: Vec<[u32; 3]>,
         restitution: f32,
         friction: f32,

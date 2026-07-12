@@ -7,6 +7,7 @@ use crate::assets::material::MaterialResource;
 use crate::assets::material::PipelineDescriptor;
 use crate::assets::material::TextureAsset;
 use crate::engine_info;
+use crate::math::{UVec2, uvec2};
 use crate::model::MeshAsset;
 use crate::renderer::BindGroupHandle;
 use crate::renderer::BufferDescriptor;
@@ -25,7 +26,6 @@ use crate::renderer::{
     TextureSampleType, TextureUsages,
 };
 use crate::texture;
-use cgmath::point2;
 use offset_allocator::Allocation;
 use wgpu::IndexFormat;
 use wgpu::PipelineCache;
@@ -889,7 +889,7 @@ impl RendererAPI for WgpuBackend {
 
     fn create_render_data(
         &mut self,
-        vertex_bytes: &Vec<u8>, // How to turn a Vec of vertices into bytes: bytemuck::cast_slice(&positions_raw).to_vec();
+        vertex_bytes: &Vec<u8>, // How to turn a Vec of vertices into bytes: bytemuck::cast_slice(&positions_raw);
         indices: &Vec<u32>,
         material: Material,
         _pipeline_handle: &PipelineHandle,
@@ -1071,16 +1071,16 @@ impl RendererAPI for WgpuBackend {
         self.depth_texture = texture.clone();
     }
 
-    fn get_texture_size(&self, handle: &TextureHandle) -> Point2<u32> {
+    fn get_texture_size(&self, handle: &TextureHandle) -> UVec2 {
         let Some(texture) = self.get_texture(*handle) else {
-            return point2(0, 0);
+            return uvec2(0, 0);
         };
 
-        point2(texture.size().width, texture.size().height)
+        uvec2(texture.size().width, texture.size().height)
     }
 
-    fn get_surface_size(&self) -> Point2<u32> {
-        point2(self.surface_config.width, self.surface_config.height)
+    fn get_surface_size(&self) -> UVec2 {
+        uvec2(self.surface_config.width, self.surface_config.height)
     }
 
     fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {

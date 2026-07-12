@@ -1,5 +1,5 @@
-use cgmath::point3;
 use egui::{Pos2, Response};
+use engine::math::vec3;
 use engine::{
     ecs::{commands::PhysicalSphereParams, system::SystemContext},
     renderer::GeometryPassNode,
@@ -53,7 +53,7 @@ pub fn viewport_context_menu(
 
                     requests.physical_spheres.push(PhysicalSphereParams {
                         mass: 50.0,
-                        position: cgmath::vec3(world_pos.x, world_pos.y, world_pos.z),
+                        position: engine::math::vec3(world_pos.x, world_pos.y, world_pos.z),
                         radius: 0.5,
                     });
                 }
@@ -71,12 +71,12 @@ pub fn viewport_context_menu(
         .response
 }
 
-pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> cgmath::Point3<f32> {
+pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> engine::math::Vec3 {
     let Some(mut node) = state.global_resources.renderer.render_graph.take_node(0) else {
-        return point3(0.0, 0.0, 0.0);
+        return vec3(0.0, 0.0, 0.0);
     };
 
-    let mut world_pos = point3(0.0, 0.0, 0.0);
+    let mut world_pos = vec3(0.0, 0.0, 0.0);
     let pixels_per_point = state.window.scale_factor() as f32;
     let physical_mouse_pos = Pos2::new(
         mouse_pos.x * pixels_per_point,

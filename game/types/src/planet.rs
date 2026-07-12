@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::octree::OctreeNode;
-use cgmath::Vector3;
+use engine::math::Vec3;
 use engine::{
     assets::{manager::Handle, material::TextureAsset},
     ecs::entity::Entity,
@@ -12,7 +12,7 @@ use engine::{
 pub struct Planet {
     pub id: u64,
     pub name: String,
-    pub position: Vector3<f32>,
+    pub position: Vec3,
     pub octree_root: OctreeNode,
     pub solar_system: Entity,
 }

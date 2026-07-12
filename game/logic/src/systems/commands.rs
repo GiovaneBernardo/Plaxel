@@ -6,7 +6,7 @@
 //    fn spawn_physical_sphere(&mut self, params: PhysicalSphereParams);
 //}
 //pub struct PhysicalSphereParams {
-//    pub position: cgmath::Vector3<f32>,
+//    pub position: engine::math::Vec3,
 //    pub radius: f32,
 //    pub mass: f32,
 //}//
@@ -19,9 +19,9 @@
 //                entity,
 //                TransformComponent {
 //                    position: params.position,
-//                    rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
-//                    scale: cgmath::vec3(params.radius, params.radius, params.radius),
-//                    velocity: cgmath::vec3(0.0, 0.0, 0.0),
+//                    rotation: crate::math::Quat::IDENTITY,
+//                    scale: engine::math::vec3(params.radius, params.radius, params.radius),
+//                    velocity: engine::math::vec3(0.0, 0.0, 0.0),
 //                },
 //            );
 //            world.insert(
@@ -39,7 +39,7 @@
 //                RigidBodyComponent {
 //                    kind: BodyKind::Dynamic,
 //                    mass: params.mass,
-//                    velocity: cgmath::vec3(0.0, 0.0, 0.0),
+//                    velocity: engine::math::vec3(0.0, 0.0, 0.0),
 //                },
 //            );
 //        });

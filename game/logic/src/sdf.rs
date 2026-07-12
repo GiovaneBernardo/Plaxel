@@ -1,4 +1,4 @@
-use cgmath::{InnerSpace, Vector3, vec3};
+use engine::math::{Vec3, vec3};
 use game_types::planet::{PlanetTerrainEdits, TerrainBrickKey};
 
 const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
@@ -19,7 +19,7 @@ pub struct EarthHeightmap {
 }
 
 impl EarthHeightmap {
-    pub fn sample_unit_height(&self, dir: Vector3<f32>) -> Option<f32> {
+    pub fn sample_unit_height(&self, dir: Vec3) -> Option<f32> {
         if self.width == 0 || self.height == 0 {
             return None;
         }
@@ -29,7 +29,7 @@ impl EarthHeightmap {
             return None;
         }
 
-        let dir = if dir.magnitude2() > 1e-12 {
+        let dir = if dir.length_squared() > 1e-12 {
             dir.normalize()
         } else {
             vec3(0.0, 1.0, 0.0)
@@ -57,8 +57,8 @@ impl EarthHeightmap {
         Some(lerp(top, bottom, ty))
     }
 
-    pub fn sample_height(&self, dir: Vector3<f32>, planet_r: f32) -> Option<f32> {
-        let dir = if dir.magnitude2() > 1e-12 {
+    pub fn sample_height(&self, dir: Vec3, planet_r: f32) -> Option<f32> {
+        let dir = if dir.length_squared() > 1e-12 {
             dir.normalize()
         } else {
             vec3(0.0, 1.0, 0.0)
@@ -90,7 +90,7 @@ impl EarthHeightmap {
 }
 
 #[inline(always)]
-pub fn hash3(p: Vector3<f32>) -> f32 {
+pub fn hash3(p: Vec3) -> f32 {
     let ix = (p.x.floor() as i32).wrapping_mul(1619);
     let iy = (p.y.floor() as i32).wrapping_mul(31337);
     let iz = (p.z.floor() as i32).wrapping_mul(6271);
@@ -122,7 +122,7 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 #[inline(always)]
-pub fn smooth_noise(p: Vector3<f32>) -> f32 {
+pub fn smooth_noise(p: Vec3) -> f32 {
     let ix = p.x.floor() as i32;
     let iy = p.y.floor() as i32;
     let iz = p.z.floor() as i32;
@@ -155,7 +155,7 @@ pub fn smooth_noise(p: Vector3<f32>) -> f32 {
     lerp(y0, y1, uz)
 }
 
-pub fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
+pub fn fbm(p: Vec3, octaves: u32) -> f32 {
     let mut value = 0.0f32;
     let mut amplitude = 0.5f32;
     let mut frequency = 1.0f32;
@@ -167,7 +167,7 @@ pub fn fbm(p: Vector3<f32>, octaves: u32) -> f32 {
     value
 }
 
-pub fn sample_terrain_edit(local_p: Vector3<f32>, terrain_edits: &PlanetTerrainEdits) -> f32 {
+pub fn sample_terrain_edit(local_p: Vec3, terrain_edits: &PlanetTerrainEdits) -> f32 {
     let key = TerrainBrickKey {
         x: (local_p.x / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
         y: (local_p.y / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
@@ -240,8 +240,8 @@ pub fn sample_terrain_edit(local_p: Vector3<f32>, terrain_edits: &PlanetTerrainE
 }
 
 pub fn sdf_at_center(
-    p: cgmath::Vector3<f32>,
-    planet_center: cgmath::Vector3<f32>,
+    p: engine::math::Vec3,
+    planet_center: engine::math::Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
@@ -252,14 +252,14 @@ pub fn sdf_at_center(
 }
 
 pub fn base_sdf_at_center(
-    p: cgmath::Vector3<f32>,
-    planet_center: cgmath::Vector3<f32>,
+    p: engine::math::Vec3,
+    planet_center: engine::math::Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
 ) -> f32 {
     let planet_r = planet_radius(planet_size);
     let local_p = p - planet_center;
-    let dist_from_center = local_p.magnitude();
+    let dist_from_center = local_p.length();
     let dir = if dist_from_center > 1e-6 {
         local_p / dist_from_center
     } else {
@@ -296,7 +296,7 @@ pub fn max_terrain_height(planet_size: u32) -> f32 {
     planet_radius(planet_size) * 0.045
 }
 
-pub fn spherical_terrain_height(dir: Vector3<f32>, planet_r: f32) -> f32 {
+pub fn spherical_terrain_height(dir: Vec3, planet_r: f32) -> f32 {
     let warp = vec3(
         fbm(dir * 3.0 + vec3(17.1, 3.7, 11.5), 4),
         fbm(dir * 3.0 + vec3(5.3, 19.1, 2.8), 4),

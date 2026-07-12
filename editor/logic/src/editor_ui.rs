@@ -1,6 +1,6 @@
-use cgmath::vec3;
 use egui::{Color32, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use engine::math::vec3;
 use engine::{
     assets::{
         importer::{AssetPayload, ImportedAsset},
@@ -1529,7 +1529,7 @@ fn field_label(ui: &mut Ui, label: &str) {
     );
 }
 
-fn vector3_row(ui: &mut Ui, label: &str, value: &mut cgmath::Vector3<f32>) {
+fn vector3_row(ui: &mut Ui, label: &str, value: &mut engine::math::Vec3) {
     field_label(ui, label);
     ui.horizontal(|ui| {
         drag_value(ui, &mut value.x, 0.1, "X ");
@@ -1539,13 +1539,13 @@ fn vector3_row(ui: &mut Ui, label: &str, value: &mut cgmath::Vector3<f32>) {
     ui.end_row();
 }
 
-fn quaternion_row(ui: &mut Ui, label: &str, value: &mut cgmath::Quaternion<f32>) {
+fn quaternion_row(ui: &mut Ui, label: &str, value: &mut engine::math::Quat) {
     field_label(ui, label);
     ui.horizontal(|ui| {
-        drag_value(ui, &mut value.s, 0.01, "W ");
-        drag_value(ui, &mut value.v.x, 0.01, "X ");
-        drag_value(ui, &mut value.v.y, 0.01, "Y ");
-        drag_value(ui, &mut value.v.z, 0.01, "Z ");
+        drag_value(ui, &mut value.w, 0.01, "W ");
+        drag_value(ui, &mut value.x, 0.01, "X ");
+        drag_value(ui, &mut value.y, 0.01, "Y ");
+        drag_value(ui, &mut value.z, 0.01, "Z ");
     });
     ui.end_row();
 }
@@ -1809,7 +1809,7 @@ fn toolbar_button(ui: &mut Ui, label: &str) {
 fn default_transform() -> TransformComponent {
     TransformComponent {
         position: vec3(0.0, 10.0, 0.0),
-        rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+        rotation: engine::math::Quat::IDENTITY,
         scale: vec3(1.0, 1.0, 1.0),
         velocity: vec3(0.0, 0.0, 0.0),
     }

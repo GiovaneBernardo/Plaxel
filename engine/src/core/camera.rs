@@ -1,11 +1,9 @@
-use cgmath::{
-    EuclideanSpace, InnerSpace, Matrix3, Quaternion, Rotation, Rotation3, SquareMatrix, Vector3,
-};
+use crate::math::{Mat3, Quat, Vec3};
 use winit::{event::MouseScrollDelta, keyboard::KeyCode};
 
 pub struct Camera {
-    pub position: cgmath::Point3<f32>,
-    pub orientation: Quaternion<f32>,
+    pub position: crate::math::Vec3,
+    pub orientation: Quat,
     pub aspect: f32,
     pub fovy: f32,
     pub znear: f32,
@@ -13,52 +11,57 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn build_view_matrix(&self) -> cgmath::Matrix4<f32> {
-        cgmath::Matrix4::from(self.orientation.invert())
-            * cgmath::Matrix4::from_translation(-self.position.to_vec())
+    pub fn build_view_matrix(&self) -> crate::math::Mat4 {
+        crate::math::Mat4::from_quat(self.orientation.inverse())
+            * crate::math::Mat4::from_translation(-self.position)
     }
 
-    pub fn build_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar)
+    pub fn build_projection_matrix(&self) -> crate::math::Mat4 {
+        crate::math::Mat4::perspective_rh_gl(
+            self.fovy.to_radians(),
+            self.aspect,
+            self.znear,
+            self.zfar,
+        )
     }
 
-    pub fn forward(&self) -> Vector3<f32> {
-        self.orientation * Vector3::new(0.0, 0.0, -1.0)
+    pub fn forward(&self) -> Vec3 {
+        self.orientation * Vec3::new(0.0, 0.0, -1.0)
     }
 
-    pub fn right(&self) -> Vector3<f32> {
-        self.orientation * Vector3::new(1.0, 0.0, 0.0)
+    pub fn right(&self) -> Vec3 {
+        self.orientation * Vec3::new(1.0, 0.0, 0.0)
     }
 
-    pub fn up(&self) -> Vector3<f32> {
-        self.orientation * Vector3::new(0.0, 1.0, 0.0)
+    pub fn up(&self) -> Vec3 {
+        self.orientation * Vec3::new(0.0, 1.0, 0.0)
     }
 
     /// Build an orientation that points the camera's local -Z along `forward`,
     /// keeping the camera's local +Y as close to `up_hint` as possible.
-    pub fn look_at(forward: Vector3<f32>, up_hint: Vector3<f32>) -> Quaternion<f32> {
+    pub fn look_at(forward: Vec3, up_hint: Vec3) -> Quat {
         let f = forward.normalize();
         let r = f.cross(up_hint).normalize();
         let u = r.cross(f);
         // Columns are world axes the local axes map to: local +X -> r, +Y -> u, +Z -> -f.
-        let m = Matrix3::from_cols(r, u, -f);
-        Quaternion::from(m)
+        let m = Mat3::from_cols(r, u, -f);
+        Quat::from_mat3(&m)
     }
 
-    pub fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+    pub fn build_view_projection_matrix(&self) -> crate::math::Mat4 {
         OPENGL_TO_WGPU_MATRIX * self.build_projection_matrix() * self.build_view_matrix()
     }
 }
 
-// Maps cgmath/OpenGL clip-space depth [-1, 1] to wgpu reverse-Z [1, 0]:
+// Maps OpenGL clip-space depth [-1, 1] to wgpu reverse-Z [1, 0]:
 // near plane -> 1, far plane -> 0. Pairs with depth_compare = Greater and
 // depth clear = 0.0; on Depth32Float this gives much better far-plane precision.
 #[rustfmt::skip]
-pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
-    cgmath::Vector4::new(1.0, 0.0,  0.0, 0.0),
-    cgmath::Vector4::new(0.0, 1.0,  0.0, 0.0),
-    cgmath::Vector4::new(0.0, 0.0, -0.5, 0.0),
-    cgmath::Vector4::new(0.0, 0.0,  0.5, 1.0),
+pub const OPENGL_TO_WGPU_MATRIX: crate::math::Mat4 = crate::math::Mat4::from_cols(
+    crate::math::Vec4::new(1.0, 0.0,  0.0, 0.0),
+    crate::math::Vec4::new(0.0, 1.0,  0.0, 0.0),
+    crate::math::Vec4::new(0.0, 0.0, -0.5, 0.0),
+    crate::math::Vec4::new(0.0, 0.0,  0.5, 1.0),
 );
 
 #[repr(C)]
@@ -73,14 +76,14 @@ pub struct CameraUniform {
 impl CameraUniform {
     pub fn new() -> Self {
         Self {
-            view_proj: cgmath::Matrix4::identity().into(),
+            view_proj: crate::math::Mat4::IDENTITY.to_cols_array_2d(),
             position: [0.0, 0.0, 0.0],
             _padding: 0.0,
         }
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_proj = camera.build_view_projection_matrix().into();
+        self.view_proj = camera.build_view_projection_matrix().to_cols_array_2d();
         self.position = camera.position.into();
     }
 }
@@ -191,14 +194,8 @@ impl CameraController {
             // same regardless of where on the planet you are. Right-multiplying
             // by a quaternion built from a local axis (X = right, Y = up)
             // composes the rotation in the camera's own frame.
-            let yaw = Quaternion::from_axis_angle(
-                Vector3::unit_y(),
-                cgmath::Rad(-self.yaw_delta.to_radians()),
-            );
-            let pitch = Quaternion::from_axis_angle(
-                Vector3::unit_x(),
-                cgmath::Rad(-self.pitch_delta.to_radians()),
-            );
+            let yaw = Quat::from_axis_angle(Vec3::Y, -self.yaw_delta.to_radians());
+            let pitch = Quat::from_axis_angle(Vec3::X, -self.pitch_delta.to_radians());
             camera.orientation = (camera.orientation * yaw * pitch).normalize();
         }
 
@@ -214,14 +211,13 @@ impl CameraController {
             roll_amount += 1.0;
         }
         if roll_amount != 0.0 {
-            let roll =
-                Quaternion::from_axis_angle(-Vector3::unit_z(), cgmath::Rad(roll_amount * 0.02));
+            let roll = Quat::from_axis_angle(-Vec3::Z, roll_amount * 0.02);
             camera.orientation = (camera.orientation * roll).normalize();
         }
 
         let mut final_speed = self.speed;
         if self.is_shift_pressed {
-            let distance = camera.position.to_vec().magnitude();
+            let distance = camera.position.length();
             final_speed *= distance.sqrt() * 0.1;
         }
 

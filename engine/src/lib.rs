@@ -9,14 +9,14 @@ pub mod core;
 pub mod frame_capturer;
 pub mod global_resources;
 pub mod logging;
+pub mod math;
 pub mod multithreading;
 pub mod profiling;
 pub mod renderer;
 
-use cgmath::Point3;
-use cgmath::Quaternion;
-use cgmath::Vector3;
-use cgmath::vec3;
+use crate::math::Quat;
+use crate::math::Vec3;
+use crate::math::vec3;
 pub use core::camera;
 pub use core::ecs;
 pub use renderer::model;
@@ -63,9 +63,8 @@ use crate::renderer::TextureFormat;
 use crate::renderer::TextureSize;
 use crate::renderer::TextureUsages;
 use crate::renderer::{FrameBindings, GeometryPassNode, GeometryRenderQueue};
-use cgmath::InnerSpace;
 
-fn cook_trimesh_indices(vertices: &[cgmath::Point3<f32>], indices: &[u32]) -> Vec<[u32; 3]> {
+fn cook_trimesh_indices(vertices: &[crate::math::Vec3], indices: &[u32]) -> Vec<[u32; 3]> {
     let vertex_count = vertices.len() as u32;
     let mut triangles = Vec::with_capacity(indices.len() / 3);
 
@@ -93,7 +92,7 @@ fn cook_trimesh_indices(vertices: &[cgmath::Point3<f32>], indices: &[u32]) -> Ve
 
         let ab = pb - pa;
         let ac = pc - pa;
-        if ab.cross(ac).magnitude2() <= f32::EPSILON {
+        if ab.cross(ac).length_squared() <= f32::EPSILON {
             continue;
         }
 
@@ -254,7 +253,7 @@ impl State {
         input.mouse_position = Some((x as f32, y as f32));
     }
 
-    fn extract_positions(mesh: &MeshAsset) -> Result<Vec<Point3<f32>>, String> {
+    fn extract_positions(mesh: &MeshAsset) -> Result<Vec<Vec3>, String> {
         let stride = mesh.vertex_layout.stride as usize;
 
         //if stride != std::mem::size_of::<[f32; 3]>() {
@@ -287,7 +286,7 @@ impl State {
             let y = f32::from_le_bytes(vertex[4..8].try_into().unwrap());
             let z = f32::from_le_bytes(vertex[8..12].try_into().unwrap());
 
-            positions.push(Point3::new(x, y, z));
+            positions.push(Vec3::new(x, y, z));
         }
 
         Ok(positions)
@@ -445,10 +444,10 @@ impl State {
                 world.insert(
                     entity,
                     TransformComponent {
-                        position: Vector3::new(0.0, 0.0, 0.0),
-                        rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                        scale: Vector3::new(1.0, 1.0, 1.0),
-                        velocity: Vector3 {
+                        position: Vec3::new(0.0, 0.0, 0.0),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(1.0, 1.0, 1.0),
+                        velocity: Vec3 {
                             x: 0.0,
                             y: 0.0,
                             z: 0.0,
@@ -529,7 +528,7 @@ impl State {
             log::info!("Serialized imported asset to {:?}", output_path);
         }
 
-        //if let Err(error) = self.spawn_dropped_obj(path, &point3(0.0, 0.0, 0.0)) {
+        //if let Err(error) = self.spawn_dropped_obj(path, &vec3(0.0, 0.0, 0.0)) {
         //    log::error!("Unable to load dropped OBJ {:?}: {error}", path);
         //}
     }
@@ -694,11 +693,7 @@ impl State {
             .upload_material_asset(material, None);
     }
 
-    pub fn spawn_dropped_obj(
-        &mut self,
-        path: &Path,
-        spawn_position: &Point3<f32>,
-    ) -> anyhow::Result<()> {
+    pub fn spawn_dropped_obj(&mut self, path: &Path, spawn_position: &Vec3) -> anyhow::Result<()> {
         let (models, _) = tobj::load_obj(
             path,
             &tobj::LoadOptions {
@@ -711,8 +706,8 @@ impl State {
         let y_offset = -10.0;
         let mut positions = Vec::<[f32; 3]>::new();
         let mut indices = Vec::<u32>::new();
-        let mut min = cgmath::vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-        let mut max = cgmath::vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut min = crate::math::vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut max = crate::math::vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
 
         for model in &models {
             let base_vertex = positions.len() as u32;
@@ -740,7 +735,7 @@ impl State {
         let collider_vertices = positions
             .iter()
             .map(|position| {
-                cgmath::point3(
+                crate::math::vec3(
                     position[0] - center.x + spawn_position.x,
                     position[1] - center.y + spawn_position.y,
                     position[2] - center.z + spawn_position.z,
@@ -832,9 +827,9 @@ impl State {
             entity,
             TransformComponent {
                 position: vec3(spawn_position.x, spawn_position.y, spawn_position.z),
-                rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                scale: cgmath::vec3(1.0, 1.0, 1.0),
-                velocity: cgmath::vec3(0.0, 0.0, 0.0),
+                rotation: crate::math::Quat::IDENTITY,
+                scale: crate::math::vec3(1.0, 1.0, 1.0),
+                velocity: crate::math::vec3(0.0, 0.0, 0.0),
             },
         );
         world.insert(
@@ -860,7 +855,7 @@ impl State {
             RigidBodyComponent {
                 kind: BodyKind::Fixed,
                 mass: 0.0,
-                velocity: cgmath::vec3(0.0, 0.0, 0.0),
+                velocity: crate::math::vec3(0.0, 0.0, 0.0),
             },
         );
 

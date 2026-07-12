@@ -1,4 +1,4 @@
-use cgmath::{Point3, vec3};
+use engine::math::{Vec3, vec3};
 use engine::{core::physics::physics::Physics, ecs::world::World, renderer::DebugPassNode};
 use game_types::planet::Planet;
 
@@ -13,7 +13,7 @@ pub fn sync_planet_debug(
         return;
     };
 
-    let mut out = Vec::<(Point3<f32>, f32, u32)>::new();
+    let mut out = Vec::<(Vec3, f32, u32)>::new();
 
     octree::collect_octree_nodes(&planet.octree_root, 0, &mut out);
     for (center, size, depth) in out.iter() {
@@ -41,6 +41,6 @@ pub fn sync_physics_debug(
     //debug_pass_node.clear_spheres();
     //for (_, body) in physics.rigid_body_set.iter() {
     //    let position = body.translation();
-    //    debug_pass_node.add_sphere(Point3::new(position.x, position.y, position.z));
+    //    debug_pass_node.add_sphere(Vec3::new(position.x, position.y, position.z));
     //}
 }

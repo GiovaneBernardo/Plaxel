@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 
-use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Vector3, point3, vec3};
+use engine::math::{Quat, Vec3, vec3};
 use engine::{
     core::components::core::TransformComponent,
     ecs::{commands::Commands, query::Query, system::SystemContext},
@@ -64,14 +64,14 @@ const MAX_PLANET_SPAWN_ATTEMPTS: usize = 256;
 
 fn random_planet_position(
     rng: &mut impl Rng,
-    existing_positions: &[Vector3<f32>],
+    existing_positions: &[Vec3],
     min_distance: f32,
-) -> Option<Vector3<f32>> {
+) -> Option<Vec3> {
     let min_distance_sq = min_distance * min_distance;
-    let far_enough = |candidate: Vector3<f32>| {
+    let far_enough = |candidate: Vec3| {
         existing_positions
             .iter()
-            .all(|position| (candidate - *position).magnitude2() >= min_distance_sq)
+            .all(|position| (candidate - *position).length_squared() >= min_distance_sq)
     };
 
     for _ in 0..MAX_PLANET_SPAWN_ATTEMPTS {
@@ -157,7 +157,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         TransformComponent {
             position: random_planet_position(&mut rng, &planet_positions, min_planet_distance)
                 .unwrap(),
-            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
             scale: vec3(1.0, 1.0, 1.0),
             velocity: vec3(0.0, 0.0, 0.0),
         },
@@ -188,7 +188,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
             new_planet,
             TransformComponent {
                 position: planet_position,
-                rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
                 scale: vec3(1.0, 1.0, 1.0),
                 velocity: vec3(0.0, 0.0, 0.0),
             },
@@ -201,7 +201,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         let octree = Planet::create_octree(
             planet_position,
             planet_size as u32 / 2,
-            &point3(camera_pos.x, camera_pos.y, camera_pos.z),
+            &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
             planet_size as u32,
             chunk_size,
             &terrain_edits,
@@ -297,8 +297,8 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
             .get_node_mut::<AtmospherePassNode>(1)
             .unwrap()
             .settings
-            .sun_direction = (point3(sun_position.x, sun_position.y, sun_position.z)
-            - point3(planet_position.x, planet_position.y, planet_position.z))
+            .sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
+            - vec3(planet_position.x, planet_position.y, planet_position.z))
         .normalize()
         .into();
     }
@@ -320,7 +320,7 @@ pub fn build_requested_mesh(
 ) -> GeneratedMesh {
     let planet_position = request.planet_position;
     let size = request.node_size;
-    let min_corner = point3(
+    let min_corner = vec3(
         request.node_min_corner.x,
         request.node_min_corner.y,
         request.node_min_corner.z,
@@ -339,7 +339,7 @@ pub fn build_requested_mesh(
         34,
         34,
         resolution,
-        min_corner.to_vec(),
+        min_corner,
         planet_position,
         request.planet_size,
         heightmap.as_deref(),
@@ -352,7 +352,7 @@ pub fn build_requested_mesh(
         grid = generate_grid_from_base(
             base_grid.as_ref(),
             resolution,
-            min_corner.to_vec(),
+            min_corner,
             planet_position,
             terrain_edits,
         );
@@ -647,10 +647,21 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
 
 pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
     match change {
+        OctreeChanges::ReplaceMesh {
+            keys_to_remove,
+            requests,
+        } => {
+            for key in keys_to_remove {
+                apply_change(ctx, &OctreeChanges::RemoveMeshes { key: *key });
+            }
+            for request in requests {
+                submit_requested_mesh(ctx, *request);
+            }
+        }
         OctreeChanges::AddMesh { request } => {
             submit_requested_mesh(ctx, *request);
         }
-        OctreeChanges::RemoveMesh { key } => {
+        OctreeChanges::RemoveMeshes { key } => {
             if let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() {
                 mesh_jobs.wanted.remove(key);
                 mesh_jobs.pending_requests.remove(key);
@@ -667,8 +678,8 @@ pub fn generate_grid_from_min(
     ny: u32,
     nz: u32,
     resolution: f32,
-    min: Vector3<f32>,
-    planet_position: Vector3<f32>,
+    min: Vec3,
+    planet_position: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
@@ -705,8 +716,8 @@ fn get_or_build_base_grid(
     ny: u32,
     nz: u32,
     resolution: f32,
-    min: Vector3<f32>,
-    planet_position: Vector3<f32>,
+    min: Vec3,
+    planet_position: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     base_grid_cache: &Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
@@ -745,8 +756,8 @@ fn generate_base_grid_from_min(
     ny: u32,
     nz: u32,
     resolution: f32,
-    min: Vector3<f32>,
-    planet_position: Vector3<f32>,
+    min: Vec3,
+    planet_position: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
 ) -> DensityGrid {
@@ -778,8 +789,8 @@ fn generate_base_grid_from_min(
 fn generate_grid_from_base(
     base_grid: &DensityGrid,
     resolution: f32,
-    min: Vector3<f32>,
-    planet_position: Vector3<f32>,
+    min: Vec3,
+    planet_position: Vec3,
     terrain_edits: &PlanetTerrainEdits,
 ) -> DensityGrid {
     let nx = base_grid.len();

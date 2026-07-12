@@ -5,11 +5,11 @@ use engine::ecs::entity::Entity;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
 
-use cgmath::{self, EuclideanSpace, Quaternion, vec3};
-use cgmath::{InnerSpace, Point3};
 use engine::assets::material::Material;
 use engine::core::components::physics::RapierColliderHandle;
 use engine::core::physics::physics::Physics;
+use engine::math::Vec3;
+use engine::math::{Quat, vec3};
 use engine::model::Vertex;
 use engine::renderer;
 use engine::renderer::CullMode;
@@ -59,11 +59,11 @@ struct GameState {
     terrain_materials_bind_group: BindGroupHandle,
     update_octree: bool,
     terrain_physics_enabled: bool,
-    debug_nodes: Vec<(Point3<f32>, f32, u32)>,
+    debug_nodes: Vec<(Vec3, f32, u32)>,
     debug_depth: u32,
     max_depth: u32,
     octree_job_in_flight: bool,
-    last_requested_camera_pos: Point3<f32>,
+    last_requested_camera_pos: Vec3,
     terrain_brush_radius: f32,
 }
 
@@ -72,14 +72,14 @@ struct GameCamera {
     camera: engine::camera::Camera,
     controller: engine::camera::CameraController,
     uniform: engine::camera::CameraUniform,
-    velocity_sample_pos: Point3<f32>,
+    velocity_sample_pos: Vec3,
     velocity_sample_time: Instant,
     velocity_sample_distance: f32,
 }
 
 #[derive(Clone, Copy)]
 struct ChunkInfo {
-    center: Point3<f32>,
+    center: Vec3,
     size: f32,
 }
 
@@ -97,7 +97,7 @@ struct NeighborSignature(Vec<NodeKey>);
 #[derive(Clone, Copy, Debug)]
 struct ChunkNeighbor {
     key: NodeKey,
-    center: Point3<f32>,
+    center: Vec3,
     size: f32,
 }
 
@@ -182,8 +182,8 @@ pub fn initialize_game_state(state: &mut engine::State) {
         znear: 0.1,
         zfar: 15_000_000.0,
     };
-    if camera.position.to_vec().magnitude() > PLANET_SIZE as f32 {
-        camera.position = cgmath::point3(0.0, PLANET_SIZE as f32, 0.0);
+    if camera.position.length() > PLANET_SIZE as f32 {
+        camera.position = engine::math::vec3(0.0, PLANET_SIZE as f32, 0.0);
     }
 
     let mut uniform = engine::camera::CameraUniform::new();
@@ -337,10 +337,10 @@ pub fn initialize_game_state(state: &mut engine::State) {
     world.insert(
         camera_entity,
         TransformComponent {
-            position: cgmath::vec3(0.0, 8573.0, 0.0),
-            rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-            scale: cgmath::vec3(1.0, 1.0, 1.0),
-            velocity: cgmath::vec3(0.0, 0.0, 0.0),
+            position: engine::math::vec3(0.0, 8573.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: engine::math::vec3(1.0, 1.0, 1.0),
+            velocity: engine::math::vec3(0.0, 0.0, 0.0),
         },
     );
     world.insert(
@@ -494,7 +494,7 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
     );
     apply_camera_input(&mut controller, camera_input);
     controller.update_camera(&mut camera.camera);
-    camera.camera.position = cgmath::point3::<f32>(
+    camera.camera.position = engine::math::vec3(
         camera_transform.position.x,
         camera_transform.position.y,
         camera_transform.position.z,
@@ -577,8 +577,8 @@ fn apply_camera_input(controller: &mut engine::camera::CameraController, input: 
     }
 }
 
-fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Point3<f32>) {
-    let frame_distance = (camera.camera.position - previous_position).magnitude();
+fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Vec3) {
+    let frame_distance = (camera.camera.position - previous_position).length();
     camera.velocity_sample_distance += frame_distance;
 
     let now = Instant::now();
@@ -680,7 +680,7 @@ fn sync_physics_debug(renderer: &mut engine::renderer::Renderer, world: &World) 
     debug_pass_node.clear_spheres();
     for (_, body) in physics.rigid_body_set.iter() {
         let position = body.translation();
-        debug_pass_node.add_sphere(Point3::new(position.x, position.y, position.z));
+        debug_pass_node.add_sphere(Vec3::new(position.x, position.y, position.z));
     }
 }
 
@@ -738,10 +738,10 @@ fn handle_key_press_impl(state: &mut engine::State, key_code: KeyCode, pressed: 
         camera.controller.handle_key(key_code, pressed);
 
         if pressed && key_code == KeyCode::PageUp {
-            camera_transform.position = cgmath::vec3(0.0, PLANET_SIZE as f32, 0.0);
+            camera_transform.position = engine::math::vec3(0.0, PLANET_SIZE as f32, 0.0);
         }
         if pressed && key_code == KeyCode::PageDown {
-            camera_transform.position = cgmath::vec3(0.0, 0.0, 0.0);
+            camera_transform.position = engine::math::vec3(0.0, 0.0, 0.0);
         }
     }
 
@@ -790,14 +790,14 @@ fn handle_key_press_impl(state: &mut engine::State, key_code: KeyCode, pressed: 
 fn cook_terrain_collider_mesh(
     vertices: &[PlanetVertex],
     indices: &[u32],
-) -> Option<(Vec<Point3<f32>>, Vec<[u32; 3]>)> {
+) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
     if vertices.is_empty() || indices.len() < 3 {
         return None;
     }
 
-    let collider_vertices: Vec<Point3<f32>> = vertices
+    let collider_vertices: Vec<Vec3> = vertices
         .iter()
-        .map(|vertex| Point3::new(vertex.position[0], vertex.position[1], vertex.position[2]))
+        .map(|vertex| Vec3::new(vertex.position[0], vertex.position[1], vertex.position[2]))
         .collect();
     let vertex_count = collider_vertices.len() as u32;
     let mut collider_indices = Vec::with_capacity(indices.len() / 3);
@@ -826,7 +826,7 @@ fn cook_terrain_collider_mesh(
 
         let ab = pb - pa;
         let ac = pc - pa;
-        if ab.cross(ac).magnitude2() <= f32::EPSILON {
+        if ab.cross(ac).length_squared() <= f32::EPSILON {
             continue;
         }
 

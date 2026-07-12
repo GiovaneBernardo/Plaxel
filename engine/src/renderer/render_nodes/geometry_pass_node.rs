@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use cgmath::{EuclideanSpace, Matrix4, SquareMatrix, point3};
+use crate::math::{Mat4, vec3};
 
 use crate::camera;
 use crate::model::TransformInstance;
@@ -211,7 +211,7 @@ impl GeometryPassNode {
     pub fn add_render_data(&mut self, mut new_render_data: RenderData) {
         new_render_data.transform_index = self.transforms.len() as u32;
         self.transforms.push(TransformInstance {
-            model_matrix: Matrix4::identity().into(),
+            model_matrix: Mat4::IDENTITY.to_cols_array_2d(),
             material_index: new_render_data.material.material_index,
         });
         self.render_data.push(new_render_data);
@@ -229,9 +229,9 @@ impl GeometryPassNode {
         render_resources: &RenderResources,
         x: f32,
         y: f32,
-    ) -> cgmath::Point3<f32> {
+    ) -> crate::math::Vec3 {
         let Some(texture) = graph_resources.texture("main_depth") else {
-            return point3(0.0, 0.0, 0.0);
+            return vec3(0.0, 0.0, 0.0);
         };
 
         let texture_size = api.get_texture_size(texture);
@@ -241,24 +241,22 @@ impl GeometryPassNode {
         let y = y.clamp(0.0, (texture_height - 1.0).max(0.0));
 
         let Some(camera_data) = render_resources.get::<CameraData>() else {
-            return point3(0.0, 0.0, 0.0);
+            return vec3(0.0, 0.0, 0.0);
         };
 
         let depth = api.read_texture::<f32>(texture, x, y);
         engine_info!("Depth: {}", depth);
-        let view_proj: cgmath::Matrix4<f32> = camera_data.uniform.view_proj.into();
-        let Some(inv_view_proj) = view_proj.invert() else {
-            return point3(0.0, 0.0, 0.0);
-        };
+        let view_proj = Mat4::from_cols_array_2d(&camera_data.uniform.view_proj);
+        let inv_view_proj = view_proj.inverse();
 
         let ndc_x = (x / texture_width) * 2.0 - 1.0;
         let ndc_y = 1.0 - (y / texture_height) * 2.0;
 
-        let clip = cgmath::Vector4::new(ndc_x, ndc_y, depth, 1.0);
+        let clip = crate::math::Vec4::new(ndc_x, ndc_y, depth, 1.0);
 
         let world = inv_view_proj * clip;
         let world_pos = world.truncate() / world.w;
-        let world_pos = cgmath::Point3::from_vec(world_pos);
+        let world_pos = crate::math::Vec3::from(world_pos);
         world_pos
     }
 }

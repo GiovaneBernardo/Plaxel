@@ -4,6 +4,7 @@ use std::collections::HashMap;
 pub use crate::State;
 use crate::assets::manager::{AssetHeader, Handle};
 use crate::assets::material::{Material, TextureAsset};
+use crate::math::UVec2;
 use crate::model::MeshAsset;
 use crate::renderer::core::{
     BufferHandle, GraphResources, MeshDrawRange, PipelineHandle, PipelineTargetInfo, RenderGraph,
@@ -15,7 +16,6 @@ use crate::renderer::{
     TextureDescriptor,
 };
 use crate::texture;
-use cgmath::Point2;
 use uuid::Uuid;
 
 pub trait RendererAPI {
@@ -90,8 +90,8 @@ pub trait RendererAPI {
     fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32;
     fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
 
-    fn get_texture_size(&self, handle: &TextureHandle) -> Point2<u32>;
-    fn get_surface_size(&self) -> Point2<u32>;
+    fn get_texture_size(&self, handle: &TextureHandle) -> UVec2;
+    fn get_surface_size(&self) -> UVec2;
 
     // Temporary
     fn set_texture(&mut self, texture: &texture::Texture);

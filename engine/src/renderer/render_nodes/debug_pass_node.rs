@@ -22,7 +22,7 @@ pub struct InstanceRawMaterial {
 }
 
 pub struct DebugCube {
-    pub position: cgmath::Point3<f32>,
+    pub position: crate::math::Vec3,
     pub scale: f32,
     pub color: [f32; 4],
 }
@@ -30,7 +30,7 @@ pub struct DebugCube {
 pub struct DebugPassNode {
     pub cubes: Vec<DebugCube>,
     pub wire_cubes: Vec<DebugCube>,
-    pub sphere_positions: Vec<cgmath::Point3<f32>>,
+    pub sphere_positions: Vec<crate::math::Vec3>,
     pub camera_buffer: Option<BufferHandle>,
     pub camera_bind_group: Option<BindGroupHandle>,
     pub camera_bind_group_layout: Option<BindGroupLayoutHandle>,
@@ -130,9 +130,10 @@ impl RenderNode for DebugPassNode {
                 .sphere_positions
                 .iter()
                 .map(|p| {
-                    let m = cgmath::Matrix4::from_translation(cgmath::Vector3::new(p.x, p.y, p.z));
+                    let m =
+                        crate::math::Mat4::from_translation(crate::math::Vec3::new(p.x, p.y, p.z));
                     InstanceRaw {
-                        model: m.into(),
+                        model: m.to_cols_array_2d(),
                         color: [0.3, 0.3, 0.3, 1.0],
                     }
                 })
@@ -162,10 +163,11 @@ impl RenderNode for DebugPassNode {
                 .iter()
                 .map(|cube| {
                     let p = &cube.position;
-                    let m = cgmath::Matrix4::from_translation(cgmath::Vector3::new(p.x, p.y, p.z))
-                        * cgmath::Matrix4::from_scale(cube.scale);
+                    let m =
+                        crate::math::Mat4::from_translation(crate::math::Vec3::new(p.x, p.y, p.z))
+                            * crate::math::Mat4::from_scale(crate::math::Vec3::splat(cube.scale));
                     InstanceRaw {
-                        model: m.into(),
+                        model: m.to_cols_array_2d(),
                         color: cube.color,
                     }
                 })
@@ -195,10 +197,11 @@ impl RenderNode for DebugPassNode {
                 .iter()
                 .map(|cube| {
                     let p = &cube.position;
-                    let m = cgmath::Matrix4::from_translation(cgmath::Vector3::new(p.x, p.y, p.z))
-                        * cgmath::Matrix4::from_scale(cube.scale);
+                    let m =
+                        crate::math::Mat4::from_translation(crate::math::Vec3::new(p.x, p.y, p.z))
+                            * crate::math::Mat4::from_scale(crate::math::Vec3::splat(cube.scale));
                     InstanceRaw {
-                        model: m.into(),
+                        model: m.to_cols_array_2d(),
                         color: cube.color,
                     }
                 })
@@ -304,7 +307,7 @@ impl RenderNode for DebugPassNode {
 }
 
 impl DebugPassNode {
-    pub fn add_cube(&mut self, position: cgmath::Point3<f32>, scale: f32, color: [f32; 4]) {
+    pub fn add_cube(&mut self, position: crate::math::Vec3, scale: f32, color: [f32; 4]) {
         self.cubes.push(DebugCube {
             position,
             scale,
@@ -312,7 +315,7 @@ impl DebugPassNode {
         });
     }
 
-    pub fn add_wire_cube(&mut self, position: cgmath::Point3<f32>, scale: f32, color: [f32; 4]) {
+    pub fn add_wire_cube(&mut self, position: crate::math::Vec3, scale: f32, color: [f32; 4]) {
         self.wire_cubes.push(DebugCube {
             position,
             scale,
@@ -332,7 +335,7 @@ impl DebugPassNode {
         self.sphere_positions.clear();
     }
 
-    pub fn add_sphere(&mut self, position: cgmath::Point3<f32>) {
+    pub fn add_sphere(&mut self, position: crate::math::Vec3) {
         self.sphere_positions.push(position);
     }
 }

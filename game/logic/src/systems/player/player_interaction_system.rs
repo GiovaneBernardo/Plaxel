@@ -19,7 +19,7 @@ use game_types::octree::{OctreeNode, PlanetMeshRequest};
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use rand::Rng;
 
-use cgmath::{EuclideanSpace, InnerSpace, Quaternion, Rotation3, Vector3, vec3};
+use engine::math::{Quat, Vec3, vec3};
 
 use engine::core::input::{InputState, KeyCode, MouseButton};
 use engine::ecs::commands::{Commands, PhysicalSphereParams};
@@ -111,7 +111,7 @@ fn ray_from_mouse_position(
     mouse_position_y: f32,
     viewport_width: f32,
     viewport_height: f32,
-) -> Option<(cgmath::Point3<f32>, Vector3<f32>)> {
+) -> Option<(engine::math::Vec3, Vec3)> {
     if viewport_width <= 0.0 || viewport_height <= 0.0 {
         return None;
     }
@@ -125,7 +125,7 @@ fn ray_from_mouse_position(
         + camera.right() * viewport_position_x * half_horizontal_field_of_view
         + camera.up() * viewport_position_y * half_vertical_field_of_view;
 
-    if ray_direction.magnitude2() <= f32::EPSILON {
+    if ray_direction.length_squared() <= f32::EPSILON {
         return None;
     }
 
@@ -133,19 +133,19 @@ fn ray_from_mouse_position(
 }
 
 fn trace_terrain_surface(
-    ray_origin: cgmath::Point3<f32>,
-    ray_direction: Vector3<f32>,
+    ray_origin: engine::math::Vec3,
+    ray_direction: Vec3,
     ray_start_distance: f32,
     ray_end_distance: f32,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
-) -> Option<(f32, cgmath::Point3<f32>)> {
+) -> Option<(f32, engine::math::Vec3)> {
     let mut previous_distance = ray_start_distance.max(0.0);
     let previous_position = ray_origin + ray_direction * previous_distance;
     let mut previous_density = sdf_at_center(
-        previous_position.to_vec(),
+        previous_position,
         planet_position,
         planet_size,
         heightmap,
@@ -168,7 +168,7 @@ fn trace_terrain_surface(
 
         let current_position = ray_origin + ray_direction * current_distance;
         let current_density = sdf_at_center(
-            current_position.to_vec(),
+            current_position,
             planet_position,
             planet_size,
             heightmap,
@@ -188,7 +188,7 @@ fn trace_terrain_surface(
                 let middle_distance = (lower_distance + upper_distance) * 0.5;
                 let middle_position = ray_origin + ray_direction * middle_distance;
                 let middle_density = sdf_at_center(
-                    middle_position.to_vec(),
+                    middle_position,
                     planet_position,
                     planet_size,
                     heightmap,
@@ -221,11 +221,7 @@ fn trace_terrain_surface(
     None
 }
 
-fn node_overlaps_bounds(
-    node: &OctreeNode,
-    bounds_min: Vector3<f32>,
-    bounds_max: Vector3<f32>,
-) -> bool {
+fn node_overlaps_bounds(node: &OctreeNode, bounds_min: Vec3, bounds_max: Vec3) -> bool {
     let node_max = node.min + vec3(node.size, node.size, node.size);
 
     node.min.x <= bounds_max.x
@@ -239,10 +235,10 @@ fn node_overlaps_bounds(
 fn collect_dirty_mesh_requests(
     node: &OctreeNode,
     planet_entity: Entity,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
-    bounds_min: Vector3<f32>,
-    bounds_max: Vector3<f32>,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
     requests: &mut Vec<PlanetMeshRequest>,
 ) {
     if !node_overlaps_bounds(node, bounds_min, bounds_max) {
@@ -405,11 +401,11 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
         drop(camera_component);
 
         if sprint {
-            let distance = camera_transform.position.magnitude();
+            let distance = camera_transform.position.length();
             final_speed *= distance.sqrt() * 0.1;
         }
 
-        let mut movement = Vector3::new(0.0, 0.0, 0.0);
+        let mut movement = Vec3::new(0.0, 0.0, 0.0);
         if walk_forward {
             movement += forward;
         }
@@ -428,7 +424,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
         if crouch {
             movement -= up;
         }
-        if movement.magnitude2() > f32::EPSILON {
+        if movement.length_squared() > f32::EPSILON {
             camera_transform.position += movement.normalize() * final_speed;
         }
 
@@ -436,14 +432,8 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
             && (mouse_delta.0.abs() > f32::EPSILON || mouse_delta.1.abs() > f32::EPSILON)
         {
             let sensitivity = 0.1;
-            let yaw = Quaternion::from_axis_angle(
-                Vector3::unit_y(),
-                cgmath::Rad(-(mouse_delta.0 * sensitivity).to_radians()),
-            );
-            let pitch = Quaternion::from_axis_angle(
-                Vector3::unit_x(),
-                cgmath::Rad(-(mouse_delta.1 * sensitivity).to_radians()),
-            );
+            let yaw = Quat::from_axis_angle(Vec3::Y, -(mouse_delta.0 * sensitivity).to_radians());
+            let pitch = Quat::from_axis_angle(Vec3::X, -(mouse_delta.1 * sensitivity).to_radians());
             camera_transform.rotation = (camera_transform.rotation * yaw * pitch).normalize();
         }
 
@@ -456,8 +446,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
             roll_amount += 1.0;
         }
         if roll_amount != 0.0 {
-            let roll =
-                Quaternion::from_axis_angle(-Vector3::unit_z(), cgmath::Rad(roll_amount * 0.02));
+            let roll = Quat::from_axis_angle(-Vec3::Z, roll_amount * 0.02);
             camera_transform.rotation = (camera_transform.rotation * roll).normalize();
         }
 
@@ -466,7 +455,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
             if left_mouse_pressed {
                 if let Some((mouse_position_x, mouse_position_y)) = mouse_position {
                     let current_camera = engine::camera::Camera {
-                        position: cgmath::point3(
+                        position: engine::math::vec3(
                             camera_transform.position.x,
                             camera_transform.position.y,
                             camera_transform.position.z,
@@ -525,7 +514,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                         if let Some((hit_entity, _hit_distance, hit_pos)) = closest_hit {
                             let hit_planet = world.get::<Planet>(hit_entity).unwrap();
 
-                            let hit_world = hit_pos.to_vec();
+                            let hit_world = hit_pos;
                             let hit_local = hit_world - hit_planet.position;
 
                             let brick_size = 32.0;
@@ -611,7 +600,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                                                 * sample_spacing,
                                                         );
                                                     let distance_from_hit =
-                                                        (sample_position - hit_local).magnitude();
+                                                        (sample_position - hit_local).length();
 
                                                     if distance_from_hit > brush_radius {
                                                         continue;
@@ -639,8 +628,8 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                 let b_center = b.node_min_corner
                                     + vec3(b.node_size, b.node_size, b.node_size) * 0.5;
                                 (a_center - hit_world)
-                                    .magnitude2()
-                                    .total_cmp(&(b_center - hit_world).magnitude2())
+                                    .length_squared()
+                                    .total_cmp(&(b_center - hit_world).length_squared())
                             });
 
                             commands.push(move |ctx| {
@@ -664,7 +653,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
 
             commands.spawn_physical_sphere(PhysicalSphereParams {
                 mass: 50.0,
-                position: cgmath::vec3(
+                position: engine::math::vec3(
                     rng.gen_range(-5.0..5.0),
                     rng.gen_range(0.5..5.0),
                     rng.gen_range(-5.0..5.0),
@@ -693,7 +682,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
             assembly,
             TransformComponent {
                 position: vec3(camera_position.x, camera_position.y, camera_position.z),
-                rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
                 scale: vec3(0.1, 0.1, 0.1),
                 velocity: vec3(0.0, 0.0, 0.0),
             },

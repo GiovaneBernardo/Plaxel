@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicU32;
 
-use cgmath::{InnerSpace, Point3, Vector3, point3, vec3};
 use engine::ecs::entity::Entity;
+use engine::math::{Vec3, vec3};
 use game_types::{
     octree::{NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest},
     planet::PlanetTerrainEdits,
@@ -36,30 +36,26 @@ pub fn depth_color(depth: u32) -> [f32; 4] {
     DEPTH_COLORS[depth as usize % DEPTH_COLORS.len()]
 }
 
-pub fn is_behind_horizon(
-    node_center: Vector3<f32>,
-    camera_pos: Vector3<f32>,
-    planet_center: Vector3<f32>,
-) -> bool {
+pub fn is_behind_horizon(node_center: Vec3, camera_pos: Vec3, planet_center: Vec3) -> bool {
     let to_node = (node_center - planet_center).normalize();
     let to_camera = (camera_pos - planet_center).normalize();
-    cgmath::dot(to_node, to_camera) < 0.0
+    to_node.dot(to_camera) < 0.0
 }
 
-pub fn should_subdivide(node: OctreeNode, camera_pos: Vector3<f32>) -> bool {
+pub fn should_subdivide(node: OctreeNode, camera_pos: Vec3) -> bool {
     let center = node.min + vec3(node.size * 0.5, node.size * 0.5, node.size * 0.5);
-    let dist = (center - camera_pos).magnitude();
+    let dist = (center - camera_pos).length();
     let error = node.size / dist;
     error > THRESHOLD
 }
 
 pub fn build_node(
-    min: Vector3<f32>,
+    min: Vec3,
     size: f32,
     min_size: f32,
     first: bool,
-    camera_position: &cgmath::Point3<f32>,
-    planet_center: Vector3<f32>,
+    camera_position: &engine::math::Vec3,
+    planet_center: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
@@ -221,9 +217,9 @@ pub fn build_node(
 }
 
 pub fn has_surface(
-    min: Vector3<f32>,
+    min: Vec3,
     size: f32,
-    planet_center: Vector3<f32>,
+    planet_center: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
@@ -251,11 +247,11 @@ pub fn collect_octree_nodes_at_depth(
     node: &OctreeNode,
     current_depth: u32,
     target_depth: u32,
-    out: &mut Vec<(Point3<f32>, f32, u32)>,
+    out: &mut Vec<(Vec3, f32, u32)>,
 ) {
     if current_depth == target_depth {
         let half = node.size / 2.0;
-        let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
+        let center = Vec3::new(node.min.x + half, node.min.y + half, node.min.z + half);
         out.push((center, node.size, current_depth));
         return;
     }
@@ -269,10 +265,10 @@ pub fn collect_octree_nodes_at_depth(
 pub fn collect_octree_nodes(
     node: &OctreeNode,
     current_depth: u32,
-    out: &mut Vec<(Point3<f32>, f32, u32)>,
+    out: &mut Vec<(Vec3, f32, u32)>,
 ) {
     let half = node.size / 2.0;
-    let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
+    let center = Vec3::new(node.min.x + half, node.min.y + half, node.min.z + half);
     out.push((center, node.size, current_depth));
 
     if let Some(children) = &node.children {
@@ -308,8 +304,8 @@ pub fn collect_leaf_nodes<'a>(node: &'a OctreeNode, out: &mut Vec<&'a OctreeNode
 
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
-    pub min: cgmath::Vector3<f32>,
-    pub max: cgmath::Vector3<f32>,
+    pub min: engine::math::Vec3,
+    pub max: engine::math::Vec3,
 }
 
 impl Aabb {
@@ -319,25 +315,25 @@ impl Aabb {
             .max(self.max.z - self.min.z)
     }
 
-    pub fn center(&self) -> cgmath::Vector3<f32> {
+    pub fn center(&self) -> engine::math::Vec3 {
         (self.min + self.max) * 0.5
     }
 
-    pub fn distance_to_point(&self, p: cgmath::Vector3<f32>) -> f32 {
+    pub fn distance_to_point(&self, p: engine::math::Vec3) -> f32 {
         let closest = vec3(
             p.x.clamp(self.min.x, self.max.x),
             p.y.clamp(self.min.y, self.max.y),
             p.z.clamp(self.min.z, self.max.z),
         );
-        (p - closest).magnitude()
+        (p - closest).length()
     }
 }
 
 pub fn update(
     node: &mut OctreeNode,
-    camera_pos: Vector3<f32>,
+    camera_pos: Vec3,
     planet_entity: Entity,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
     changes: &mut Vec<OctreeChanges>,
     heightmap: Option<&EarthHeightmap>,
@@ -395,7 +391,7 @@ pub fn update(
 
 pub fn create_children(
     parent: &OctreeNode,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
@@ -405,7 +401,7 @@ pub fn create_children(
     let mid = bounds.center();
     let child_size = parent.size * 0.5;
 
-    let make_child = |min: cgmath::Vector3<f32>| {
+    let make_child = |min: engine::math::Vec3| {
         let has_surface = has_surface(
             min,
             child_size,
@@ -431,14 +427,14 @@ pub fn create_children(
     };
 
     [
-        Box::new(make_child(cgmath::vec3(min.x, min.y, min.z))),
-        Box::new(make_child(cgmath::vec3(mid.x, min.y, min.z))),
-        Box::new(make_child(cgmath::vec3(min.x, mid.y, min.z))),
-        Box::new(make_child(cgmath::vec3(mid.x, mid.y, min.z))),
-        Box::new(make_child(cgmath::vec3(min.x, min.y, mid.z))),
-        Box::new(make_child(cgmath::vec3(mid.x, min.y, mid.z))),
-        Box::new(make_child(cgmath::vec3(min.x, mid.y, mid.z))),
-        Box::new(make_child(cgmath::vec3(mid.x, mid.y, mid.z))),
+        Box::new(make_child(engine::math::vec3(min.x, min.y, min.z))),
+        Box::new(make_child(engine::math::vec3(mid.x, min.y, min.z))),
+        Box::new(make_child(engine::math::vec3(min.x, mid.y, min.z))),
+        Box::new(make_child(engine::math::vec3(mid.x, mid.y, min.z))),
+        Box::new(make_child(engine::math::vec3(min.x, min.y, mid.z))),
+        Box::new(make_child(engine::math::vec3(mid.x, min.y, mid.z))),
+        Box::new(make_child(engine::math::vec3(min.x, mid.y, mid.z))),
+        Box::new(make_child(engine::math::vec3(mid.x, mid.y, mid.z))),
     ]
 }
 
@@ -450,7 +446,7 @@ pub fn collect_child_mesh_removals(
         if let Some(grandchildren) = child.children.as_ref() {
             collect_child_mesh_removals(grandchildren, changes);
         } else {
-            changes.push(OctreeChanges::RemoveMesh { key: child.key });
+            changes.push(OctreeChanges::RemoveMeshes { key: child.key });
         }
     }
 }
@@ -464,7 +460,7 @@ pub fn node_bounds(node: &OctreeNode) -> Aabb {
 
 pub fn should_split(
     node: &OctreeNode,
-    camera_pos: cgmath::Vector3<f32>,
+    camera_pos: engine::math::Vec3,
     min_node_size: f32,
     planet_size: u32,
 ) -> bool {
@@ -488,11 +484,7 @@ pub fn should_split(
     distance < split_distance
 }
 
-pub fn should_merge(
-    node: &OctreeNode,
-    camera_pos: cgmath::Vector3<f32>,
-    min_node_size: f32,
-) -> bool {
+pub fn should_merge(node: &OctreeNode, camera_pos: engine::math::Vec3, min_node_size: f32) -> bool {
     if node.children.is_none() {
         return false;
     }
@@ -512,7 +504,7 @@ pub fn should_merge(
 fn mesh_request(
     node: &OctreeNode,
     planet_entity: Entity,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
 ) -> PlanetMeshRequest {
     PlanetMeshRequest {
@@ -528,12 +520,12 @@ fn split_node(
     node: &mut OctreeNode,
     changes: &mut Vec<OctreeChanges>,
     planet_entity: Entity,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    changes.push(OctreeChanges::RemoveMesh { key: node.key });
+    changes.push(OctreeChanges::RemoveMeshes { key: node.key });
 
     let children = create_children(node, planet_position, planet_size, heightmap, terrain_edits);
 
@@ -553,7 +545,7 @@ fn merge_node(
     node: &mut OctreeNode,
     changes: &mut Vec<OctreeChanges>,
     planet_entity: Entity,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     planet_size: u32,
 ) {
     if let Some(children) = node.children.as_ref() {
@@ -572,15 +564,15 @@ fn merge_node(
 
 pub fn ray_intersects(
     node: &OctreeNode,
-    ray_origin: Point3<f32>,
-    ray_direction: Vector3<f32>,
+    ray_origin: Vec3,
+    ray_direction: Vec3,
 ) -> Option<(f32, f32)> {
     let inv_dir = vec3(
         1.0 / ray_direction.x,
         1.0 / ray_direction.y,
         1.0 / ray_direction.z,
     );
-    let max = point3(
+    let max = vec3(
         node.min.x + node.size,
         node.min.y + node.size,
         node.min.z + node.size,
@@ -626,8 +618,8 @@ pub fn ray_intersects(
 }
 
 pub fn traverse_octree(
-    ray_origin: Point3<f32>,
-    ray_direction: Vector3<f32>,
+    ray_origin: Vec3,
+    ray_direction: Vec3,
     node: &OctreeNode,
     best_t: &mut f32,
     last_node: &mut Option<OctreeNode>,

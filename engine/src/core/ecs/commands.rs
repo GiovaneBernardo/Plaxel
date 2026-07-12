@@ -24,7 +24,7 @@ pub struct Commands {
 }
 
 pub struct PhysicalSphereParams {
-    pub position: cgmath::Vector3<f32>,
+    pub position: crate::math::Vec3,
     pub radius: f32,
     pub mass: f32,
 }
@@ -71,9 +71,9 @@ impl Commands {
                 entity,
                 TransformComponent {
                     position: params.position,
-                    rotation: cgmath::Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                    scale: cgmath::vec3(params.radius, params.radius, params.radius),
-                    velocity: cgmath::vec3(0.0, 0.0, 0.0),
+                    rotation: crate::math::Quat::IDENTITY,
+                    scale: crate::math::vec3(params.radius, params.radius, params.radius),
+                    velocity: crate::math::vec3(0.0, 0.0, 0.0),
                 },
             );
             ctx.world.insert(
@@ -91,7 +91,7 @@ impl Commands {
                 RigidBodyComponent {
                     kind: BodyKind::Dynamic,
                     mass: params.mass,
-                    velocity: cgmath::vec3(0.0, 0.0, 0.0),
+                    velocity: crate::math::vec3(0.0, 0.0, 0.0),
                 },
             );
         });

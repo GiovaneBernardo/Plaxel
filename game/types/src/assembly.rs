@@ -1,6 +1,6 @@
 use crate::block::Block;
 
 pub struct Assembly {
-    pub position: cgmath::Point3<f32>,
+    pub position: engine::math::Vec3,
     pub blocks: Vec<Block>,
 }

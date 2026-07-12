@@ -1,4 +1,4 @@
-use cgmath::{EuclideanSpace, InnerSpace, Point3, Vector3, vec3};
+use engine::math::{Vec3, vec3};
 use game_types::{
     octree::OctreeNode,
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
@@ -9,26 +9,22 @@ use crate::{octree, sdf::EarthHeightmap};
 pub trait PlanetExt {
     fn dual_contour_grid(
         grid: &[Vec<Vec<f32>>],
-        offset: Point3<f32>,
+        offset: Vec3,
         resolution: f32,
-        planet_position: Vector3<f32>,
+        planet_position: Vec3,
         planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
         terrain_edits: &PlanetTerrainEdits,
     ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(
-        planet_position: cgmath::Vector3<f32>,
+        planet_position: engine::math::Vec3,
         planet_radius: u32,
-        camera_position: &cgmath::Point3<f32>,
+        camera_position: &engine::math::Vec3,
         planet_size: u32,
         chunk_size: u32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode;
-    fn collect_leaf_nodes(
-        node: &OctreeNode,
-        current_depth: u32,
-        out: &mut Vec<(Point3<f32>, f32, u32)>,
-    );
+    fn collect_leaf_nodes(node: &OctreeNode, current_depth: u32, out: &mut Vec<(Vec3, f32, u32)>);
 }
 
 type CellVertexGrid = Vec<Vec<Vec<Option<u32>>>>;
@@ -55,9 +51,9 @@ fn contour_cell_vertex(
     x: usize,
     y: usize,
     z: usize,
-    offset: Point3<f32>,
+    offset: Vec3,
     resolution: f32,
-    planet_position: Vector3<f32>,
+    planet_position: Vec3,
     heightmap: Option<&EarthHeightmap>,
 ) -> Option<PlanetVertex> {
     let corners = [
@@ -123,19 +119,19 @@ fn contour_cell_vertex(
     let size_x = grid.len();
     let size_y = grid[0].len();
     let size_z = grid[0][0].len();
-    let average_position = Point3::from_vec(average);
+    let average_position = Vec3::from(average);
     let dx = grid[(x + 1).min(size_x - 1)][y][z] - grid[x.saturating_sub(1)][y][z];
     let dy = grid[x][(y + 1).min(size_y - 1)][z] - grid[x][y.saturating_sub(1)][z];
     let dz = grid[x][y][(z + 1).min(size_z - 1)] - grid[x][y][z.saturating_sub(1)];
     let gradient = vec3(dx, dy, dz);
-    let normal = if gradient.magnitude2() > 1e-12 {
+    let normal = if gradient.length_squared() > 1e-12 {
         gradient.normalize()
     } else {
-        (average_position.to_vec() - planet_position).normalize()
+        (average_position - planet_position).normalize()
     };
     let average_normal = [normal.x, normal.y, normal.z];
-    let radial = average_position.to_vec() - planet_position;
-    let up = if radial.magnitude2() > 1e-6 {
+    let radial = average_position - planet_position;
+    let up = if radial.length_squared() > 1e-6 {
         radial.normalize()
     } else {
         vec3(0.0, 1.0, 0.0)
@@ -262,9 +258,9 @@ fn append_z_edge_indices(
 impl PlanetExt for Planet {
     fn dual_contour_grid(
         grid: &[Vec<Vec<f32>>],
-        offset: Point3<f32>,
+        offset: Vec3,
         resolution: f32,
-        planet_position: Vector3<f32>,
+        planet_position: Vec3,
         _planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
         _terrain_edits: &PlanetTerrainEdits,
@@ -308,16 +304,16 @@ impl PlanetExt for Planet {
     }
 
     fn create_octree(
-        planet_position: cgmath::Vector3<f32>,
+        planet_position: engine::math::Vec3,
         planet_radius: u32,
-        camera_position: &cgmath::Point3<f32>,
+        camera_position: &engine::math::Vec3,
         planet_size: u32,
         chunk_size: u32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode {
         let r = planet_radius as f32 / 2.0;
         octree::build_node(
-            Vector3 {
+            Vec3 {
                 x: planet_position.x + -r,
                 y: planet_position.y + -r,
                 z: planet_position.z + -r,
@@ -333,14 +329,10 @@ impl PlanetExt for Planet {
         )
     }
 
-    fn collect_leaf_nodes(
-        node: &OctreeNode,
-        current_depth: u32,
-        out: &mut Vec<(Point3<f32>, f32, u32)>,
-    ) {
+    fn collect_leaf_nodes(node: &OctreeNode, current_depth: u32, out: &mut Vec<(Vec3, f32, u32)>) {
         if node.children.iter().count() == 0 {
             let half = node.size / 2.0;
-            let center = Point3::new(node.min.x + half, node.min.y + half, node.min.z + half);
+            let center = Vec3::new(node.min.x + half, node.min.y + half, node.min.z + half);
             if node.has_surface {
                 out.push((center, node.size, current_depth));
             }
