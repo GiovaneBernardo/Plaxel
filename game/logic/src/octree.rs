@@ -9,7 +9,7 @@ use game_types::{
 
 use crate::{
     NodeKey,
-    sdf::{EarthHeightmap, sdf_at_center},
+    sdf::{EarthHeightmap, TERRAIN_EDIT_BRICK_SIZE, sdf_at_center},
 };
 
 const THRESHOLD: f32 = 0.3;
@@ -362,7 +362,14 @@ pub fn update(
         return;
     }
 
-    if should_split(node, camera_pos, min_node_size, planet_size) {
+    if should_split(
+        node,
+        camera_pos,
+        planet_position,
+        min_node_size,
+        planet_size,
+        terrain_edits,
+    ) {
         split_node(
             node,
             changes,
@@ -409,14 +416,16 @@ pub fn create_children(
     let child_size = parent.size * 0.5;
 
     let make_child = |min: engine::math::Vec3| {
-        let has_surface = has_surface(
-            min,
-            child_size,
-            planet_position,
-            planet_size,
-            heightmap,
-            terrain_edits,
-        );
+        let has_surface =
+            chunk_overlaps_deformation(min - planet_position, child_size, terrain_edits)
+                || has_surface(
+                    min,
+                    child_size,
+                    planet_position,
+                    planet_size,
+                    heightmap,
+                    terrain_edits,
+                );
         OctreeNode {
             key: NodeKey {
                 x: min.x as i32,
@@ -465,23 +474,63 @@ pub fn node_bounds(node: &OctreeNode) -> Aabb {
     }
 }
 
+/// Returns whether a planet-local chunk overlaps any terrain-edit brick.
+/// A strict overlap avoids treating chunks that only touch at a face as edited.
+pub fn chunk_overlaps_deformation(
+    local_min: Vec3,
+    size: f32,
+    terrain_edits: &PlanetTerrainEdits,
+) -> bool {
+    let local_max = local_min + vec3(size, size, size);
+
+    terrain_edits.modified_chunks.keys().any(|key| {
+        if key.level != 0 {
+            return false;
+        }
+
+        let brick_min = vec3(
+            key.x as f32 * TERRAIN_EDIT_BRICK_SIZE,
+            key.y as f32 * TERRAIN_EDIT_BRICK_SIZE,
+            key.z as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        );
+        let brick_max = brick_min
+            + vec3(
+                TERRAIN_EDIT_BRICK_SIZE,
+                TERRAIN_EDIT_BRICK_SIZE,
+                TERRAIN_EDIT_BRICK_SIZE,
+            );
+
+        brick_min.x < local_max.x
+            && brick_max.x > local_min.x
+            && brick_min.y < local_max.y
+            && brick_max.y > local_min.y
+            && brick_min.z < local_max.z
+            && brick_max.z > local_min.z
+    })
+}
+
 pub fn should_split(
     node: &OctreeNode,
     camera_pos: engine::math::Vec3,
+    planet_position: Vec3,
     min_node_size: f32,
     planet_size: u32,
+    terrain_edits: &PlanetTerrainEdits,
 ) -> bool {
     if node.children.is_some() {
-        return false;
-    }
-
-    if !node.has_surface && node.size < planet_size as f32 / 4.0 {
         return false;
     }
 
     let bounds = node_bounds(node);
 
     if bounds.size() <= min_node_size {
+        return false;
+    }
+
+    let overlaps_deformation =
+        chunk_overlaps_deformation(bounds.min - planet_position, bounds.size(), terrain_edits);
+
+    if !node.has_surface && !overlaps_deformation && node.size < planet_size as f32 / 4.0 {
         return false;
     }
 
@@ -532,6 +581,10 @@ fn split_node(
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
+    if chunk_overlaps_deformation(node.min - planet_position, node.size, terrain_edits) {
+        node.has_surface = true;
+    }
+
     let children = create_children(node, planet_position, planet_size, heightmap, terrain_edits);
 
     let requests = children
