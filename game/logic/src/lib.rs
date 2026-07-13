@@ -590,18 +590,6 @@ fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Vec3) 
         return;
     }
 
-    let meters_per_second = camera.velocity_sample_distance / elapsed;
-    if meters_per_second > 0.01 {
-        engine::game_info!(
-            "editor camera speed: {:.2} m/s ({:.2} km/h), position: ({:.2}, {:.2}, {:.2})",
-            meters_per_second,
-            meters_per_second * 3.6,
-            camera.camera.position.x,
-            camera.camera.position.y,
-            camera.camera.position.z,
-        );
-    }
-
     camera.velocity_sample_pos = camera.camera.position;
     camera.velocity_sample_time = now;
     camera.velocity_sample_distance = 0.0;

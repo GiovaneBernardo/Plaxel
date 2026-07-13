@@ -12,7 +12,7 @@ use crate::{
     sdf::{EarthHeightmap, TERRAIN_EDIT_BRICK_SIZE, sdf_at_center},
 };
 
-const THRESHOLD: f32 = 0.3;
+const THRESHOLD: f32 = 0.8;
 
 #[allow(dead_code)]
 pub static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);

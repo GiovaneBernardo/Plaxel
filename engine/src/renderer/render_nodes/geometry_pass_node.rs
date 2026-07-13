@@ -165,6 +165,8 @@ impl RenderNode for GeometryPassNode {
             ctx.bind_bind_group(1, frame_bindings.materials_bind_group);
         }
         //ctx.bind_bind_group(1, self.pass_inputs_group);
+        let mut last_vertex_buffer = BufferHandle(0);
+        let mut last_index_buffer = BufferHandle(0);
         for render_data in &mut self.render_data {
             let pipeline = ctx
                 .get_pipeline(render_data.material.pipeline_descriptor.uuid)
@@ -177,10 +179,16 @@ impl RenderNode for GeometryPassNode {
             }
 
             let vertex_buffer = ctx.get_mesh_vertex_buffer(&render_data.mesh);
-            ctx.bind_vertex_buffer(0, vertex_buffer);
+            if last_vertex_buffer.0 != vertex_buffer.0 {
+                ctx.bind_vertex_buffer(0, vertex_buffer);
+            }
+            last_vertex_buffer = vertex_buffer;
 
             let index_buffer = ctx.get_mesh_index_buffer(&render_data.mesh);
-            ctx.bind_index_buffer(index_buffer);
+            if last_index_buffer.0 != index_buffer.0 {
+                ctx.bind_index_buffer(index_buffer);
+            }
+            last_index_buffer = index_buffer;
 
             let Some(instance_buffer) = self.transform_buffer else {
                 continue;

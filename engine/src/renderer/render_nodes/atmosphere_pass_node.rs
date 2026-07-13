@@ -290,7 +290,7 @@ impl RenderNode for AtmospherePassNode {
                 planet_radius,
                 atmosphere_radius,
                 self.settings.skybox_exposure.max(0.0),
-                0.0,
+                1.0,
             ],
             screen_size: [surface_size.x as f32, surface_size.y as f32],
             _screen_padding: [0.0, 0.0],
