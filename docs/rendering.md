@@ -4,6 +4,22 @@ The renderer supports three levels of control. Start with ordinary mesh componen
 objects for generated conventional geometry, and use a producer when the workload needs to own its
 GPU representation.
 
+## Shared default meshes
+
+The renderer uploads unit cube, sphere, and wire-cube meshes once during initialization. Reuse their
+copyable handles instead of rebuilding primitive geometry:
+
+```rust
+let cube = renderer.default_meshes().cube;
+let sphere = renderer.default_meshes().sphere;
+let wire_cube = renderer.default_meshes().wire_cube;
+```
+
+The solid primitives use `ModelVertex` and therefore provide positions, texture coordinates, and
+normals. They are centered at the origin and have a diameter of one world unit; scale their render
+transform to the desired size. The wire cube uses the same vertex layout and must be rendered with
+`Topology::LineList`.
+
 ## 1. Ordinary models with `MeshRendererComponent`
 
 Use this for loaded models, props, scale references, and other conventional entities.
@@ -218,4 +234,3 @@ require changing retained objects, material IDs, producer registration, or graph
 - Prefer one producer for a large homogeneous workload over millions of render objects.
 - Keep logical simulation entities independent from GPU batching layout.
 - Use `RenderObject` when custom GPU ownership would add complexity without reducing work.
-

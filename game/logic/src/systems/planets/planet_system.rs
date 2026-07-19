@@ -4,7 +4,6 @@ use std::{
     thread,
 };
 
-use engine::math::{Quat, Vec3, vec3};
 use engine::{
     core::components::core::TransformComponent,
     ecs::{commands::Commands, query::Query, system::SystemContext},
@@ -12,12 +11,17 @@ use engine::{
     multithreading::job_system::JobPriorityHandle,
     renderer::{AtmospherePassNode, RenderData, RenderFlags, RenderObject, RenderObjectId},
 };
+use engine::{
+    ecs::entity::Entity,
+    math::{Quat, Vec3, vec3},
+};
 use game_types::{
     octree::{
         GeneratedMesh, GeneratedReplacement, NodeKey, NodeState, OctreeChanges, OctreeNode,
         PlanetMeshRequest,
     },
-    planet::{Planet, PlanetTerrainEdits, SolarSystemComponent},
+    planet::{Planet, PlanetTerrainEdits},
+    universe::StarSystemComponent,
 };
 use rand::Rng;
 use web_time::{Duration, Instant};
@@ -162,21 +166,6 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         .unwrap()
         .position;
 
-    let planet_size = 65536.0 * PLANET_RADIUS_MULTIPLIER;
-    let chunk_size = 32;
-    let min_planet_distance = planet_size as f32;
-    let mut rng = rand::thread_rng();
-
-    let mut planet_positions = Vec::new();
-    {
-        let mut query = Query::<(&Planet,)>::new(world);
-        query.for_each(|_, (planet,)| {
-            planet_positions.push(planet.position);
-        });
-    }
-
-    let mut mesh_requests = Vec::new();
-
     let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded();
     let (replacement_tx, replacement_rx) = crossbeam_channel::unbounded();
     let base_grid_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -196,96 +185,112 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         next_replacement_id: 0,
         prioritized_jobs: Vec::new(),
     });
+}
 
-    // Create solar system
-    let solar_system = world.spawn();
+pub fn create_planet(
+    ctx: &mut SystemContext,
+    _commands: &mut Commands,
+    solar_system: Entity,
+    forced_position: Option<Vec3>,
+) -> Option<Entity> {
+    let world = &mut ctx.world;
+
+    let camera_entity = {
+        let Some(camera) = world.get_resource::<GameCamera>() else {
+            return None;
+        };
+        camera.entity
+    };
+
+    let camera_pos = world
+        .get::<TransformComponent>(camera_entity)
+        .unwrap()
+        .position;
+
+    let planet_size = 65536.0 * PLANET_RADIUS_MULTIPLIER;
+    let chunk_size = 32;
+    let min_planet_distance = planet_size as f32;
+    let mut rng = rand::thread_rng();
+
+    let mut planet_positions = Vec::new();
+    {
+        let mut query = Query::<(&Planet,)>::new(world);
+        query.for_each(|_, (planet,)| {
+            planet_positions.push(planet.position);
+        });
+    }
+
+    let Some(mut planet_position) =
+        random_planet_position(&mut rng, &planet_positions, min_planet_distance)
+    else {
+        return None;
+    };
+
+    if forced_position.is_some() {
+        planet_position = forced_position.unwrap();
+    }
+    planet_positions.push(planet_position);
+    let new_planet = world.spawn();
+
     world.insert(
-        solar_system,
+        new_planet,
         TransformComponent {
-            position: random_planet_position(&mut rng, &planet_positions, min_planet_distance)
-                .unwrap(),
+            position: planet_position,
             rotation: Quat::IDENTITY,
             scale: vec3(1.0, 1.0, 1.0),
             velocity: vec3(0.0, 0.0, 0.0),
         },
     );
 
-    world.insert(
-        solar_system,
-        SolarSystemComponent {
-            planets: Vec::new(),
-        },
+    let terrain_edits = PlanetTerrainEdits {
+        modified_chunks: HashMap::new(),
+    };
+
+    let octree = Planet::create_octree(
+        planet_position,
+        planet_size as u32 / 2,
+        &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
+        planet_size as u32,
+        chunk_size,
+        &terrain_edits,
     );
 
-    // Create planets
-    let mut created_planets = Vec::new();
-    for i in 0..PLANET_COUNT {
-        let Some(mut planet_position) =
-            random_planet_position(&mut rng, &planet_positions, min_planet_distance)
-        else {
-            continue;
-        };
-        if i == 0 {
-            planet_position = vec3(0.0, 0.0, 0.0);
-        }
-        planet_positions.push(planet_position);
-        let new_planet = world.spawn();
+    let planet = Planet {
+        id: new_planet.index() as u64,
+        name: format!(
+            "Planet {}",
+            world
+                .get::<StarSystemComponent>(solar_system)
+                .unwrap()
+                .planets
+                .len()
+        ),
+        position: planet_position,
+        octree_root: octree,
+        solar_system,
+    };
+    let mut leaf_nodes = Vec::new();
+    octree::collect_leaf_nodes(&planet.octree_root, &mut leaf_nodes);
 
-        world.insert(
-            new_planet,
-            TransformComponent {
-                position: planet_position,
-                rotation: Quat::IDENTITY,
-                scale: vec3(1.0, 1.0, 1.0),
-                velocity: vec3(0.0, 0.0, 0.0),
-            },
-        );
+    let mut mesh_requests = Vec::new();
 
-        let terrain_edits = PlanetTerrainEdits {
-            modified_chunks: HashMap::new(),
-        };
-
-        let octree = Planet::create_octree(
-            planet_position,
-            planet_size as u32 / 2,
-            &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
-            planet_size as u32,
-            chunk_size,
-            &terrain_edits,
-        );
-
-        let planet = Planet {
-            id: new_planet.index() as u64,
-            name: format!("Planet {}", i + 1),
-            position: planet_position,
-            octree_root: octree,
-            solar_system,
-        };
-        created_planets.push(new_planet);
-        let mut leaf_nodes = Vec::new();
-        octree::collect_leaf_nodes(&planet.octree_root, &mut leaf_nodes);
-
-        for leaf in leaf_nodes {
-            mesh_requests.push(PlanetMeshRequest {
-                planet_entity: new_planet,
-                planet_position: planet.position,
-                planet_size: planet_size as u32,
-                node_min_corner: leaf.min,
-                node_size: leaf.size,
-            })
-        }
-
-        world.insert(new_planet, planet);
-        world.insert(new_planet, terrain_edits);
+    for leaf in leaf_nodes {
+        mesh_requests.push(PlanetMeshRequest {
+            planet_entity: new_planet,
+            planet_position: planet.position,
+            planet_size: planet_size as u32,
+            node_min_corner: leaf.min,
+            node_size: leaf.size,
+        })
     }
 
-    let mut solar_system_component = world.get_mut::<SolarSystemComponent>(solar_system).unwrap();
-    solar_system_component.planets = created_planets;
-    drop(solar_system_component);
+    ctx.world.insert(new_planet, planet);
+    ctx.world.insert(new_planet, terrain_edits);
 
     for request in mesh_requests {
         submit_requested_mesh(ctx, request);
     }
+    Some(new_planet)
 }
 
 pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {

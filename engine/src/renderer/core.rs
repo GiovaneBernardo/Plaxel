@@ -3,12 +3,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::renderer::ids::{GraphPassId, MaterialPassId, RenderViewId};
 use crate::renderer::{
-    PipelineOverride, RenderDatabase, RenderFlags, RenderObjectWriter, RenderProducerRegistry,
-    RenderRoute, RenderView, RenderViewKind, RenderViewRegistry, RenderViewSelector, StandardDraw,
-    StandardMeshProducer, graph_passes, material_passes, phases,
+    DefaultMeshes, PipelineOverride, RenderDatabase, RenderFlags, RenderObjectWriter,
+    RenderProducerRegistry, RenderRoute, RenderView, RenderViewKind, RenderViewRegistry,
+    RenderViewSelector, StandardDraw, StandardMeshProducer, graph_passes, material_passes, phases,
 };
 use bytemuck::{Pod, Zeroable};
-use uuid::Uuid;
 
 use crate::Arc;
 use crate::Window;
@@ -18,6 +17,7 @@ pub use crate::core::camera;
 use crate::ecs::world::World;
 use crate::model;
 use crate::model::MeshAsset;
+use crate::model::Vertex;
 use crate::model::VertexLayout;
 pub use crate::renderer::backends::*;
 pub use crate::renderer::render_nodes::*;
@@ -753,7 +753,9 @@ impl Renderer {
         self.renderer_api.compile();
         self.init_frame_bindings();
 
-        self.render_graph = RenderGraph::default_render_graph(self.renderer_api.as_mut());
+        let default_meshes = DefaultMeshes::upload(self.renderer_api.as_mut());
+        self.render_resources.insert(default_meshes);
+        self.render_graph = RenderGraph::default_render_graph(default_meshes);
         self.render_graph
             .compile(&mut self.render_resources, self.renderer_api.as_mut());
         let shadow = *self
@@ -772,6 +774,13 @@ impl Renderer {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.renderer_api.resize(width, height);
+    }
+
+    /// Returns GPU handles for the renderer's shared unit primitives.
+    pub fn default_meshes(&self) -> &DefaultMeshes {
+        self.render_resources
+            .get::<DefaultMeshes>()
+            .expect("default meshes are unavailable before Renderer::init")
     }
 
     pub fn prepare(&mut self) {
@@ -1131,7 +1140,7 @@ impl GraphResources {
 }
 
 impl RenderGraph {
-    pub fn default_render_graph(renderer_api: &mut dyn RendererAPI) -> Self {
+    pub fn default_render_graph(default_meshes: DefaultMeshes) -> Self {
         let mut graph = RenderGraph {
             nodes: Vec::new(),
             resources: GraphResources::new(),
@@ -1158,138 +1167,13 @@ impl RenderGraph {
             Box::new(AtmospherePassNode::new()),
         ));
 
-        RenderGraph::default_debug_nodes(renderer_api, &mut graph);
+        RenderGraph::default_debug_nodes(&mut graph, default_meshes);
 
         graph
     }
 
-    pub fn default_debug_nodes(renderer_api: &mut dyn RendererAPI, graph: &mut RenderGraph) {
-        let _meshe = MeshAsset {
-            name: "eae".to_string(),
-            uuid: Uuid::new_v4(),
-            vertices: Vec::new(),
-            indices: Vec::new(),
-            material_uuid: None,
-            vertex_layout: VertexLayout {
-                stride: std::mem::size_of::<[f32; 3]>() as u64,
-                step_mode: model::StepMode::Vertex,
-                attributes: Vec::new(),
-            },
-        };
-        let positions = vec![
-            crate::math::Vec3::new(-0.5, -0.5, -0.5),
-            crate::math::Vec3::new(0.5, -0.5, -0.5),
-            crate::math::Vec3::new(0.5, 0.5, -0.5),
-            crate::math::Vec3::new(-0.5, 0.5, -0.5),
-            crate::math::Vec3::new(-0.5, -0.5, 0.5),
-            crate::math::Vec3::new(0.5, -0.5, 0.5),
-            crate::math::Vec3::new(0.5, 0.5, 0.5),
-            crate::math::Vec3::new(-0.5, 0.5, 0.5),
-        ];
-
-        let indices: Vec<u32> = vec![
-            4, 5, 6, 4, 6, 7, // front  (+z)
-            1, 0, 3, 1, 3, 2, // back   (-z)
-            5, 1, 2, 5, 2, 6, // right  (+x)
-            0, 4, 7, 0, 7, 3, // left   (-x)
-            3, 7, 6, 3, 6, 2, // top    (+y)
-            0, 1, 5, 0, 5, 4, // bottom (-y)
-        ];
-        //meshe.indices = indices;
-
-        let positions_raw: Vec<[f32; 3]> = positions.iter().map(|p| [p.x, p.y, p.z]).collect();
-
-        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&positions_raw).to_vec();
-        //let index_bytes: Vec<u8> = bytemuck::cast_slice(&indices);
-
-        let mesh = MeshAsset {
-            name: "Cube".to_string(),
-            uuid: Uuid::new_v4(),
-            vertices: vertex_bytes.clone(),
-            indices: bytemuck::cast_slice(&indices).to_vec(),
-            material_uuid: None,
-            vertex_layout: VertexLayout {
-                stride: std::mem::size_of::<[f32; 3]>() as u64,
-                step_mode: model::StepMode::Vertex,
-                attributes: Vec::new(),
-            },
-        };
-
-        let cube_mesh = renderer_api.upload_mesh(&mesh);
-
-        let sphere_latitudes = 12u32;
-        let sphere_longitudes = 24u32;
-        let mut sphere_positions: Vec<[f32; 3]> = Vec::new();
-        let mut sphere_indices: Vec<u32> = Vec::new();
-
-        for lat in 0..=sphere_latitudes {
-            let theta = std::f32::consts::PI * lat as f32 / sphere_latitudes as f32;
-            let y = theta.cos() * 0.5;
-            let ring_radius = theta.sin() * 0.5;
-
-            for lon in 0..=sphere_longitudes {
-                let phi = std::f32::consts::TAU * lon as f32 / sphere_longitudes as f32;
-                sphere_positions.push([ring_radius * phi.cos(), y, ring_radius * phi.sin()]);
-            }
-        }
-
-        for lat in 0..sphere_latitudes {
-            for lon in 0..sphere_longitudes {
-                let row = sphere_longitudes + 1;
-                let i0 = lat * row + lon;
-                let i1 = i0 + 1;
-                let i2 = i0 + row;
-                let i3 = i2 + 1;
-
-                sphere_indices.extend_from_slice(&[i0, i2, i1]);
-                sphere_indices.extend_from_slice(&[i1, i2, i3]);
-            }
-        }
-
-        let sphere_vertex_bytes: Vec<u8> = bytemuck::cast_slice(&sphere_positions).to_vec();
-        let sphere_asset = MeshAsset {
-            name: "DebugSphere".to_string(),
-            uuid: Uuid::new_v4(),
-            vertices: sphere_vertex_bytes,
-            indices: bytemuck::cast_slice(&sphere_indices).to_vec(),
-            material_uuid: None,
-            vertex_layout: VertexLayout {
-                stride: std::mem::size_of::<[f32; 3]>() as u64,
-                step_mode: model::StepMode::Vertex,
-                attributes: Vec::new(),
-            },
-        };
-        let sphere_mesh = renderer_api.upload_mesh(&sphere_asset);
-
-        // Wire cube mesh (same vertices, line-list indices for 12 edges)
-        let wire_indices: Vec<u32> = vec![
-            0, 1, 1, 2, 2, 3, 3, 0, // back face edges
-            4, 5, 5, 6, 6, 7, 7, 4, // front face edges
-            0, 4, 1, 5, 2, 6, 3, 7, // connecting edges
-        ];
-        let wire_mesh = MeshAsset {
-            name: "WireCube".to_string(),
-            uuid: Uuid::new_v4(),
-            vertices: vertex_bytes,
-            indices: bytemuck::cast_slice(&wire_indices).to_vec(),
-            material_uuid: None,
-            vertex_layout: VertexLayout {
-                stride: std::mem::size_of::<[f32; 3]>() as u64,
-                step_mode: model::StepMode::Vertex,
-                attributes: Vec::new(),
-            },
-        };
-        let wire_cube_mesh = renderer_api.upload_mesh(&wire_mesh);
-
-        let vertex_layout = VertexLayout {
-            stride: std::mem::size_of::<[f32; 3]>() as u64,
-            step_mode: model::StepMode::Vertex,
-            attributes: vec![model::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: model::AttributeFormat::Float32x3,
-            }],
-        };
+    pub fn default_debug_nodes(graph: &mut RenderGraph, default_meshes: DefaultMeshes) {
+        let vertex_layout = model::ModelVertex::layout();
 
         let instance_layout = VertexLayout {
             stride: std::mem::size_of::<[[f32; 4]; 5]>() as u64,
@@ -1338,11 +1222,11 @@ impl RenderGraph {
             cubes: Vec::new(),
             wire_cubes: Vec::new(),
             sphere_positions: Vec::new(),
-            sphere_mesh,
+            sphere_mesh: default_meshes.sphere,
             sphere_material,
-            cube_mesh,
+            cube_mesh: default_meshes.cube,
             cube_material,
-            wire_cube_mesh,
+            wire_cube_mesh: default_meshes.wire_cube,
             wire_cube_material,
             sphere_instance_buffer: None,
             cube_instance_buffer: None,

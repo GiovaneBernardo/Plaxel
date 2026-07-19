@@ -439,6 +439,7 @@ fn register_static_schedule_systems(state: &mut engine::State) {
 
     let init_schedule_mut = scene.init_schedule_mut();
     init_schedule_mut.add_system(hot_planet_system_init);
+    init_schedule_mut.add_system(systems::planets::universe_system::universe_system_init);
 
     let update_schedule_mut = scene.update_schedule_mut();
     update_schedule_mut.add_system(hot_planet_system_update);

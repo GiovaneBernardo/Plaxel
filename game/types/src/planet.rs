@@ -17,10 +17,6 @@ pub struct Planet {
     pub solar_system: Entity,
 }
 
-pub struct SolarSystemComponent {
-    pub planets: Vec<Entity>,
-}
-
 pub struct PlanetMesh {
     pub positions: Vec<PlanetVertex>,
     pub indices: Vec<u32>,
