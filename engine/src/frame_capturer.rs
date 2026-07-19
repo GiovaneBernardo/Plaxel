@@ -51,11 +51,16 @@ impl FrameCapturer {
 
     pub fn request_capture(&mut self) {
         #[cfg(feature = "renderdoc")]
-        if let Some(renderdoc) = self.renderdoc.as_mut() {
-            self.capture_count_before_request = renderdoc.get_num_captures();
-            self.capture_poll_frames_remaining = 120;
-            renderdoc.trigger_capture();
-            self.capture_next_frame = true;
+        match self.renderdoc.as_mut() {
+            Some(renderdoc) => {
+                self.capture_count_before_request = renderdoc.get_num_captures();
+                self.capture_poll_frames_remaining = 120;
+                renderdoc.trigger_capture();
+                self.capture_next_frame = true;
+            }
+            None => {
+                engine_warn!("cannot capture GPU frame because RenderDoc is unavailable");
+            }
         }
     }
 
@@ -112,15 +117,22 @@ fn configure_renderdoc_environment() -> Option<libloading::Library> {
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()));
 
-        if let Some(dir) = exe_dir {
-            let dll_path = dir.join("renderdoc.dll");
-            if !dll_path.is_file() {
-                engine_warn!(
-                    "renderdoc.dll not found at {}, RenderDoc is disabled",
-                    dll_path.display()
-                );
-                return None;
-            }
+        // `dx serve` recreates its staging directory after Cargo build scripts
+        // have run, so files copied beside the Cargo artifact do not survive in
+        // `target/dx/.../app`. Prefer a staged DLL when present (for packaged
+        // builds), then load the repository's development copy directly.
+        let dev_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../res/dev");
+        let renderdoc_dir = exe_dir
+            .filter(|dir| dir.join("renderdoc.dll").is_file())
+            .or_else(|| {
+                dev_dir
+                    .join("renderdoc.dll")
+                    .is_file()
+                    .then_some(dev_dir.clone())
+            });
+
+        if let Some(dir) = renderdoc_dir {
+            let dll_path = renderdoc_dll_path(&dir);
 
             let layer_manifest_path = dir.join("renderdoc.json");
             if !layer_manifest_path.is_file() {
@@ -144,15 +156,24 @@ fn configure_renderdoc_environment() -> Option<libloading::Library> {
 
             env::set_var("VK_ADD_IMPLICIT_LAYER_PATH", new_path);
 
-            match libloading::Library::new(renderdoc_dll_path(&dir)) {
-                Ok(library) => Some(library),
+            match libloading::Library::new(&dll_path) {
+                Ok(library) => {
+                    engine_info!("Loaded RenderDoc library from {}", dll_path.display());
+                    Some(library)
+                }
                 Err(error) => {
-                    engine_warn!("failed to load renderdoc.dll: {error}");
+                    engine_warn!(
+                        "failed to load RenderDoc library from {}: {error}",
+                        dll_path.display()
+                    );
                     None
                 }
             }
         } else {
-            engine_warn!("unable to resolve executable directory, RenderDoc is disabled");
+            engine_warn!(
+                "renderdoc.dll was not found beside the executable or in {}, RenderDoc is disabled",
+                dev_dir.display()
+            );
             None
         }
     }
