@@ -11,14 +11,13 @@ use engine::core::physics::physics::Physics;
 use engine::math::Vec3;
 use engine::math::{Quat, vec3};
 use engine::model::Vertex;
-use engine::renderer;
 use engine::renderer::CullMode;
 use engine::renderer::Topology;
 use engine::renderer::{
     BindGroupDescriptor, BindGroupEntry, BindGroupHandle, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferDescriptor, BufferHandle, BufferUsages, CameraData,
-    FrameBindings, RenderData, ShaderStages, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureSize, TextureUsages,
+    FrameBindings, PipelineHandle, RenderObjectId, ShaderStages, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSize, TextureUsages,
 };
 use engine::renderer::{DebugPassNode, GeometryPassNode};
 use game_types::octree::NodeKey;
@@ -43,8 +42,7 @@ use crate::systems::planets::planet_debug;
 struct GameState {
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
     current_leaves: HashMap<NodeKey, ChunkInfo>,
-    current_meshes: HashMap<NodeKey, RenderData>,
-    planets_meshes: HashMap<NodeKey, RenderData>,
+    planets_meshes: HashMap<NodeKey, RenderObjectId>,
     mesh_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     terrain_colliders: HashMap<NodeKey, RapierColliderHandle>,
     in_flight: HashSet<NodeKey>,
@@ -55,6 +53,8 @@ struct GameState {
     empty_chunks: HashSet<NodeKey>,
     empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     solid_material: Material,
+    solid_pipeline: PipelineHandle,
+    solid_shadow_pipeline: PipelineHandle,
     terrain_materials_buffer: BufferHandle,
     terrain_materials_bind_group: BindGroupHandle,
     update_octree: bool,
@@ -195,9 +195,13 @@ pub fn initialize_game_state(state: &mut engine::State) {
         .render_resources
         .insert(CameraData::from_camera(&camera, uniform));
 
-    let solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
+    let mut solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
         .with_cull(CullMode::None);
+    solid_material.configure_pass(engine::renderer::material_passes::SHADOW, |pass| {
+        pass.vertex_entry = "vs_shadow".into();
+        pass.fragment_entry = None;
+    });
 
     let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
@@ -208,7 +212,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
         .global_resources
         .renderer
         .render_graph
-        .get_node_mut::<GeometryPassNode>(0)
+        .get_node_mut::<GeometryPassNode>(engine::renderer::ids::graph_passes::GEOMETRY)
         .and_then(|node| node.camera_bind_group_layout)
         .expect("GeometryPassNode must be compiled before creating planet pipelines");
     let textures_layout = state
@@ -220,6 +224,12 @@ pub fn initialize_game_state(state: &mut engine::State) {
         .expect(
             "Frame material bind group layout must be initialized before creating planet pipelines",
         );
+    let shadow_bindings = *state
+        .global_resources
+        .renderer
+        .render_resources
+        .get_labeled::<engine::renderer::ShadowBindings>("shadow_bindings")
+        .expect("ShadowPassNode must be compiled before creating planet pipelines");
 
     load_terrain_diffuse_texture(
         &mut state.global_resources.renderer,
@@ -294,7 +304,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
             entries: vec![(0, BindGroupEntry::Buffer(terrain_materials_buffer))],
         });
 
-    let target_info = {
+    let geometry_target = {
         let renderer = &state.global_resources.renderer;
         let descriptor = GeometryPassNode::pass_descriptor();
         renderer
@@ -302,14 +312,41 @@ pub fn initialize_game_state(state: &mut engine::State) {
             .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
     };
 
-    state
+    let solid_pipeline = state
         .global_resources
         .renderer
         .renderer_api
         .create_pipeline(
             &solid_material,
-            &[camera_layout, textures_layout, terrain_materials_layout],
-            &target_info,
+            engine::renderer::ids::material_passes::FORWARD_OPAQUE,
+            &[
+                camera_layout,
+                textures_layout,
+                terrain_materials_layout,
+                shadow_bindings.sampling_layout,
+            ],
+            &geometry_target,
+        );
+    let shadow_target = {
+        let renderer = &state.global_resources.renderer;
+        let descriptor = engine::renderer::ShadowPassNode::pass_descriptor();
+        renderer
+            .renderer_api
+            .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
+    };
+    let solid_shadow_pipeline = state
+        .global_resources
+        .renderer
+        .renderer_api
+        .create_pipeline(
+            &solid_material,
+            engine::renderer::material_passes::SHADOW,
+            &[
+                shadow_bindings.view_layout,
+                textures_layout,
+                terrain_materials_layout,
+            ],
+            &shadow_target,
         );
     state
         .global_resources
@@ -317,8 +354,9 @@ pub fn initialize_game_state(state: &mut engine::State) {
         .renderer_api
         .create_pipeline(
             &line_material,
+            engine::renderer::ids::material_passes::FORWARD_OPAQUE,
             &[camera_layout, textures_layout],
-            &target_info,
+            &geometry_target,
         );
 
     let scene = state.active_scene_mut().unwrap();
@@ -366,7 +404,6 @@ pub fn initialize_game_state(state: &mut engine::State) {
     world.insert_resource(GameState {
         previous_leaves: HashMap::new(),
         current_leaves: HashMap::new(),
-        current_meshes: HashMap::new(),
         planets_meshes: HashMap::new(),
         mesh_neighbor_signatures: HashMap::new(),
         terrain_colliders: HashMap::new(),
@@ -374,6 +411,8 @@ pub fn initialize_game_state(state: &mut engine::State) {
         empty_chunks: HashSet::new(),
         empty_neighbor_signatures: HashMap::new(),
         solid_material,
+        solid_pipeline,
+        solid_shadow_pipeline,
         terrain_materials_buffer,
         terrain_materials_bind_group,
         update_octree: true,
@@ -406,7 +445,6 @@ fn register_static_schedule_systems(state: &mut engine::State) {
     update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
     update_schedule_mut.add_static_system(hot_player_interaction_system);
     update_schedule_mut.add_system(hot_camera_update_system);
-    update_schedule_mut.add_system(renderer::get_render_data_system);
     update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
 }
 
@@ -472,7 +510,6 @@ fn update_impl(state: &mut engine::State) {
     sync_planet_debug(renderer, scene.world());
     sync_planet_octree_debug(renderer, scene.world());
     sync_physics_debug(renderer, scene.world());
-    sync_planet_geometry(renderer, scene.world());
     state.frame_index += 1;
 }
 
@@ -640,7 +677,10 @@ fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
     let Some(game_state) = world.get_resource::<GameState>() else {
         return;
     };
-    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(2) else {
+    let Some(debug_pass_node) = renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
+    else {
         return;
     };
 
@@ -661,7 +701,10 @@ fn sync_physics_debug(renderer: &mut engine::renderer::Renderer, world: &World) 
     let Some(physics) = world.get_resource::<Physics>() else {
         return;
     };
-    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(2) else {
+    let Some(debug_pass_node) = renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
+    else {
         return;
     };
 
@@ -684,24 +727,6 @@ fn sync_planet_octree_debug(renderer: &mut engine::renderer::Renderer, world: &W
     query.for_each(|_, (planet,)| {
         planet_debug::sync_planet_debug(renderer, world, planet);
     });
-}
-
-fn sync_planet_geometry(renderer: &mut engine::renderer::Renderer, world: &World) {
-    let Some(game_state) = world.get_resource::<GameState>() else {
-        return;
-    };
-    let Some(geometry_node) = renderer.render_graph.get_node_mut::<GeometryPassNode>(0) else {
-        return;
-    };
-
-    geometry_node.clear_render_data();
-    for render_data in game_state.current_meshes.values() {
-        geometry_node.add_render_data(render_data.clone());
-    }
-
-    for render_data in game_state.planets_meshes.values() {
-        geometry_node.add_render_data(render_data.clone());
-    }
 }
 
 // TODO: This should probably be deprecated as now inputs are passed around with InputState world's resource
@@ -757,7 +782,6 @@ fn handle_key_press_impl(state: &mut engine::State, key_code: KeyCode, pressed: 
             }
             game_state.previous_leaves.clear();
             game_state.current_leaves.clear();
-            game_state.current_meshes.clear();
             game_state.mesh_neighbor_signatures.clear();
             game_state.in_flight.clear();
             game_state.empty_chunks.clear();

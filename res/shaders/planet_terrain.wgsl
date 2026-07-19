@@ -5,6 +5,16 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
+struct ShadowUniform {
+    view_proj: mat4x4<f32>,
+    light_direction: vec3<f32>,
+    depth_bias: f32,
+};
+@group(3) @binding(0)
+var<uniform> shadow: ShadowUniform;
+@group(3) @binding(1)
+var shadow_depth_map: texture_depth_2d;
+
 struct InstanceInput {
     @location(5) model_matrix_0: vec4<f32>,
     @location(6) model_matrix_1: vec4<f32>,
@@ -30,6 +40,7 @@ struct VertexOutput {
     @location(3) @interpolate(flat) mat_b: u32,
     @location(4) blend: f32,
     @location(5) camera_position: vec3<f32>,
+    @location(6) shadow_position: vec4<f32>,
 };
 
 struct GpuPlanetTerrainMaterial {
@@ -58,8 +69,14 @@ fn vs_main(
     out.mat_b = u32(model.mats >> 16u);
     out.blend = f32(model.blend_packed & 0xFFu) / 255.0;
     out.camera_position = camera.position;
+    out.shadow_position = shadow.view_proj * world_pos;
 
     return out;
+}
+
+@vertex
+fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
+    return camera.view_proj * vec4<f32>(model.position, 1.0);
 }
 
 fn safe_normal(normal: vec3<f32>, fallback_position: vec3<f32>) -> vec3<f32> {
@@ -133,6 +150,31 @@ fn sample_terrain_albedo(material_index: u32, pos: vec3<f32>, normal: vec3<f32>)
     );
 }
 
+fn shadow_visibility(shadow_position: vec4<f32>) -> f32 {
+    let ndc = shadow_position.xyz / shadow_position.w;
+    if abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+
+    // WGPU's framebuffer Y direction is opposite NDC Y when addressed as a texture.
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let dimensions = textureDimensions(shadow_depth_map);
+    let center = vec2<i32>(uv * vec2<f32>(dimensions));
+    let maximum = vec2<i32>(dimensions) - vec2<i32>(1);
+    var visibility = 0.0;
+
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let pixel = clamp(center + vec2<i32>(x, y), vec2<i32>(0), maximum);
+            let stored_depth = textureLoad(shadow_depth_map, pixel, 0);
+            // Reverse-Z: a receiver is visible when it is at least as close as the stored caster.
+            visibility += select(0.0, 1.0, ndc.z + shadow.depth_bias >= stored_depth);
+        }
+    }
+
+    return visibility / 9.0;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = safe_normal(in.normal, in.world_position);
@@ -141,9 +183,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let material_b = sample_terrain_albedo(in.mat_b, in.world_position, normal);
     let albedo = mix(material_a, material_b, in.blend);
 
-    let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.4));
+    let light_dir = normalize(shadow.light_direction);
     let diffuse = max(dot(normal, light_dir), 0.0);
-    let lighting = 0.35 + 0.95 * diffuse;
+    let visibility = shadow_visibility(in.shadow_position);
+    let lighting = 0.35 + 0.95 * diffuse * visibility;
 
     let distance = length(in.world_position - in.camera_position);
     let start = 5000.0;

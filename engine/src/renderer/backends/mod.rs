@@ -10,6 +10,7 @@ use crate::renderer::core::{
     BufferHandle, GraphResources, MeshDrawRange, PipelineHandle, PipelineTargetInfo, RenderGraph,
     RenderNode, RenderNodeDescriptor, TextureHandle,
 };
+use crate::renderer::ids::MaterialPassId;
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,
     BufferDescriptor, RenderData, RenderResources, SamplerDescriptor, SamplerHandle,
@@ -31,6 +32,8 @@ pub trait RendererAPI {
         &mut self,
         render_graph: &mut RenderGraph,
         render_resources: &mut RenderResources,
+        producers: &crate::renderer::RenderProducerRegistry,
+        views: &crate::renderer::RenderViewRegistry,
     ) -> anyhow::Result<()>;
     fn reload_shader(&mut self, shader_path: &str);
     fn reload_shaders(&mut self);
@@ -51,16 +54,18 @@ pub trait RendererAPI {
     fn create_pipeline(
         &mut self,
         material: &Material,
+        material_pass: MaterialPassId,
         bind_group_layouts: &[BindGroupLayoutHandle],
         target_info: &PipelineTargetInfo,
-    );
+    ) -> PipelineHandle;
     fn update_pipeline(
         &mut self,
         material: &Material,
+        material_pass: MaterialPassId,
         bind_group_layouts: &[BindGroupLayoutHandle],
         target_info: &PipelineTargetInfo,
     ) {
-        self.create_pipeline(material, bind_group_layouts, target_info);
+        self.create_pipeline(material, material_pass, bind_group_layouts, target_info);
     }
     fn target_info_for_pass(
         &self,
@@ -76,6 +81,7 @@ pub trait RendererAPI {
         descriptor: &BindGroupLayoutDescriptor,
     ) -> BindGroupLayoutHandle;
     fn write_buffer(&mut self, buffer: BufferHandle, data: &[u8]);
+    fn write_buffer_at(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]);
 
     fn read_texture_bytes_at(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]);
     fn upload_texture(&mut self, texture: &TextureHandle, index: Option<u32>);
@@ -119,6 +125,8 @@ pub trait RenderContext {
         base_vertex: i32,
         instances: u32,
     );
+    fn draw_indirect(&mut self, buffer: BufferHandle, offset: u64);
+    fn draw_indexed_indirect(&mut self, buffer: BufferHandle, offset: u64);
 
     /// Run a closure with the raw wgpu render pass (with 'static lifetime via forget_lifetime).
     /// This is the escape hatch for nodes that need direct backend access (e.g. egui).

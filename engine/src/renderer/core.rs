@@ -1,7 +1,12 @@
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 
-use crate::math::{Mat4, Vec3};
+use crate::renderer::ids::{GraphPassId, MaterialPassId, RenderViewId};
+use crate::renderer::{
+    PipelineOverride, RenderDatabase, RenderFlags, RenderObjectWriter, RenderProducerRegistry,
+    RenderRoute, RenderView, RenderViewKind, RenderViewRegistry, RenderViewSelector, StandardDraw,
+    StandardMeshProducer, graph_passes, material_passes, phases,
+};
 use bytemuck::{Pod, Zeroable};
 use uuid::Uuid;
 
@@ -10,14 +15,10 @@ use crate::Window;
 use crate::assets::manager::Handle;
 use crate::assets::material::Material;
 pub use crate::core::camera;
-use crate::core::components::core::TransformComponent;
-use crate::core::components::renderer::MeshRendererComponent;
-use crate::ecs::query::Query;
 use crate::ecs::world::World;
-use crate::ecs::{commands::Commands, system::SystemContext};
+use crate::model;
 use crate::model::MeshAsset;
 use crate::model::VertexLayout;
-use crate::model::{self, TransformInstance};
 pub use crate::renderer::backends::*;
 pub use crate::renderer::render_nodes::*;
 use crate::renderer::wgpu_backend::WgpuBackend;
@@ -54,6 +55,9 @@ pub struct Renderer {
     pub render_graph: RenderGraph,
     pub pipelines: Vec<wgpu::RenderPipeline>,
     pub textures: Vec<texture::Texture>,
+    pub render_database: RenderDatabase,
+    pub producer_registry: RenderProducerRegistry,
+    pub view_registry: RenderViewRegistry,
 }
 
 pub struct Texture {
@@ -67,10 +71,33 @@ pub struct Buffer {
 }
 
 pub struct RenderGraph {
-    pub nodes: Vec<(i8, Box<dyn RenderNode>)>,
+    pub nodes: Vec<(GraphPassId, Box<dyn RenderNode>)>,
     pub resources: GraphResources,
     pub compiled: bool,
-    pub(crate) disabled_nodes: HashSet<i8>,
+    pub(crate) disabled_nodes: HashSet<GraphPassId>,
+}
+
+/// A temporarily detached graph node together with its execution position.
+/// Returning this token preserves graph order; `GraphPassId` identifies a pass
+/// but deliberately carries no ordering semantics.
+pub struct TakenRenderNode {
+    id: GraphPassId,
+    position: usize,
+    node: Box<dyn RenderNode>,
+}
+
+impl std::ops::Deref for TakenRenderNode {
+    type Target = dyn RenderNode;
+
+    fn deref(&self) -> &Self::Target {
+        self.node.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for TakenRenderNode {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.node.as_mut()
+    }
 }
 
 pub struct PassResources {
@@ -404,6 +431,7 @@ pub trait RenderNode {
 pub struct RenderData {
     pub mesh: Handle<MeshAsset>,
     pub material: Material,
+    pub pipeline: PipelineHandle,
     pub transform_index: u32, // index into a GPU-side transform buffer
     pub sort_key: u64,        // for draw call sorting/batching
 
@@ -573,6 +601,9 @@ pub struct PipelineKey {
     pub vertex_layouts: Vec<VertexLayout>,
     pub color_formats: Vec<TextureFormat>,   // from pass
     pub depth_format: Option<TextureFormat>, // from pass
+    pub material_pass: MaterialPassId,
+    pub vertex_entry: String,
+    pub fragment_entry: Option<String>,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -585,11 +616,16 @@ pub struct PipelineTargetInfo {
 impl PipelineKey {
     pub fn from_material_and_pass(
         material: &Material,
+        material_pass: MaterialPassId,
         _render_node: &dyn RenderNode,
     ) -> PipelineKey {
-        let desc = &material.pipeline_descriptor;
+        let shader_pass = material.require_pass(material_pass);
+        let desc = &shader_pass.pipeline;
         PipelineKey {
+            material_pass,
             shader: desc.shader.clone(),
+            vertex_entry: shader_pass.vertex_entry.clone(),
+            fragment_entry: shader_pass.fragment_entry.clone(),
             blend_mode: desc.blend_mode,
             cull_mode: desc.cull_mode,
             topology: desc.topology,
@@ -672,7 +708,30 @@ impl RenderResources {
 }
 
 impl Renderer {
+    pub fn objects(&mut self) -> RenderObjectWriter<'_> {
+        RenderObjectWriter::new(&mut self.render_database)
+    }
+
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        let mut producer_registry = RenderProducerRegistry::default();
+
+        let mut standard_mesh_producer = StandardMeshProducer::new(RenderRoute {
+            graph_pass: graph_passes::GEOMETRY,
+            material_pass: material_passes::FORWARD_OPAQUE,
+            phase: phases::OPAQUE,
+            views: RenderViewSelector::Main,
+        });
+        standard_mesh_producer.add_route(RenderRoute {
+            graph_pass: graph_passes::SHADOWS,
+            material_pass: material_passes::SHADOW,
+            phase: phases::OPAQUE,
+            views: RenderViewSelector::ShadowCascades,
+        });
+
+        producer_registry
+            .register(standard_mesh_producer)
+            .expect("standard mesh producer ID must be unique");
+
         Ok(Self {
             renderer_api: Box::new(WgpuBackend::new(window).await?),
             render_resources: RenderResources::new(),
@@ -684,6 +743,9 @@ impl Renderer {
             },
             pipelines: Vec::new(),
             textures: Vec::new(),
+            render_database: RenderDatabase::new(),
+            producer_registry,
+            view_registry: RenderViewRegistry::default(),
         })
     }
 
@@ -694,6 +756,18 @@ impl Renderer {
         self.render_graph = RenderGraph::default_render_graph(self.renderer_api.as_mut());
         self.render_graph
             .compile(&mut self.render_resources, self.renderer_api.as_mut());
+        let shadow = *self
+            .render_resources
+            .get_labeled::<ShadowBindings>("shadow_bindings")
+            .expect("the default shadow pass must compile its bindings");
+        self.view_registry.set_views(
+            graph_passes::SHADOWS,
+            vec![RenderView {
+                id: RenderViewId::new("engine.shadow_cascade.0"),
+                kind: RenderViewKind::ShadowCascade { cascade: 0 },
+                view_bind_group: Some(shadow.view_bind_group),
+            }],
+        );
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -702,6 +776,23 @@ impl Renderer {
 
     pub fn prepare(&mut self) {
         crate::profile_scope!("renderer.prepare");
+        let camera_upload = self
+            .render_resources
+            .get_labeled::<FrameBindings>("frame_bindings")
+            .and_then(|frame| {
+                self.render_resources
+                    .get::<CameraData>()
+                    .map(|camera| (frame.camera_buffer, camera.uniform))
+            });
+        if let Some((buffer, uniform)) = camera_upload {
+            self.renderer_api
+                .write_buffer(buffer, bytemuck::bytes_of(&uniform));
+        }
+        self.producer_registry.prepare(
+            &self.view_registry,
+            &mut self.render_resources,
+            self.renderer_api.as_mut(),
+        );
         let disabled_nodes = self.render_graph.disabled_nodes.clone();
         for (index, node) in &mut self.render_graph.nodes {
             if disabled_nodes.contains(index) {
@@ -716,37 +807,147 @@ impl Renderer {
     pub fn render(&mut self) -> anyhow::Result<()> {
         crate::profile_scope!("renderer.render");
         self.prepare();
-        self.renderer_api
-            .render(&mut self.render_graph, &mut self.render_resources)
+        self.renderer_api.render(
+            &mut self.render_graph,
+            &mut self.render_resources,
+            &self.producer_registry,
+            &self.view_registry,
+        )
     }
 
-    pub fn clear_geometry_render_data(&mut self) {
-        let Some(geometry_node) = self.render_graph.get_node_mut::<GeometryPassNode>(0) else {
-            return;
-        };
-
-        geometry_node.clear_render_data();
+    pub fn producers(&mut self) -> &mut RenderProducerRegistry {
+        &mut self.producer_registry
     }
 
-    pub fn sync_geometry_render_queue(&mut self, world: &World) {
-        let Some(queue) = world.get_resource::<GeometryRenderQueue>() else {
-            return;
-        };
+    pub fn register_producer(
+        &mut self,
+        producer: impl crate::renderer::RenderProducer + 'static,
+    ) -> Result<(), String> {
+        self.producer_registry.register(producer)
+    }
 
-        let Some(geometry_node) = self.render_graph.get_node_mut::<GeometryPassNode>(0) else {
-            return;
-        };
+    pub fn producer_mut<T: 'static>(
+        &mut self,
+        id: crate::renderer::RenderProducerId,
+    ) -> Option<&mut T> {
+        self.producer_registry.get_mut(id)
+    }
 
-        let transform_offset = geometry_node.transforms.len() as u32;
-        geometry_node
-            .transforms
-            .extend(queue.transforms.iter().copied());
-        geometry_node
-            .render_data
-            .extend(queue.items.iter().cloned().map(|mut item| {
-                item.transform_index += transform_offset;
-                item
-            }));
+    pub fn views(&mut self) -> &mut RenderViewRegistry {
+        &mut self.view_registry
+    }
+
+    pub fn sync_render_database(
+        &mut self,
+        world: &mut World,
+        assets: &crate::assets::manager::AssetManager,
+    ) {
+        self.render_database.sync_ecs(world, assets);
+        let dirty_ranges = self.render_database.take_dirty_ranges();
+        let revision = self.render_database.structural_revision();
+        let needs_rebuild = self
+            .producer_registry
+            .get_mut::<StandardMeshProducer>(crate::renderer::producers::STANDARD_MESHES)
+            .is_some_and(|producer| producer.database_revision != revision);
+
+        if needs_rebuild {
+            let ids = self
+                .render_database
+                .phase_objects(crate::renderer::phases::OPAQUE)
+                .to_vec();
+            let (camera_layout, textures_layout) = self
+                .render_resources
+                .get_labeled::<FrameBindings>("frame_bindings")
+                .map(|frame| (frame.camera_layout, frame.textures_layout))
+                .expect("frame bindings must exist before retained rendering is synchronized");
+            let geometry_target = self.renderer_api.target_info_for_pass(
+                &GeometryPassNode::pass_descriptor(),
+                &self.render_graph.resources,
+            );
+            let shadow_target = self.renderer_api.target_info_for_pass(
+                &ShadowPassNode::pass_descriptor(),
+                &self.render_graph.resources,
+            );
+            let shadow_layout = self
+                .render_resources
+                .get_labeled::<ShadowBindings>("shadow_bindings")
+                .expect("shadow bindings must exist while preparing retained draws")
+                .view_layout;
+            let mut draws = Vec::with_capacity(ids.len());
+            for id in ids {
+                let Some(object) = self.render_database.get(id) else {
+                    continue;
+                };
+                let mut pipelines = Vec::with_capacity(2);
+                let forward_pass = material_passes::FORWARD_OPAQUE;
+                if object.flags.contains(RenderFlags::VISIBLE_MAIN)
+                    && object.material.supports_pass(forward_pass)
+                {
+                    let pipeline = object.pipeline_override(forward_pass).unwrap_or_else(|| {
+                        self.renderer_api.create_pipeline(
+                            &object.material,
+                            forward_pass,
+                            &[camera_layout, textures_layout],
+                            &geometry_target,
+                        )
+                    });
+                    pipelines.push(PipelineOverride {
+                        material_pass: forward_pass,
+                        pipeline,
+                    });
+                }
+
+                let shadow_pass = material_passes::SHADOW;
+                if object.flags.contains(RenderFlags::CASTS_SHADOWS)
+                    && object.material.supports_pass(shadow_pass)
+                {
+                    let pipeline = object.pipeline_override(shadow_pass).unwrap_or_else(|| {
+                        self.renderer_api.create_pipeline(
+                            &object.material,
+                            shadow_pass,
+                            &[shadow_layout, textures_layout],
+                            &shadow_target,
+                        )
+                    });
+                    pipelines.push(PipelineOverride {
+                        material_pass: shadow_pass,
+                        pipeline,
+                    });
+                }
+
+                if pipelines.is_empty() {
+                    continue;
+                }
+                draws.push(StandardDraw {
+                    mesh: object.mesh,
+                    pipelines,
+                    transform_index: id.index() as u32,
+                    extra_bind_groups: object.extra_bind_groups.clone(),
+                });
+            }
+            let transforms = (0..self.render_database.slot_count())
+                .map(|index| self.render_database.gpu_transform_at(index))
+                .collect();
+            self.producer_registry
+                .get_mut::<StandardMeshProducer>(crate::renderer::producers::STANDARD_MESHES)
+                .expect("standard mesh producer must stay registered")
+                .replace(draws, transforms, revision);
+        } else if !dirty_ranges.is_empty() {
+            let updates = dirty_ranges
+                .into_iter()
+                .map(|range| {
+                    let values = range
+                        .clone()
+                        .map(|index| self.render_database.gpu_transform_at(index))
+                        .collect();
+                    (range, values)
+                })
+                .collect::<Vec<_>>();
+            self.producer_registry
+                .get_mut::<StandardMeshProducer>(crate::renderer::producers::STANDARD_MESHES)
+                .expect("standard mesh producer must stay registered")
+                .update_transforms(updates);
+        }
     }
 
     pub fn init_frame_bindings(&mut self) {
@@ -843,6 +1044,14 @@ impl Renderer {
                 materials_ssbo_buffer,
             },
         );
+        self.view_registry.set_views(
+            crate::renderer::graph_passes::GEOMETRY,
+            vec![RenderView {
+                id: crate::renderer::views::MAIN,
+                kind: RenderViewKind::Main,
+                view_bind_group: Some(camera_bind_group),
+            }],
+        );
     }
 }
 
@@ -930,30 +1139,31 @@ impl RenderGraph {
             disabled_nodes: HashSet::new(),
         };
 
+        graph
+            .nodes
+            .push((graph_passes::SHADOWS, Box::new(ShadowPassNode::new())));
+
         let geometry_pass_node = GeometryPassNode {
-            render_data: Vec::new(),
-            camera_buffer: None,
             camera_bind_group: None,
             camera_bind_group_layout: None,
             pass_inputs_group: None,
-            transform_buffer: None,
-            transform_capacity: 1024,
-            transforms: Vec::new(),
         };
-        graph.nodes.push((0, Box::new(geometry_pass_node)));
+        graph.nodes.push((
+            crate::renderer::ids::graph_passes::GEOMETRY,
+            Box::new(geometry_pass_node),
+        ));
 
-        graph.nodes.push((1, Box::new(AtmospherePassNode::new())));
+        graph.nodes.push((
+            crate::renderer::ids::graph_passes::ATMOSPHERE,
+            Box::new(AtmospherePassNode::new()),
+        ));
 
-        RenderGraph::default_debug_nodes(renderer_api, &mut graph, 2);
+        RenderGraph::default_debug_nodes(renderer_api, &mut graph);
 
         graph
     }
 
-    pub fn default_debug_nodes(
-        renderer_api: &mut dyn RendererAPI,
-        graph: &mut RenderGraph,
-        start_index: i8,
-    ) {
+    pub fn default_debug_nodes(renderer_api: &mut dyn RendererAPI, graph: &mut RenderGraph) {
         let _meshe = MeshAsset {
             name: "eae".to_string(),
             uuid: Uuid::new_v4(),
@@ -1145,11 +1355,14 @@ impl RenderGraph {
             wire_cube_instance_count: 0,
         };
 
-        graph.nodes.push((start_index, Box::new(debug_pass_node)));
+        graph.nodes.push((
+            crate::renderer::ids::graph_passes::DEBUG,
+            Box::new(debug_pass_node),
+        ));
     }
 
     fn allocate_graph_resources(
-        nodes: &Vec<(i8, Box<dyn RenderNode>)>,
+        nodes: &Vec<(GraphPassId, Box<dyn RenderNode>)>,
         api: &mut dyn RendererAPI,
     ) -> GraphResources {
         let mut textures = HashMap::new();
@@ -1218,7 +1431,7 @@ impl RenderGraph {
         }
     }
 
-    pub fn get_node_mut<T: 'static>(&mut self, index: i8) -> Option<&mut T> {
+    pub fn get_node_mut<T: 'static>(&mut self, index: GraphPassId) -> Option<&mut T> {
         for (node_index, node) in &mut self.nodes {
             if *node_index == index {
                 return node.as_any_mut().downcast_mut::<T>();
@@ -1227,29 +1440,34 @@ impl RenderGraph {
         None
     }
 
-    /// Remove a node from the graph, returning it as an owned Box.
+    /// Remove a node from the graph while remembering its execution position.
     /// Use `return_node` to put it back after you're done.
     /// This is useful to avoid borrow conflicts when the node needs
     /// mutable access to State while being part of State.
-    pub fn take_node(&mut self, index: i8) -> Option<Box<dyn RenderNode>> {
+    pub fn take_node(&mut self, index: GraphPassId) -> Option<TakenRenderNode> {
         if let Some(pos) = self.nodes.iter().position(|(i, _)| *i == index) {
-            Some(self.nodes.remove(pos).1)
+            let (id, node) = self.nodes.remove(pos);
+            Some(TakenRenderNode {
+                id,
+                position: pos,
+                node,
+            })
         } else {
             None
         }
     }
 
-    /// Return a previously taken node back into the graph.
-    pub fn return_node(&mut self, index: i8, node: Box<dyn RenderNode>) {
-        self.nodes.push((index, node));
-        self.nodes.sort_by_key(|(i, _)| *i);
+    /// Return a previously taken node to its original execution position.
+    pub fn return_node(&mut self, taken: TakenRenderNode) {
+        let position = taken.position.min(self.nodes.len());
+        self.nodes.insert(position, (taken.id, taken.node));
     }
 
-    pub fn is_node_enabled(&self, index: i8) -> bool {
+    pub fn is_node_enabled(&self, index: GraphPassId) -> bool {
         !self.disabled_nodes.contains(&index)
     }
 
-    pub fn set_node_enabled(&mut self, index: i8, enabled: bool) {
+    pub fn set_node_enabled(&mut self, index: GraphPassId, enabled: bool) {
         if enabled {
             self.disabled_nodes.remove(&index);
         } else {
@@ -1259,76 +1477,3 @@ impl RenderGraph {
 }
 
 impl dyn RenderNode {}
-
-pub struct GeometryRenderQueue {
-    pub items: Vec<RenderData>,
-    pub transforms: Vec<TransformInstance>,
-}
-
-impl GeometryRenderQueue {
-    pub fn new() -> Self {
-        Self {
-            items: Vec::new(),
-            transforms: Vec::new(),
-        }
-    }
-}
-
-#[inline(never)]
-pub fn get_render_data_system(ctx: &mut SystemContext, _commands: &mut Commands) {
-    crate::profile_scope!("renderer.get_render_data_system");
-    let (render_data, transforms) = collect_geometry_render_data(ctx);
-
-    let Some(mut queue) = ctx.world.get_resource_mut::<GeometryRenderQueue>() else {
-        return;
-    };
-
-    queue.items.clear();
-    queue.transforms.clear();
-    queue.items.extend(render_data);
-    queue.transforms.extend(transforms);
-}
-
-fn collect_geometry_render_data(
-    ctx: &mut SystemContext,
-) -> (Vec<RenderData>, Vec<TransformInstance>) {
-    let world = &mut ctx.world;
-    let asset_manager = &ctx.globals.asset_manager;
-    let mut transforms = Vec::new();
-    let render_data = {
-        let mut items = Vec::new();
-
-        let mut query = Query::<(&MeshRendererComponent, &TransformComponent)>::new(world);
-        query.for_each(|_entity, (mesh_renderer, transform)| {
-            let Some(material) = asset_manager.get_by_uuid::<Material>(mesh_renderer.material)
-            else {
-                return;
-            };
-
-            items.push(RenderData {
-                mesh: mesh_renderer.mesh,
-                material: material.clone(),
-                transform_index: transforms.len() as u32,
-                sort_key: 0,
-                extra_bind_groups: Vec::new(),
-            });
-
-            let rotation = Mat4::from_quat(transform.rotation);
-            let model_matrix: Mat4 = Mat4::from_translation(transform.position)
-                * rotation
-                * Mat4::from_scale(Vec3::new(
-                    transform.scale.x,
-                    transform.scale.y,
-                    transform.scale.z,
-                ));
-            transforms.push(TransformInstance {
-                model_matrix: model_matrix.to_cols_array_2d(),
-                material_index: material.material_index,
-            });
-        });
-
-        items
-    };
-
-    (render_data, transforms)
-}

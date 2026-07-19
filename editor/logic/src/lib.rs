@@ -7,7 +7,8 @@ pub mod viewport_context_menu;
 use egui_node::EguiRenderNode;
 use viewport_context_menu::{EditorSpawnRequests, editor_spawn_system};
 
-pub const EGUI_NODE_INDEX: i8 = 10;
+pub const EGUI_NODE_INDEX: engine::renderer::ids::GraphPassId =
+    engine::renderer::ids::graph_passes::EGUI;
 
 #[unsafe(no_mangle)]
 pub fn register_editor(state: &mut engine::State) {
@@ -52,19 +53,19 @@ pub fn update_editor(state: &mut engine::State) {
 }
 
 fn update_editor_impl(state: &mut engine::State) {
-    if let Some(mut node_box) = state
+    if let Some(mut taken_node) = state
         .global_resources
         .renderer
         .render_graph
         .take_node(EGUI_NODE_INDEX)
     {
-        if let Some(egui_node) = node_box.as_any_mut().downcast_mut::<EguiRenderNode>() {
+        if let Some(egui_node) = taken_node.as_any_mut().downcast_mut::<EguiRenderNode>() {
             egui_node.process(state);
         }
         state
             .global_resources
             .renderer
             .render_graph
-            .return_node(EGUI_NODE_INDEX, node_box);
+            .return_node(taken_node);
     }
 }

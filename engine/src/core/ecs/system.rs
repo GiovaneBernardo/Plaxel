@@ -1,10 +1,12 @@
 use crate::{
-    ecs::{commands::Commands, world::World},
+    ecs::{change::ChangeTick, commands::Commands, world::World},
     global_resources::GlobalResources,
 };
 pub struct SystemContext<'a> {
     pub world: &'a mut World,
     pub globals: &'a mut GlobalResources,
+    pub last_run_tick: ChangeTick,
+    pub this_run_tick: ChangeTick,
 }
 
 pub trait RunnableSystem {

@@ -62,7 +62,7 @@ use crate::renderer::TextureDimension;
 use crate::renderer::TextureFormat;
 use crate::renderer::TextureSize;
 use crate::renderer::TextureUsages;
-use crate::renderer::{FrameBindings, GeometryPassNode, GeometryRenderQueue};
+use crate::renderer::{FrameBindings, GeometryPassNode};
 
 fn cook_trimesh_indices(vertices: &[crate::math::Vec3], indices: &[u32]) -> Vec<[u32; 3]> {
     let vertex_count = vertices.len() as u32;
@@ -404,7 +404,7 @@ impl State {
                     .global_resources
                     .renderer
                     .render_graph
-                    .get_node_mut::<GeometryPassNode>(0)
+                    .get_node_mut::<GeometryPassNode>(crate::renderer::ids::graph_passes::GEOMETRY)
                     .and_then(|node| node.camera_bind_group_layout)
                 else {
                     return;
@@ -434,6 +434,7 @@ impl State {
                     };
                     self.global_resources.renderer.renderer_api.create_pipeline(
                         material,
+                        crate::renderer::ids::material_passes::FORWARD_OPAQUE,
                         &[camera_layout, textures_layout],
                         &target_info,
                     );
@@ -596,8 +597,7 @@ impl State {
                     asset_type: assets::manager::AssetType::Material,
                     _marker: std::marker::PhantomData,
                 })?;
-        material.pipeline_descriptor.vertex_layouts =
-            vec![vertex_layout, TransformInstance::layout()];
+        material.set_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
         Some(material_uuid)
     }
 
@@ -778,7 +778,7 @@ impl State {
             .global_resources
             .renderer
             .render_graph
-            .get_node_mut::<GeometryPassNode>(0)
+            .get_node_mut::<GeometryPassNode>(crate::renderer::ids::graph_passes::GEOMETRY)
             .and_then(|node| node.camera_bind_group_layout)
         else {
             anyhow::bail!("GeometryPassNode camera bind group layout is not available");
@@ -802,6 +802,7 @@ impl State {
         };
         self.global_resources.renderer.renderer_api.create_pipeline(
             &material,
+            crate::renderer::ids::material_passes::FORWARD_OPAQUE,
             &[camera_layout, textures_layout],
             &target_info,
         );
@@ -895,13 +896,14 @@ impl State {
         let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
             return;
         };
-        let Some(scene) = self.scenes.get(scene_index) else {
+        let Some(scene) = self.scenes.get_mut(scene_index) else {
             return;
         };
 
-        self.global_resources
+        let globals = &mut self.global_resources;
+        globals
             .renderer
-            .sync_geometry_render_queue(scene.world());
+            .sync_render_database(scene.world_mut(), &globals.asset_manager);
     }
 
     fn clear_input_system(world: &mut World) {
@@ -921,7 +923,6 @@ impl State {
         world.insert_resource(Time::new());
         world.insert_resource(InputState::new());
         world.insert_resource(Physics::new());
-        world.insert_resource(GeometryRenderQueue::new());
     }
 
     fn init_active_scene(&mut self) {
@@ -1353,8 +1354,7 @@ fn prepare_app_redraw(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
 }
 
 fn after_frame_systems(state: &mut State) {
-    crate::profile_scope!("renderer.clear_geometry_render_data");
-    state.global_resources.renderer.clear_geometry_render_data();
+    let _ = state;
 }
 
 fn before_frame_render(state: &mut State) {

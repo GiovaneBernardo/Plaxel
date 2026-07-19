@@ -216,7 +216,7 @@
                     Empty,
                     Empty,
                 ],
-                focused_node: Some((10)),
+                focused_node: Some((3)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),

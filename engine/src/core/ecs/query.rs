@@ -1,6 +1,8 @@
 use std::cell::{Ref, RefMut};
 
-use crate::ecs::{component::Component, entity::Entity, storage::Storage, world::World};
+use crate::ecs::{
+    change::ChangeTick, component::Component, entity::Entity, storage::Storage, world::World,
+};
 
 pub trait QueryParam<'w> {
     type Fetch;
@@ -27,16 +29,16 @@ impl<'w, T: Component> QueryParam<'w> for &T {
 }
 
 impl<'w, T: Component> QueryParam<'w> for &mut T {
-    type Fetch = RefMut<'w, Storage<T>>;
+    type Fetch = (RefMut<'w, Storage<T>>, ChangeTick);
 
     type Item<'a> = &'a mut T;
 
     fn borrow(world: &'w World) -> Option<Self::Fetch> {
-        world.get_storage_mut::<T>()
+        Some((world.get_storage_mut::<T>()?, world.change_tick()))
     }
 
     fn get<'a>(fetch: &'a mut Self::Fetch, entity: Entity) -> Option<Self::Item<'a>> {
-        fetch.get_mut(entity)
+        fetch.0.get_mut(entity, fetch.1)
     }
 }
 

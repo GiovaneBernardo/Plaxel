@@ -812,8 +812,10 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
     };
 
     upload_material_textures(globals, &material_path, &material);
-    material.pipeline_descriptor.vertex_layouts =
-        vec![mesh.vertex_layout.clone(), TransformInstance::layout()];
+    material.set_vertex_layouts(vec![
+        mesh.vertex_layout.clone(),
+        TransformInstance::layout(),
+    ]);
     material.material_index = globals
         .renderer
         .renderer_api
@@ -822,7 +824,7 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
     let Some(camera_layout) = globals
         .renderer
         .render_graph
-        .get_node_mut::<GeometryPassNode>(0)
+        .get_node_mut::<GeometryPassNode>(engine::renderer::ids::graph_passes::GEOMETRY)
         .and_then(|node| node.camera_bind_group_layout)
     else {
         engine::game_warn!(
@@ -849,6 +851,7 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
     };
     globals.renderer.renderer_api.create_pipeline(
         &material,
+        engine::renderer::ids::material_passes::FORWARD_OPAQUE,
         &[camera_layout, textures_layout],
         &target_info,
     );

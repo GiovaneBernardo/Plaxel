@@ -19,11 +19,12 @@ use crate::renderer::PipelineTargetInfo;
 use crate::renderer::SamplerDescriptor;
 use crate::renderer::TextureDescriptor;
 use crate::renderer::TextureSize;
+use crate::renderer::ids::material_passes;
 pub use crate::renderer::pool::*;
 use crate::renderer::{
     AddressMode, AttachmentLoadOp, BindGroupEntry, BindingType, BufferUsages, FilterMode,
-    RenderNodeDescriptor, SamplerBorderColor, ShaderStages, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages,
+    GraphPassId, RenderNodeDescriptor, SamplerBorderColor, ShaderStages, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages,
 };
 use crate::texture;
 use offset_allocator::Allocation;
@@ -424,6 +425,8 @@ pub struct GpuMesh {
 #[derive(Clone)]
 struct ShaderHotReloadData {
     pipeline_descriptor: PipelineDescriptor,
+    vertex_entry: String,
+    fragment_entry: Option<String>,
     bind_group_layouts: Vec<BindGroupLayoutHandle>,
     target_info: PipelineTargetInfo,
     pipeline_handle: PipelineHandle,
@@ -497,6 +500,16 @@ impl<'a> RenderContext for WgpuRenderContext<'a> {
             base_vertex,
             0..instances,
         );
+    }
+
+    fn draw_indirect(&mut self, buffer: BufferHandle, offset: u64) {
+        self.pass
+            .draw_indirect(self.backend.get_buffer(buffer).unwrap(), offset);
+    }
+
+    fn draw_indexed_indirect(&mut self, buffer: BufferHandle, offset: u64) {
+        self.pass
+            .draw_indexed_indirect(self.backend.get_buffer(buffer).unwrap(), offset);
     }
 
     fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle) {
@@ -621,6 +634,8 @@ impl RendererAPI for WgpuBackend {
         &mut self,
         render_graph: &mut RenderGraph,
         render_resources: &mut RenderResources,
+        producers: &crate::renderer::RenderProducerRegistry,
+        views: &crate::renderer::RenderViewRegistry,
     ) -> anyhow::Result<()> {
         crate::profile_scope!("wgpu.render");
         //match state.render(&mut self.on_render) {
@@ -670,11 +685,14 @@ impl RendererAPI for WgpuBackend {
             let _profile_scope =
                 crate::profiling::Scope::new_owned(format!("render_node.run.{index}"));
             self.render_node(
+                *index,
                 node.as_mut(),
                 &render_graph.resources,
                 render_resources,
                 &mut encoder,
                 &view,
+                producers,
+                views,
             );
         }
 
@@ -693,12 +711,12 @@ impl RendererAPI for WgpuBackend {
         for data in reload_data {
             let pipeline = self.create_render_pipeline(
                 &data.pipeline_descriptor,
+                &data.vertex_entry,
+                data.fragment_entry.as_deref(),
                 &data.bind_group_layouts,
                 &data.target_info,
             );
             self.pipelines.insert(data.pipeline_handle, pipeline);
-            self.pipelines_by_uuid
-                .insert(data.pipeline_descriptor.uuid, data.pipeline_handle);
         }
 
         engine_info!(
@@ -829,32 +847,46 @@ impl RendererAPI for WgpuBackend {
     fn create_pipeline(
         &mut self,
         material: &Material,
+        material_pass: MaterialPassId,
         bind_group_layouts: &[BindGroupLayoutHandle],
         target_info: &PipelineTargetInfo,
-    ) {
-        let pipeline_key = WgpuBackend::pipeline_key(
-            &material.pipeline_descriptor,
+    ) -> PipelineHandle {
+        let shader_pass = material.require_pass(material_pass);
+        let descriptor = &shader_pass.pipeline;
+
+        let key = Self::pipeline_key(
+            descriptor,
+            material_pass,
+            &shader_pass.vertex_entry,
+            shader_pass.fragment_entry.as_deref(),
             bind_group_layouts,
             target_info,
         );
-        if let Some(handle) = self.pipelines_by_key.get(&pipeline_key).copied() {
-            self.pipelines_by_uuid
-                .insert(material.pipeline_descriptor.uuid, handle);
-            return;
+
+        if let Some(handle) = self.pipelines_by_key.get(&key).copied() {
+            self.pipelines_by_uuid.insert(descriptor.uuid, handle);
+            return handle;
         }
 
-        let render_pipeline = self.create_render_pipeline(
-            &material.pipeline_descriptor,
+        let pipeline = self.create_render_pipeline(
+            descriptor,
+            &shader_pass.vertex_entry,
+            shader_pass.fragment_entry.as_deref(),
             bind_group_layouts,
             target_info,
         );
+
         let handle = self.add_render_pipeline(
-            render_pipeline,
-            &material.pipeline_descriptor,
+            pipeline,
+            descriptor,
+            &shader_pass.vertex_entry,
+            shader_pass.fragment_entry.as_deref(),
             bind_group_layouts,
             target_info,
         );
-        self.pipelines_by_key.insert(pipeline_key, handle);
+
+        self.pipelines_by_key.insert(key, handle);
+        handle
     }
 
     fn target_info_for_pass(
@@ -892,7 +924,7 @@ impl RendererAPI for WgpuBackend {
         vertex_bytes: &Vec<u8>, // How to turn a Vec of vertices into bytes: bytemuck::cast_slice(&positions_raw);
         indices: &Vec<u32>,
         material: Material,
-        _pipeline_handle: &PipelineHandle,
+        pipeline_handle: &PipelineHandle,
     ) -> RenderData {
         let mesh = MeshAsset {
             name: "Cube".to_string(),
@@ -900,7 +932,11 @@ impl RendererAPI for WgpuBackend {
             vertices: vertex_bytes.clone(),
             indices: bytemuck::cast_slice(&indices).to_vec(),
             material_uuid: None,
-            vertex_layout: material.pipeline_descriptor.vertex_layouts[0].clone(),
+            vertex_layout: material
+                .require_pass(material_passes::FORWARD_OPAQUE)
+                .pipeline
+                .vertex_layouts[0]
+                .clone(),
             //vertex_layout: VertexLayout {
             //    stride: std::mem::size_of::<[f32; 3]>() as u64,
             //    step_mode: crate::model::StepMode::Vertex,
@@ -911,6 +947,7 @@ impl RendererAPI for WgpuBackend {
         RenderData {
             mesh: self.load_mesh_with_data(&mesh),
             material,
+            pipeline: *pipeline_handle,
             transform_index: 0,
             sort_key: 0,
             extra_bind_groups: Vec::new(),
@@ -920,6 +957,11 @@ impl RendererAPI for WgpuBackend {
     fn write_buffer(&mut self, buffer: BufferHandle, data: &[u8]) {
         let wgpu_buffer = self.get_buffer(buffer).unwrap();
         self.queue.write_buffer(wgpu_buffer, 0, data);
+    }
+
+    fn write_buffer_at(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) {
+        let wgpu_buffer = self.get_buffer(buffer).unwrap();
+        self.queue.write_buffer(wgpu_buffer, offset, data);
     }
 
     fn read_texture_bytes_at(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]) {
@@ -1492,21 +1534,29 @@ impl WgpuBackend {
     }
 
     fn pipeline_key(
-        pipeline_descriptor: &PipelineDescriptor,
+        descriptor: &PipelineDescriptor,
+        material_pass: MaterialPassId,
+        vertex_entry: &str,
+        fragment_entry: Option<&str>,
         bind_group_layouts: &[BindGroupLayoutHandle],
         target_info: &PipelineTargetInfo,
     ) -> WgpuPipelineKey {
         WgpuPipelineKey {
             pipeline: PipelineKey {
-                shader: pipeline_descriptor.shader.clone(),
-                blend_mode: pipeline_descriptor.blend_mode,
-                cull_mode: pipeline_descriptor.cull_mode,
-                topology: pipeline_descriptor.topology,
-                front_face: pipeline_descriptor.front_face,
-                polygon_mode: pipeline_descriptor.polygon_mode,
-                depth_state: pipeline_descriptor.depth_state,
-                multisample_count: pipeline_descriptor.multisample.count,
-                vertex_layouts: pipeline_descriptor.vertex_layouts.clone(),
+                material_pass,
+                shader: descriptor.shader.clone(),
+                vertex_entry: vertex_entry.to_owned(),
+                fragment_entry: fragment_entry.map(str::to_owned),
+
+                blend_mode: descriptor.blend_mode,
+                cull_mode: descriptor.cull_mode,
+                topology: descriptor.topology,
+                front_face: descriptor.front_face,
+                polygon_mode: descriptor.polygon_mode,
+                depth_state: descriptor.depth_state,
+                multisample_count: descriptor.multisample.count,
+                vertex_layouts: descriptor.vertex_layouts.clone(),
+
                 color_formats: target_info.color_formats.clone(),
                 depth_format: target_info.depth_format,
             },
@@ -1678,11 +1728,14 @@ impl WgpuBackend {
 
     fn render_node(
         &mut self,
+        graph_pass: GraphPassId,
         node: &mut dyn RenderNode,
         resources: &GraphResources,
         render_resources: &RenderResources,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
+        producers: &crate::renderer::RenderProducerRegistry,
+        views: &crate::renderer::RenderViewRegistry,
     ) {
         crate::profile_scope!("wgpu.render_node");
         let render_node_descriptor = node.describe_pass();
@@ -1750,6 +1803,7 @@ impl WgpuBackend {
             pass: render_pass,
         };
         node.run(&mut ctx, render_resources);
+        producers.record_pass(graph_pass, views, &mut ctx, render_resources);
 
         //for render_data in &node.render_data {
         //    render_pass.set_pipeline(render_data.pipeline);
@@ -1825,18 +1879,18 @@ impl WgpuBackend {
 
     fn create_render_pipeline(
         &self,
-        pipeline_descriptor: &PipelineDescriptor,
+        descriptor: &PipelineDescriptor,
+        vertex_entry: &str,
+        fragment_entry: Option<&str>,
         bind_group_layouts: &[BindGroupLayoutHandle],
         target_info: &PipelineTargetInfo,
     ) -> wgpu::RenderPipeline {
-        engine_info!("Shader name: {:?}", pipeline_descriptor.shader);
+        engine_info!("Shader name: {:?}", descriptor.shader);
         let shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    load_shader_source(&pipeline_descriptor.shader).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(load_shader_source(&descriptor.shader).into()),
             });
 
         let wgpu_layouts: Vec<&wgpu::BindGroupLayout> = bind_group_layouts
@@ -1854,7 +1908,7 @@ impl WgpuBackend {
 
         engine_info!("Depth Format: {:?}", texture::Texture::DEPTH_FORMAT);
 
-        let desc = pipeline_descriptor;
+        let desc = descriptor;
 
         let wgpu_attributes: Vec<Vec<wgpu::VertexAttribute>> = desc
             .vertex_layouts
@@ -1913,17 +1967,17 @@ impl WgpuBackend {
 
         self.device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&pipeline_descriptor.shader),
+                label: Some(&descriptor.shader),
                 layout: Some(&render_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(vertex_entry),
                     buffers: &vertex_buffer_layouts,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
-                fragment: Some(wgpu::FragmentState {
+                fragment: fragment_entry.map(|entry_point| wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(entry_point),
                     targets: &color_targets,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
@@ -1958,6 +2012,8 @@ impl WgpuBackend {
         &mut self,
         pipeline: wgpu::RenderPipeline,
         pipeline_descriptor: &PipelineDescriptor,
+        vertex_entry: &str,
+        fragment_entry: Option<&str>,
         bind_group_layouts: &[BindGroupLayoutHandle],
         target_info: &PipelineTargetInfo,
     ) -> PipelineHandle {
@@ -1970,6 +2026,8 @@ impl WgpuBackend {
             .or_insert_with(Vec::new)
             .push(ShaderHotReloadData {
                 pipeline_descriptor: pipeline_descriptor.clone(),
+                vertex_entry: vertex_entry.to_owned(),
+                fragment_entry: fragment_entry.map(str::to_owned),
                 bind_group_layouts: bind_group_layouts.to_vec(),
                 target_info: target_info.clone(),
                 pipeline_handle: handle,

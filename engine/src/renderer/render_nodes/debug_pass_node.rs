@@ -5,6 +5,7 @@ use crate::assets::material::Material;
 use crate::camera;
 use crate::model::MeshAsset;
 use crate::renderer::core::*;
+use crate::renderer::ids::material_passes;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -109,12 +110,24 @@ impl RenderNode for DebugPassNode {
         self.camera_bind_group = Some(bind_group);
         self.camera_bind_group_layout = Some(layout);
 
-        ctx.api
-            .create_pipeline(&self.sphere_material, &[layout], &ctx.target_info);
-        ctx.api
-            .create_pipeline(&self.cube_material, &[layout], &ctx.target_info);
-        ctx.api
-            .create_pipeline(&self.wire_cube_material, &[layout], &ctx.target_info);
+        ctx.api.create_pipeline(
+            &self.sphere_material,
+            material_passes::DEBUG,
+            &[layout],
+            &ctx.target_info,
+        );
+        ctx.api.create_pipeline(
+            &self.cube_material,
+            material_passes::DEBUG,
+            &[layout],
+            &ctx.target_info,
+        );
+        ctx.api.create_pipeline(
+            &self.wire_cube_material,
+            material_passes::DEBUG,
+            &[layout],
+            &ctx.target_info,
+        );
     }
 
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI) {
@@ -231,7 +244,12 @@ impl RenderNode for DebugPassNode {
         // Draw spheres
         if self.sphere_instance_count > 0 {
             let pipeline = ctx
-                .get_pipeline(self.sphere_material.pipeline_descriptor.uuid)
+                .get_pipeline(
+                    self.sphere_material
+                        .require_pass(material_passes::DEBUG)
+                        .pipeline
+                        .uuid,
+                )
                 .unwrap();
             ctx.bind_pipeline(pipeline);
 
@@ -255,7 +273,12 @@ impl RenderNode for DebugPassNode {
         // Draw cubes
         if self.cube_instance_count > 0 {
             let pipeline = ctx
-                .get_pipeline(self.cube_material.pipeline_descriptor.uuid)
+                .get_pipeline(
+                    self.cube_material
+                        .require_pass(material_passes::DEBUG)
+                        .pipeline
+                        .uuid,
+                )
                 .unwrap();
             ctx.bind_pipeline(pipeline);
 
@@ -279,7 +302,12 @@ impl RenderNode for DebugPassNode {
         // Draw wire cubes
         if self.wire_cube_instance_count > 0 {
             let pipeline = ctx
-                .get_pipeline(self.wire_cube_material.pipeline_descriptor.uuid)
+                .get_pipeline(
+                    self.wire_cube_material
+                        .require_pass(material_passes::DEBUG)
+                        .pipeline
+                        .uuid,
+                )
                 .unwrap();
             ctx.bind_pipeline(pipeline);
 

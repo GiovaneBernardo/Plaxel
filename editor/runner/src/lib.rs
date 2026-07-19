@@ -39,7 +39,6 @@ fn register_hot_game_systems(state: &mut engine::State) {
         game::hot_player_interaction_system,
     );
     schedule.add_named_system("game.camera_update", game::hot_camera_update_system);
-    schedule.add_named_system("game.render_data", engine::renderer::get_render_data_system);
     schedule.add_named_system(
         "game.engine_input",
         engine::core::systems::systems::engine_input_system,

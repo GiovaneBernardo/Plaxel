@@ -1,5 +1,6 @@
 use crate::assets::material::Material;
 use crate::renderer::core::*;
+use crate::renderer::ids::material_passes;
 
 pub struct FullscreenPassNode {
     pub material: Material,
@@ -15,13 +16,22 @@ impl FullscreenPassNode {
     }
 
     pub fn compile(&self, ctx: &mut NodeCompileContext) {
-        ctx.api
-            .create_pipeline(&self.material, &self.bind_group_layouts, &ctx.target_info);
+        ctx.api.create_pipeline(
+            &self.material,
+            material_passes::FULLSCREEN,
+            &self.bind_group_layouts,
+            &ctx.target_info,
+        );
     }
 
     pub fn run(&self, ctx: &mut dyn RenderContext, bind_groups: &[BindGroupHandle]) {
         let pipeline = ctx
-            .get_pipeline(self.material.pipeline_descriptor.uuid)
+            .get_pipeline(
+                self.material
+                    .require_pass(material_passes::FULLSCREEN)
+                    .pipeline
+                    .uuid,
+            )
             .unwrap();
         ctx.bind_pipeline(pipeline);
 

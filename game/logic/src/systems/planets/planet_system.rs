@@ -10,7 +10,7 @@ use engine::{
     ecs::{commands::Commands, query::Query, system::SystemContext},
     game_info,
     multithreading::job_system::JobPriorityHandle,
-    renderer::{AtmospherePassNode, PipelineHandle},
+    renderer::{AtmospherePassNode, RenderData, RenderFlags, RenderObject, RenderObjectId},
 };
 use game_types::{
     octree::{
@@ -31,6 +31,34 @@ use crate::{
 use crossbeam_channel::{Receiver, Sender};
 
 type DensityGrid = Vec<Vec<Vec<f32>>>;
+
+fn retain_render_data(
+    renderer: &mut engine::renderer::Renderer,
+    render_data: RenderData,
+    shadow_pipeline: engine::renderer::PipelineHandle,
+) -> RenderObjectId {
+    let material_index = render_data.material.material_index;
+    let pipeline = render_data.pipeline;
+    renderer.objects().insert(
+        RenderObject::new(
+            render_data.mesh,
+            render_data.material,
+            engine::model::TransformInstance {
+                model_matrix: engine::math::Mat4::IDENTITY.to_cols_array_2d(),
+                material_index,
+            },
+        )
+        .with_flags(
+            RenderFlags::VISIBLE_MAIN
+                | RenderFlags::DEPTH_PREPASS
+                | RenderFlags::CASTS_SHADOWS
+                | RenderFlags::RECEIVES_SHADOWS,
+        )
+        .with_pipeline_override(engine::renderer::material_passes::FORWARD_OPAQUE, pipeline)
+        .with_pipeline_override(engine::renderer::material_passes::SHADOW, shadow_pipeline)
+        .with_bind_groups(render_data.extra_bind_groups),
+    )
+}
 
 pub struct MeshJobResults {
     pub sender: Sender<GeneratedMesh>,
@@ -313,7 +341,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         ctx.globals
             .renderer
             .render_graph
-            .get_node_mut::<AtmospherePassNode>(1)
+            .get_node_mut::<AtmospherePassNode>(engine::renderer::ids::graph_passes::ATMOSPHERE)
             .unwrap()
             .settings
             .sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
@@ -750,28 +778,55 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             if mesh.vertices.is_empty() {
                 continue;
             }
-            let game_state = ctx.world.get_resource::<GameState>().unwrap();
+            let (
+                solid_material,
+                solid_pipeline,
+                solid_shadow_pipeline,
+                terrain_materials_bind_group,
+            ) = {
+                let game_state = ctx.world.get_resource::<GameState>().unwrap();
+                (
+                    game_state.solid_material.clone(),
+                    game_state.solid_pipeline,
+                    game_state.solid_shadow_pipeline,
+                    game_state.terrain_materials_bind_group,
+                )
+            };
             let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
             let mut render_data = ctx.globals.renderer.renderer_api.create_render_data(
                 &vertex_bytes,
                 &mesh.indices,
-                game_state.solid_material.clone(),
-                &PipelineHandle(0),
+                solid_material,
+                &solid_pipeline,
             );
             render_data
                 .extra_bind_groups
-                .push((2, game_state.terrain_materials_bind_group));
-            uploaded.push((mesh.key, render_data));
+                .push((2, terrain_materials_bind_group));
+            let object = retain_render_data(
+                &mut ctx.globals.renderer,
+                render_data,
+                solid_shadow_pipeline,
+            );
+            uploaded.push((mesh.key, object));
         }
 
         let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
+        let mut removed = Vec::new();
         for key in replacement.keys_to_remove {
-            game_state.planets_meshes.remove(&key);
+            if let Some(object) = game_state.planets_meshes.remove(&key) {
+                removed.push(object);
+            }
         }
-        for (key, render_data) in uploaded {
-            game_state.planets_meshes.insert(key, render_data);
+        for (key, object) in uploaded {
+            if let Some(previous) = game_state.planets_meshes.insert(key, object) {
+                removed.push(previous);
+            }
         }
         drop(game_state);
+        let mut objects = ctx.globals.renderer.objects();
+        for object in removed {
+            objects.remove(object);
+        }
         complete_replacement_transition(ctx, transition.0, transition.1, transition.2);
     }
 
@@ -797,18 +852,39 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
                 .unwrap_or(0);
             mesh_jobs.ready_meshes.remove(next_index)
         };
-        let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
+        let (solid_material, solid_pipeline, solid_shadow_pipeline, terrain_materials_bind_group) = {
+            let game_state = ctx.world.get_resource::<GameState>().unwrap();
+            (
+                game_state.solid_material.clone(),
+                game_state.solid_pipeline,
+                game_state.solid_shadow_pipeline,
+                game_state.terrain_materials_bind_group,
+            )
+        };
         let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
         let mut render_data = ctx.globals.renderer.renderer_api.create_render_data(
             &vertex_bytes,
             &mesh.indices,
-            game_state.solid_material.clone(),
-            &PipelineHandle(0),
+            solid_material,
+            &solid_pipeline,
         );
         render_data
             .extra_bind_groups
-            .push((2, game_state.terrain_materials_bind_group));
-        game_state.planets_meshes.insert(mesh.key, render_data);
+            .push((2, terrain_materials_bind_group));
+        let object = retain_render_data(
+            &mut ctx.globals.renderer,
+            render_data,
+            solid_shadow_pipeline,
+        );
+        let previous = ctx
+            .world
+            .get_resource_mut::<GameState>()
+            .unwrap()
+            .planets_meshes
+            .insert(mesh.key, object);
+        if let Some(previous) = previous {
+            ctx.globals.renderer.objects().remove(previous);
+        }
     }
 }
 
@@ -839,8 +915,15 @@ pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
                 mesh_jobs.pending_requests.remove(key);
             }
 
-            let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
-            game_state.planets_meshes.remove(key);
+            let removed = ctx
+                .world
+                .get_resource_mut::<GameState>()
+                .unwrap()
+                .planets_meshes
+                .remove(key);
+            if let Some(object) = removed {
+                ctx.globals.renderer.objects().remove(object);
+            }
         }
     }
 }

@@ -72,7 +72,12 @@ pub fn viewport_context_menu(
 }
 
 pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> engine::math::Vec3 {
-    let Some(mut node) = state.global_resources.renderer.render_graph.take_node(0) else {
+    let Some(mut taken_node) = state
+        .global_resources
+        .renderer
+        .render_graph
+        .take_node(engine::renderer::ids::graph_passes::GEOMETRY)
+    else {
         return vec3(0.0, 0.0, 0.0);
     };
 
@@ -83,7 +88,7 @@ pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> engine::mat
         mouse_pos.y * pixels_per_point,
     );
 
-    if let Some(geometry_pass_node) = node.as_any_mut().downcast_mut::<GeometryPassNode>() {
+    if let Some(geometry_pass_node) = taken_node.as_any_mut().downcast_mut::<GeometryPassNode>() {
         world_pos = geometry_pass_node.get_world_position_from_depth(
             state.global_resources.renderer.renderer_api.as_mut(),
             &mut state.global_resources.renderer.render_graph.resources,
@@ -98,7 +103,7 @@ pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> engine::mat
         .global_resources
         .renderer
         .render_graph
-        .return_node(0, node);
+        .return_node(taken_node);
 
     world_pos
 }

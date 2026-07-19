@@ -46,6 +46,8 @@ impl Scene {
         let mut ctx = SystemContext {
             world: &mut self.world,
             globals,
+            last_run_tick: Default::default(),
+            this_run_tick: Default::default(),
         };
         self.init_schedule.run(&mut ctx);
     }
@@ -54,6 +56,8 @@ impl Scene {
         let mut ctx = SystemContext {
             world: &mut self.world,
             globals,
+            last_run_tick: Default::default(),
+            this_run_tick: Default::default(),
         };
         self.load_schedule.run(&mut ctx);
     }
@@ -62,6 +66,8 @@ impl Scene {
         let mut ctx = SystemContext {
             world: &mut self.world,
             globals,
+            last_run_tick: Default::default(),
+            this_run_tick: Default::default(),
         };
         self.update_schedule.run(&mut ctx);
     }
@@ -70,6 +76,8 @@ impl Scene {
         let mut ctx = SystemContext {
             world: &mut self.world,
             globals,
+            last_run_tick: Default::default(),
+            this_run_tick: Default::default(),
         };
         self.fixed_update_schedule.run(&mut ctx);
     }
@@ -78,6 +86,8 @@ impl Scene {
         let mut ctx = SystemContext {
             world: &mut self.world,
             globals,
+            last_run_tick: Default::default(),
+            this_run_tick: Default::default(),
         };
         self.editor_update_schedule.run(&mut ctx);
     }
@@ -86,6 +96,8 @@ impl Scene {
         let mut ctx = SystemContext {
             world: &mut self.world,
             globals,
+            last_run_tick: Default::default(),
+            this_run_tick: Default::default(),
         };
         self.late_update_schedule.run(&mut ctx);
     }

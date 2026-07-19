@@ -9,7 +9,10 @@ pub fn sync_planet_debug(
     _world: &World,
     planet: &Planet,
 ) {
-    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(2) else {
+    let Some(debug_pass_node) = renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
+    else {
         return;
     };
 
@@ -34,7 +37,10 @@ pub fn sync_physics_debug(
     let Some(physics) = world.get_resource::<Physics>() else {
         return;
     };
-    let Some(debug_pass_node) = renderer.render_graph.get_node_mut::<DebugPassNode>(2) else {
+    let Some(debug_pass_node) = renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
+    else {
         return;
     };
 

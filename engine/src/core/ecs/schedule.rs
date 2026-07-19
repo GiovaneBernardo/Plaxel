@@ -1,4 +1,5 @@
 use crate::ecs::{
+    change::ChangeTick,
     commands::Commands,
     system::{HotSystem, StaticSystem, System, SystemContext},
 };
@@ -6,6 +7,7 @@ use crate::ecs::{
 struct ScheduledSystem {
     name: &'static str,
     system: System,
+    last_run_tick: ChangeTick,
 }
 
 pub struct Schedule {
@@ -34,6 +36,7 @@ impl Schedule {
         self.systems.push(ScheduledSystem {
             name,
             system: Box::new(HotSystem::new(name, system)),
+            last_run_tick: ChangeTick::default(),
         });
     }
 
@@ -52,6 +55,7 @@ impl Schedule {
         self.systems.push(ScheduledSystem {
             name,
             system: Box::new(StaticSystem::new(system)),
+            last_run_tick: ChangeTick::default(),
         });
     }
 
@@ -61,8 +65,12 @@ impl Schedule {
             let _profile_scope =
                 crate::profiling::Scope::new_owned(format!("ecs.system.{}", scheduled.name));
             let mut commands = Commands::new();
+            let this_run_tick = ctx.world.advance_change_tick();
+            ctx.last_run_tick = scheduled.last_run_tick;
+            ctx.this_run_tick = this_run_tick;
             scheduled.system.run(ctx, &mut commands);
             commands.apply(ctx);
+            scheduled.last_run_tick = this_run_tick;
         }
     }
 }

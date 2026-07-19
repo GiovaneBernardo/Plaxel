@@ -1,3 +1,4 @@
+use crate::ecs::change::ChangeTick;
 use crate::ecs::component::Component;
 use crate::ecs::entity::Entity;
 use std::any::type_name;
@@ -28,6 +29,8 @@ pub struct Storage<T> {
     sparse: Vec<u32>,
     dense: Vec<T>,
     entities: Vec<Entity>,
+    added_ticks: Vec<ChangeTick>,
+    changed_ticks: Vec<ChangeTick>,
 }
 
 impl<T> Storage<T> {
@@ -36,10 +39,12 @@ impl<T> Storage<T> {
             sparse: Vec::new(),
             dense: Vec::new(),
             entities: Vec::new(),
+            added_ticks: Vec::new(),
+            changed_ticks: Vec::new(),
         }
     }
 
-    pub fn insert(&mut self, entity: Entity, component: T) {
+    pub fn insert(&mut self, entity: Entity, component: T, tick: ChangeTick) {
         let idx = entity.index() as usize;
 
         // ensure sparse is large enough
@@ -52,6 +57,7 @@ impl<T> Storage<T> {
         // Case 1: entity already has component → overwrite
         if dense_idx != u32::MAX {
             self.dense[dense_idx as usize] = component;
+            self.changed_ticks[dense_idx as usize] = tick;
             return;
         }
 
@@ -60,6 +66,8 @@ impl<T> Storage<T> {
 
         self.dense.push(component);
         self.entities.push(entity);
+        self.added_ticks.push(tick);
+        self.changed_ticks.push(tick);
         self.sparse[idx] = new_dense_idx;
     }
 
@@ -79,7 +87,7 @@ impl<T> Storage<T> {
         self.dense.get(dense_idx as usize)
     }
 
-    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
+    pub fn get_mut(&mut self, entity: Entity, tick: ChangeTick) -> Option<&mut T> {
         let idx = entity.index() as usize;
 
         let dense_idx = *self.sparse.get(idx)?;
@@ -92,6 +100,7 @@ impl<T> Storage<T> {
             return None;
         }
 
+        self.changed_ticks[dense_idx as usize] = tick;
         self.dense.get_mut(dense_idx as usize)
     }
 
@@ -113,6 +122,8 @@ impl<T> Storage<T> {
 
         let removed_component = self.dense.swap_remove(dense_idx);
         self.entities.swap_remove(dense_idx);
+        self.added_ticks.swap_remove(dense_idx);
+        self.changed_ticks.swap_remove(dense_idx);
 
         if dense_idx < self.entities.len() {
             let moved_entity = self.entities[dense_idx];
@@ -126,7 +137,8 @@ impl<T> Storage<T> {
         &self.dense
     }
 
-    pub fn dense_mut(&mut self) -> &mut Vec<T> {
+    pub fn dense_mut(&mut self, tick: ChangeTick) -> &mut Vec<T> {
+        self.changed_ticks.fill(tick);
         &mut self.dense
     }
 
@@ -142,8 +154,42 @@ impl<T> Storage<T> {
         self.entities.iter().copied().zip(self.dense.iter())
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (Entity, &mut T)> {
+    pub fn iter_mut(&mut self, tick: ChangeTick) -> impl Iterator<Item = (Entity, &mut T)> {
+        self.changed_ticks.fill(tick);
         self.entities.iter().copied().zip(self.dense.iter_mut())
+    }
+
+    pub fn iter_added_since(
+        &self,
+        last_run: ChangeTick,
+        this_run: ChangeTick,
+    ) -> impl Iterator<Item = (Entity, &T)> {
+        self.iter_with_ticks(&self.added_ticks, last_run, this_run)
+    }
+
+    pub fn iter_changed_since(
+        &self,
+        last_run: ChangeTick,
+        this_run: ChangeTick,
+    ) -> impl Iterator<Item = (Entity, &T)> {
+        self.iter_with_ticks(&self.changed_ticks, last_run, this_run)
+    }
+
+    fn iter_with_ticks<'a>(
+        &'a self,
+        ticks: &'a [ChangeTick],
+        last_run: ChangeTick,
+        this_run: ChangeTick,
+    ) -> impl Iterator<Item = (Entity, &'a T)> + 'a {
+        self.entities
+            .iter()
+            .copied()
+            .zip(self.dense.iter())
+            .zip(ticks.iter().copied())
+            .filter_map(move |((entity, value), tick)| {
+                tick.is_newer_than(last_run, this_run)
+                    .then_some((entity, value))
+            })
     }
 }
 

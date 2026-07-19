@@ -45,7 +45,7 @@ pub struct EditorUi {
     maximize_viewport: bool,
     floating_hierarchy: bool,
     floating_inspector: bool,
-    selected_render_node: Option<i8>,
+    selected_render_node: Option<engine::renderer::ids::GraphPassId>,
     show_puffin_profiler: bool,
     style_applied: bool,
     last_layout_text: Option<String>,
@@ -562,7 +562,7 @@ impl MaterialEditor {
 struct EditorTabViewer<'a> {
     state: &'a mut engine::State,
     selected_entity: &'a mut Option<Entity>,
-    selected_render_node: &'a mut Option<i8>,
+    selected_render_node: &'a mut Option<engine::renderer::ids::GraphPassId>,
     show_puffin_profiler: &'a mut bool,
     assets: &'a mut AssetEditorState,
 }
@@ -988,11 +988,13 @@ fn draw_material_editor(ui: &mut Ui, state: &mut engine::State, editor: &mut Mat
     ui.separator();
     inspector_grid(ui, "material_core_grid", |ui| {
         readonly_row(ui, "Uuid", &editor.material.uuid.to_string());
-        text_row(
-            ui,
-            "Shader",
-            &mut editor.material.pipeline_descriptor.shader,
-        );
+        if let Some(pass) = editor
+            .material
+            .technique
+            .pass_mut(engine::renderer::ids::material_passes::FORWARD_OPAQUE)
+        {
+            text_row(ui, "Shader", &mut pass.pipeline.shader);
+        }
         readonly_row(ui, "Gpu Index", &editor.material.material_index.to_string());
     });
 
@@ -1058,7 +1060,7 @@ fn draw_texture_explorer(ui: &mut Ui, state: &mut engine::State, assets: &mut As
 }
 
 struct RenderNodeSummary {
-    index: i8,
+    index: engine::renderer::ids::GraphPassId,
     name: &'static str,
     enabled: bool,
     input_textures: Vec<&'static str>,
@@ -1070,7 +1072,7 @@ struct RenderNodeSummary {
 fn draw_render_graph(
     ui: &mut Ui,
     state: &mut engine::State,
-    selected_render_node: &mut Option<i8>,
+    selected_render_node: &mut Option<engine::renderer::ids::GraphPassId>,
 ) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Render Graph").strong());
@@ -1164,7 +1166,7 @@ fn render_node_summaries(state: &engine::State) -> Vec<RenderNodeSummary> {
 fn draw_render_node_inspector(
     ui: &mut Ui,
     state: &mut engine::State,
-    index: i8,
+    index: engine::renderer::ids::GraphPassId,
     summaries: &[RenderNodeSummary],
 ) {
     let Some(summary) = summaries.iter().find(|summary| summary.index == index) else {
