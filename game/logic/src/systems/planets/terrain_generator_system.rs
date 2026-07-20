@@ -29,6 +29,16 @@ pub trait PlanetExt {
 
 type CellVertexGrid = Vec<Vec<Vec<Option<u32>>>>;
 
+#[inline]
+fn append_quad(indices: &mut Vec<u32>, vertices: [u32; 4], flip_winding: bool) {
+    let [v0, v1, v2, v3] = vertices;
+    if flip_winding {
+        indices.extend_from_slice(&[v0, v2, v1, v2, v3, v1]);
+    } else {
+        indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+    }
+}
+
 const CELL_EDGES: [(usize, usize); 12] = [
     (0, 1),
     (1, 3),
@@ -186,7 +196,7 @@ fn append_x_edge_indices(
                     cell_vertex[x][y - 1][z - 1],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+                    append_quad(indices, [v0, v1, v2, v3], grid[x][y][z] > 0.0);
                 }
             }
         }
@@ -217,7 +227,7 @@ fn append_y_edge_indices(
                     cell_vertex[x - 1][y][z - 1],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+                    append_quad(indices, [v0, v1, v2, v3], grid[x][y][z] < 0.0);
                 }
             }
         }
@@ -248,7 +258,7 @@ fn append_z_edge_indices(
                     cell_vertex[x - 1][y - 1][z],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    indices.extend_from_slice(&[v0, v1, v2, v2, v1, v3]);
+                    append_quad(indices, [v0, v1, v2, v3], grid[x][y][z] > 0.0);
                 }
             }
         }

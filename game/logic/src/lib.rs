@@ -197,7 +197,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
 
     let mut solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-        .with_cull(CullMode::None);
+        .with_cull(CullMode::Back);
     solid_material.configure_pass(engine::renderer::material_passes::SHADOW, |pass| {
         pass.vertex_entry = "vs_shadow".into();
         pass.fragment_entry = None;
@@ -206,7 +206,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
     let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
         .with_topology(Topology::LineList)
-        .with_cull(CullMode::None);
+        .with_cull(CullMode::Back);
 
     let camera_layout = state
         .global_resources

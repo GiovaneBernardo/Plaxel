@@ -4,7 +4,7 @@ use engine::{
     ecs::{commands::Commands, entity::Entity, system::SystemContext},
     math::{Mat4, Quat, Vec3, vec3},
     model::{ModelVertex, TransformInstance, Vertex},
-    renderer::{RenderObject, RenderObjectId, material_passes},
+    renderer::{CullMode, RenderObject, RenderObjectId, material_passes},
 };
 use game_types::universe::StarSystemComponent;
 
@@ -93,7 +93,8 @@ fn create_star_render_object(ctx: &mut SystemContext, star_entity: Entity) -> Re
 
     let mut star_material =
         Material::for_pass("shaders/star.wgsl".into(), material_passes::FORWARD_OPAQUE)
-            .with_vertex_layouts(vec![ModelVertex::layout(), TransformInstance::layout()]);
+            .with_vertex_layouts(vec![ModelVertex::layout(), TransformInstance::layout()])
+            .with_cull(CullMode::Front);
 
     star_material.material_index = ctx
         .globals
