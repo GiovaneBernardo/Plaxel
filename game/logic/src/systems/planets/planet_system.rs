@@ -18,7 +18,7 @@ use engine::{
 use game_types::{
     octree::{
         GeneratedMesh, GeneratedReplacement, NodeKey, NodeState, OctreeChanges, OctreeNode,
-        PlanetMeshRequest,
+        PlanetLodSettings, PlanetMeshRequest,
     },
     planet::{Planet, PlanetTerrainEdits},
     universe::StarSystemComponent,
@@ -245,6 +245,9 @@ pub fn create_planet(
     let terrain_edits = PlanetTerrainEdits {
         modified_chunks: HashMap::new(),
     };
+    let lod_strength = world
+        .get_resource::<PlanetLodSettings>()
+        .map_or(1.0, |settings| settings.strength);
 
     let octree = Planet::create_octree(
         planet_position,
@@ -252,6 +255,7 @@ pub fn create_planet(
         &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
         planet_size as u32,
         chunk_size,
+        lod_strength,
         &terrain_edits,
     );
 
@@ -312,6 +316,10 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
     //    .map(|heightmap| Arc::clone(&heightmap));
 
     let mut changes = Vec::new();
+    let lod_strength = ctx
+        .world
+        .get_resource::<PlanetLodSettings>()
+        .map_or(1.0, |settings| settings.strength);
     let mut atmosphere_planet = None;
     {
         let mut query = Query::<(&mut Planet, &PlanetTerrainEdits)>::new(&mut ctx.world);
@@ -323,6 +331,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 entity,
                 planet.position,
                 planet_size,
+                lod_strength,
                 &mut changes,
                 None, //heightmap.as_deref(),
                 terrain_edits,

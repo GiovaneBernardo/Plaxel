@@ -1119,6 +1119,7 @@ dependencies = [
  "egui-winit",
  "egui_dock",
  "engine",
+ "game-types",
  "log",
  "puffin_egui",
  "rfd",

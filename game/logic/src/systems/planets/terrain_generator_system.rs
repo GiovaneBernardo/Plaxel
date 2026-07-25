@@ -1,4 +1,7 @@
-use engine::math::{Vec3, vec3};
+use engine::{
+    game_info,
+    math::{Vec3, vec3},
+};
 use game_types::{
     octree::OctreeNode,
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
@@ -22,6 +25,7 @@ pub trait PlanetExt {
         camera_position: &engine::math::Vec3,
         planet_size: u32,
         chunk_size: u32,
+        lod_strength: f32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode;
     fn collect_leaf_nodes(node: &OctreeNode, current_depth: u32, out: &mut Vec<(Vec3, f32, u32)>);
@@ -319,6 +323,7 @@ impl PlanetExt for Planet {
         camera_position: &engine::math::Vec3,
         planet_size: u32,
         chunk_size: u32,
+        lod_strength: f32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode {
         let r = planet_radius as f32 / 2.0;
@@ -334,6 +339,7 @@ impl PlanetExt for Planet {
             camera_position,
             planet_position,
             planet_size,
+            lod_strength,
             None,
             terrain_edits,
         )

@@ -12,6 +12,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 engine = { path = "../../engine" }
+game-types = { path = "../../game/types" }
 anyhow = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }

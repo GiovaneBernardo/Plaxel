@@ -3,6 +3,19 @@ use engine::math::Vec3;
 
 use crate::planet::PlanetVertex;
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlanetLodSettings {
+    /// Scales how far from the camera octree nodes split and merge.
+    /// Values above 1.0 keep higher-detail nodes farther away.
+    pub strength: f32,
+}
+
+impl Default for PlanetLodSettings {
+    fn default() -> Self {
+        Self { strength: 1.0 }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum NodeState {
     Leaf,

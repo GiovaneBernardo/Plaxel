@@ -93,6 +93,7 @@ web-time = "1.1"
 
 [profile.dev]
 codegen-units = 32
+opt-level = 3
 
 [profile.release]
 strip = true

@@ -16,6 +16,7 @@ use engine::{
     },
     ecs::entity::Entity,
 };
+use game_types::octree::PlanetLodSettings;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -141,7 +142,7 @@ impl EditorUi {
         sanitize_selection.call((self, state));
 
         let mut top_toolbar = subsecond::HotFn::current(Self::top_toolbar);
-        top_toolbar.call((self, ctx));
+        top_toolbar.call((self, ctx, state));
 
         let mut status_bar = subsecond::HotFn::current(Self::status_bar);
         status_bar.call((&*self, ctx, &*state));
@@ -175,7 +176,7 @@ impl EditorUi {
         save_layout.call((self, ctx));
     }
 
-    fn top_toolbar(&mut self, ctx: &egui::Context) {
+    fn top_toolbar(&mut self, ctx: &egui::Context, state: &mut engine::State) {
         egui::TopBottomPanel::top("editor_top_toolbar")
             .exact_height(44.0)
             .frame(egui::Frame::default().fill(Color32::from_rgb(24, 27, 31)))
@@ -213,6 +214,21 @@ impl EditorUi {
                     );
                     ui.label("1.00x");
                     ui.separator();
+                    if let Some(scene) = state.active_scene_mut()
+                        && let Some(mut lod) =
+                            scene.world_mut().get_resource_mut::<PlanetLodSettings>()
+                    {
+                        ui.label("LOD");
+                        ui.add(
+                            egui::Slider::new(&mut lod.strength, 0.25..=4.0)
+                                .logarithmic(true)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text(
+                            "Higher values keep detailed terrain farther from the camera",
+                        );
+                        ui.separator();
+                    }
                     ui.toggle_value(&mut self.maximize_viewport, "Maximize Game");
                     if self.maximize_viewport {
                         ui.toggle_value(&mut self.floating_hierarchy, "Hierarchy");

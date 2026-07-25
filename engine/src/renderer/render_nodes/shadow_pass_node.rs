@@ -3,14 +3,19 @@ use std::any::Any;
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    core::camera::OPENGL_TO_WGPU_MATRIX,
     math::{Mat4, Vec3},
     renderer::core::*,
 };
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
-const SHADOW_HALF_EXTENT: f32 = 12_000.0;
-const SHADOW_DEPTH_RANGE: f32 = 40_000.0;
+// Keep the single local shadow map around the player. In particular, do not include the
+// opposite side of a planet in the caster volume.
+const SHADOW_MAX_DISTANCE: f32 = 1_000.0;
+const SHADOW_HALF_EXTENT: f32 = SHADOW_MAX_DISTANCE;
+const SHADOW_DEPTH_RANGE: f32 = SHADOW_MAX_DISTANCE * 2.0;
+// The orthographic shadow projection has linear depth. Express the receiver bias in world
+// units so changing the shadow range does not silently turn a small bias into tens of metres.
+const SHADOW_DEPTH_BIAS_WORLD: f32 = 1.0;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -47,8 +52,8 @@ impl ShadowPassNode {
             color_attachments: Vec::new(),
             depth_attachment: Some(DepthAttachmentDescriptor {
                 name: "shadow_depth_map",
-                // The whole renderer uses reverse-Z.
-                load_op: AttachmentLoadOp::ClearDepth(0.0),
+                // Shadows use conventional depth independently of the main reverse-Z camera.
+                load_op: AttachmentLoadOp::ClearDepth(1.0),
                 store: true,
             }),
             input_textures: Vec::new(),
@@ -89,7 +94,8 @@ impl ShadowPassNode {
             Vec3::Y
         };
         let view = Mat4::look_at_rh(eye, center, up);
-        let projection = Mat4::orthographic_rh_gl(
+        // `orthographic_rh` maps depth directly to wgpu's [0, 1] range: near = 0, far = 1.
+        let projection = Mat4::orthographic_rh(
             -SHADOW_HALF_EXTENT,
             SHADOW_HALF_EXTENT,
             -SHADOW_HALF_EXTENT,
@@ -97,12 +103,12 @@ impl ShadowPassNode {
             0.1,
             SHADOW_DEPTH_RANGE,
         );
-        let view_proj = OPENGL_TO_WGPU_MATRIX * projection * view;
+        let view_proj = projection * view;
 
         ShadowUniform {
             view_proj: view_proj.to_cols_array_2d(),
             light_direction: light_direction.to_array(),
-            depth_bias: 0.0008,
+            depth_bias: SHADOW_DEPTH_BIAS_WORLD / (SHADOW_DEPTH_RANGE - 0.1),
         }
     }
 }
@@ -222,5 +228,39 @@ impl RenderNode for ShadowPassNode {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_projection_uses_standard_depth_and_faces_the_light() {
+        let camera_position = Vec3::new(120.0, 8_500.0, -75.0);
+        let uniform = ShadowPassNode::uniform(camera_position);
+        let view_proj = Mat4::from_cols_array_2d(&uniform.view_proj);
+        let light_direction = Vec3::from_array(uniform.light_direction);
+
+        let toward_light = view_proj
+            .project_point3(camera_position + light_direction * (SHADOW_MAX_DISTANCE * 0.5));
+        let away_from_light = view_proj
+            .project_point3(camera_position - light_direction * (SHADOW_MAX_DISTANCE * 0.5));
+
+        assert!(toward_light.z < away_from_light.z);
+        assert!((toward_light.z - 0.25).abs() < 0.001);
+        assert!((away_from_light.z - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn starting_terrain_is_inside_the_local_shadow_volume() {
+        let camera_position = Vec3::new(0.0, 8_573.0, 0.0);
+        let terrain_position = Vec3::new(0.0, 8_192.0, 0.0);
+        let uniform = ShadowPassNode::uniform(camera_position);
+        let ndc = Mat4::from_cols_array_2d(&uniform.view_proj).project_point3(terrain_position);
+
+        assert!(ndc.x.abs() <= 1.0, "shadow x was {}", ndc.x);
+        assert!(ndc.y.abs() <= 1.0, "shadow y was {}", ndc.y);
+        assert!((0.0..=1.0).contains(&ndc.z), "shadow depth was {}", ndc.z);
     }
 }

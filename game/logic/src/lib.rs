@@ -11,7 +11,6 @@ use engine::core::physics::physics::Physics;
 use engine::math::Vec3;
 use engine::math::{Quat, vec3};
 use engine::model::Vertex;
-use engine::renderer::CullMode;
 use engine::renderer::Topology;
 use engine::renderer::{
     BindGroupDescriptor, BindGroupEntry, BindGroupHandle, BindGroupLayoutDescriptor,
@@ -19,8 +18,9 @@ use engine::renderer::{
     FrameBindings, PipelineHandle, RenderObjectId, ShaderStages, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSize, TextureUsages,
 };
+use engine::renderer::{CompareFunction, CullMode, DepthState};
 use engine::renderer::{DebugPassNode, GeometryPassNode};
-use game_types::octree::NodeKey;
+use game_types::octree::{NodeKey, PlanetLodSettings};
 use game_types::planet::PlanetInstance;
 use game_types::planet::{GpuPlanetTerrainMaterial, Planet, PlanetVertex};
 pub use game_types::render_graph;
@@ -199,8 +199,17 @@ pub fn initialize_game_state(state: &mut engine::State) {
         .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
         .with_cull(CullMode::Back);
     solid_material.configure_pass(engine::renderer::material_passes::SHADOW, |pass| {
+        pass.pipeline.shader = "shaders/shadow_depth.wgsl".into();
         pass.vertex_entry = "vs_shadow".into();
         pass.fragment_entry = None;
+        // Terrain is a closed procedural surface. Make its shadow caster pass two-sided so
+        // winding, steep overhangs, and the light's position around the planet cannot cull
+        // the complete local caster set before depth rasterization.
+        pass.pipeline.cull_mode = CullMode::None;
+        pass.pipeline.depth_state = Some(DepthState {
+            write_enabled: true,
+            compare: CompareFunction::Less,
+        });
     });
 
     let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
@@ -366,6 +375,7 @@ pub fn initialize_game_state(state: &mut engine::State) {
         mode: GameMode::Walking,
     });
     world.insert_resource(InputMap::default());
+    world.insert_resource(PlanetLodSettings::default());
     //load_earth_heightmap_resource(world);
 
     let velocity_sample_pos = camera.position;

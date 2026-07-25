@@ -12,7 +12,9 @@ use crate::{
     sdf::{EarthHeightmap, TERRAIN_EDIT_BRICK_SIZE, sdf_at_center},
 };
 
-const THRESHOLD: f32 = 0.8;
+const INITIAL_SPLIT_DISTANCE_FACTOR: f32 = 1.25;
+const SPLIT_DISTANCE_FACTOR: f32 = 4.0;
+const MERGE_DISTANCE_FACTOR: f32 = 6.0;
 
 #[allow(dead_code)]
 pub static OCTREE_DEBUG_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -42,11 +44,10 @@ pub fn is_behind_horizon(node_center: Vec3, camera_pos: Vec3, planet_center: Vec
     to_node.dot(to_camera) < 0.0
 }
 
-pub fn should_subdivide(node: OctreeNode, camera_pos: Vec3) -> bool {
-    let center = node.min + vec3(node.size * 0.5, node.size * 0.5, node.size * 0.5);
-    let dist = (center - camera_pos).length();
-    let error = node.size / dist;
-    error > THRESHOLD
+pub fn should_subdivide(node: &OctreeNode, camera_pos: Vec3, lod_strength: f32) -> bool {
+    let center = node.min + Vec3::splat(node.size * 0.5);
+    let distance = (center - camera_pos).length();
+    distance < node.size * INITIAL_SPLIT_DISTANCE_FACTOR * lod_strength
 }
 
 pub fn build_node(
@@ -57,6 +58,7 @@ pub fn build_node(
     camera_position: &engine::math::Vec3,
     planet_center: Vec3,
     planet_size: u32,
+    lod_strength: f32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> OctreeNode {
@@ -97,8 +99,9 @@ pub fn build_node(
 
         if size <= min_size
             || !should_subdivide(
-                leaf,
+                &leaf,
                 vec3(camera_position.x, camera_position.y, camera_position.z),
+                lod_strength,
             )
         {
             return OctreeNode {
@@ -123,6 +126,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -134,6 +138,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -145,6 +150,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -156,6 +162,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -167,6 +174,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -178,6 +186,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -189,6 +198,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -200,6 +210,7 @@ pub fn build_node(
             camera_position,
             planet_center,
             planet_size,
+            lod_strength,
             heightmap,
             terrain_edits,
         )),
@@ -335,6 +346,7 @@ pub fn update(
     planet_entity: Entity,
     planet_position: Vec3,
     planet_size: u32,
+    lod_strength: f32,
     changes: &mut Vec<OctreeChanges>,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
@@ -368,6 +380,7 @@ pub fn update(
         planet_position,
         min_node_size,
         planet_size,
+        lod_strength,
         terrain_edits,
     ) {
         split_node(
@@ -382,7 +395,7 @@ pub fn update(
         return;
     }
 
-    if !is_root_node && should_merge(node, camera_pos, min_node_size) {
+    if !is_root_node && should_merge(node, camera_pos, min_node_size, lod_strength) {
         merge_node(node, changes, planet_entity, planet_position, planet_size);
         return;
     }
@@ -395,6 +408,7 @@ pub fn update(
                 planet_entity,
                 planet_position,
                 planet_size,
+                lod_strength,
                 changes,
                 heightmap,
                 terrain_edits,
@@ -515,6 +529,7 @@ pub fn should_split(
     planet_position: Vec3,
     min_node_size: f32,
     planet_size: u32,
+    lod_strength: f32,
     terrain_edits: &PlanetTerrainEdits,
 ) -> bool {
     if node.children.is_some() {
@@ -535,12 +550,17 @@ pub fn should_split(
     }
 
     let distance = bounds.distance_to_point(camera_pos);
-    let split_distance = bounds.size() * 4.0;
+    let split_distance = bounds.size() * SPLIT_DISTANCE_FACTOR * lod_strength;
 
     distance < split_distance
 }
 
-pub fn should_merge(node: &OctreeNode, camera_pos: engine::math::Vec3, min_node_size: f32) -> bool {
+pub fn should_merge(
+    node: &OctreeNode,
+    camera_pos: engine::math::Vec3,
+    min_node_size: f32,
+    lod_strength: f32,
+) -> bool {
     if node.children.is_none() {
         return false;
     }
@@ -552,7 +572,7 @@ pub fn should_merge(node: &OctreeNode, camera_pos: engine::math::Vec3, min_node_
     }
 
     let distance = bounds.distance_to_point(camera_pos);
-    let merge_distance = bounds.size() * 6.0;
+    let merge_distance = bounds.size() * MERGE_DISTANCE_FACTOR * lod_strength;
 
     distance > merge_distance
 }
