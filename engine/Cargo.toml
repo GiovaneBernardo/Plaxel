@@ -39,6 +39,17 @@ subsecond = { workspace = true }
 renderdoc = { workspace = true }
 libloading = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+rustc-demangle = { workspace = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { workspace = true }
 console_log = { workspace = true }

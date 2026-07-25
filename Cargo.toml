@@ -41,6 +41,7 @@ rayon = "1.10"
 crossbeam-channel = "0.5"
 num_cpus = "1.17.0"
 parking_lot = "0.12"
+rustc-demangle = "0.1"
 
 
 # Image
@@ -98,6 +99,15 @@ opt-level = 3
 [profile.release]
 strip = true
 codegen-units = 1
+
+# Optimized builds that retain PDB/source information for the automatic CPU
+# profiler. Run with `cargo run --profile profiling ...`.
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"
+lto = false
+codegen-units = 16
 
 [patch.crates-io]
 hot-lib-reloader = { path = "third_party/hot-lib-reloader" }

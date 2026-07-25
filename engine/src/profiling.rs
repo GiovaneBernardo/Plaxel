@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod cpu;
+
 const MAX_FRAMES: usize = 120;
 const MAX_SCOPES_PER_FRAME: usize = 1024;
 const MAX_COUNTERS_PER_FRAME: usize = 256;
@@ -56,6 +58,7 @@ pub struct ProfileSnapshot {
     pub latest_scopes: Vec<ScopeSummary>,
     pub average_frame_us: f64,
     pub max_frame_us: f64,
+    pub cpu: cpu::CpuProfileSnapshot,
 }
 
 impl Default for ProfileSnapshot {
@@ -69,6 +72,7 @@ impl Default for ProfileSnapshot {
             latest_scopes: Vec::new(),
             average_frame_us: 0.0,
             max_frame_us: 0.0,
+            cpu: cpu::snapshot(),
         }
     }
 }
@@ -153,6 +157,7 @@ pub fn external_scopes_enabled() -> bool {
 }
 
 pub fn begin_frame(index: u64) {
+    cpu::mark_frame(index);
     if !is_enabled() {
         return;
     }
@@ -213,6 +218,7 @@ pub fn record_counter(name: &'static str, value: f64) {
 }
 
 pub fn snapshot() -> ProfileSnapshot {
+    cpu::poll();
     let profiler = PROFILER.lock().unwrap();
     let frames = profiler.frames.iter().cloned().collect::<Vec<_>>();
     let latest_frame = frames.last().cloned();
@@ -240,6 +246,7 @@ pub fn snapshot() -> ProfileSnapshot {
         latest_scopes,
         average_frame_us,
         max_frame_us,
+        cpu: cpu::snapshot(),
     }
 }
 

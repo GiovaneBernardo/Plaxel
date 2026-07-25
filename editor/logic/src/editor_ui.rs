@@ -1384,6 +1384,9 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, show_puffin_profiler: &
         puffin_egui::profiler_window(ui.ctx());
     }
 
+    draw_cpu_profiler(ui, &snapshot.cpu);
+    ui.separator();
+
     if snapshot.frames.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
@@ -1464,12 +1467,358 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, show_puffin_profiler: &
     });
 }
 
-fn metric_pill(ui: &mut Ui, label: &str, value: String) {
+fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileSnapshot) {
+    use engine::profiling::cpu::CpuCaptureState;
+
+    egui::CollapsingHeader::new(RichText::new("Automatic CPU Sampling").strong())
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                match snapshot.state {
+                    CpuCaptureState::Capturing | CpuCaptureState::Processing => {
+                        if ui.button("Stop capture").clicked() {
+                            engine::profiling::cpu::stop_capture();
+                        }
+                    }
+                    _ if snapshot.supported => {
+                        for seconds in [1, 3, 5] {
+                            if ui.button(format!("Capture {seconds}s")).clicked() {
+                                if let Err(error) = engine::profiling::cpu::start_capture(
+                                    std::time::Duration::from_secs(seconds),
+                                ) {
+                                    log::error!("Could not start CPU capture: {error}");
+                                }
+                            }
+                        }
+                        if snapshot.total_samples > 0 && ui.button("Clear CPU capture").clicked() {
+                            engine::profiling::cpu::clear_capture();
+                        }
+                    }
+                    _ => {}
+                }
+
+                ui.separator();
+                ui.label(snapshot.status.as_str());
+            });
+
+            if snapshot.state == CpuCaptureState::Capturing {
+                let requested = snapshot.requested_duration.as_secs_f32().max(0.001);
+                ui.add(
+                    egui::ProgressBar::new(
+                        (snapshot.elapsed.as_secs_f32() / requested).clamp(0.0, 1.0),
+                    )
+                    .show_percentage()
+                    .text(format!(
+                        "{:.1} / {:.1} seconds",
+                        snapshot.elapsed.as_secs_f32(),
+                        requested
+                    )),
+                );
+            }
+
+            if snapshot.total_samples == 0 {
+                ui.label(
+                    "This profiler requires no scope markers. It samples native Rust, crate, \
+                     Windows, and driver call stacks wherever matching symbols are available.",
+                );
+                return;
+            }
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                metric_pill(ui, "CPU samples", snapshot.total_samples.to_string());
+                metric_pill(ui, "Stacks", snapshot.distinct_stacks.to_string());
+                metric_pill(
+                    ui,
+                    "Duration",
+                    format!("{:.2} s", snapshot.elapsed.as_secs_f64()),
+                );
+                metric_pill(
+                    ui,
+                    "Est. CPU/frame",
+                    format!(
+                        "{:.2} ms",
+                        estimated_cpu_ms_per_frame(snapshot, snapshot.total_samples)
+                    ),
+                )
+                .response
+                .on_hover_text(
+                    "Estimated processor time per engine frame across all sampled threads. \
+                     This can exceed wall-clock frame time when threads run in parallel.",
+                );
+                metric_pill(ui, "Frames", snapshot.captured_frames.to_string());
+            });
+            ui.add_space(6.0);
+
+            egui::CollapsingHeader::new("Function hotspots (Self CPU)")
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt("cpu_function_hotspots")
+                        .max_height(360.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            egui::Grid::new("cpu_function_hotspot_grid")
+                                .num_columns(6)
+                                .striped(true)
+                                .spacing(egui::vec2(12.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("Self").strong());
+                                    ui.label(RichText::new("Self ms/f").strong());
+                                    ui.label(RichText::new("Total").strong());
+                                    ui.label(RichText::new("Total ms/f").strong());
+                                    ui.label(RichText::new("Function").strong());
+                                    ui.label(RichText::new("Source / module").strong());
+                                    ui.end_row();
+
+                                    for hotspot in snapshot.functions.iter().take(300) {
+                                        ui.monospace(cpu_percent(
+                                            hotspot.self_samples,
+                                            snapshot.total_samples,
+                                        ));
+                                        ui.monospace(format!(
+                                            "{:.3}",
+                                            estimated_cpu_ms_per_frame(
+                                                snapshot,
+                                                hotspot.self_samples
+                                            )
+                                        ));
+                                        ui.monospace(cpu_percent(
+                                            hotspot.inclusive_samples,
+                                            snapshot.total_samples,
+                                        ));
+                                        ui.monospace(format!(
+                                            "{:.3}",
+                                            estimated_cpu_ms_per_frame(
+                                                snapshot,
+                                                hotspot.inclusive_samples
+                                            )
+                                        ));
+                                        ui.label(hotspot.function.as_str())
+                                            .on_hover_text(hotspot.function.as_str());
+                                        let location = cpu_location(
+                                            hotspot.file.as_deref(),
+                                            hotspot.line,
+                                            &hotspot.module,
+                                        );
+                                        ui.label(location)
+                                            .on_hover_text(hotspot.file.as_deref().unwrap_or(""));
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+
+            egui::CollapsingHeader::new("Top-down call tree").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("cpu_call_tree")
+                    .max_height(420.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for node in snapshot.call_tree.iter().take(64) {
+                            draw_cpu_call_tree_node(ui, node, snapshot, 0);
+                        }
+                    });
+            });
+
+            egui::CollapsingHeader::new("Bottom-up callers").show(ui, |ui| {
+                ui.label(
+                    "Starts at the code that was executing, then expands toward the callers \
+                     responsible for it.",
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("cpu_bottom_up")
+                    .max_height(420.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for node in snapshot.bottom_up.iter().take(64) {
+                            draw_cpu_call_tree_node(ui, node, snapshot, 0);
+                        }
+                    });
+            });
+
+            egui::CollapsingHeader::new("Hot source lines").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("cpu_source_lines")
+                    .max_height(320.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("cpu_source_line_grid")
+                            .num_columns(5)
+                            .striped(true)
+                            .spacing(egui::vec2(12.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Self").strong());
+                                ui.label(RichText::new("Self ms/f").strong());
+                                ui.label(RichText::new("Total").strong());
+                                ui.label(RichText::new("Total ms/f").strong());
+                                ui.label(RichText::new("Source line").strong());
+                                ui.end_row();
+                                for source in snapshot.source_lines.iter().take(300) {
+                                    ui.monospace(cpu_percent(
+                                        source.self_samples,
+                                        snapshot.total_samples,
+                                    ));
+                                    ui.monospace(format!(
+                                        "{:.3}",
+                                        estimated_cpu_ms_per_frame(snapshot, source.self_samples)
+                                    ));
+                                    ui.monospace(cpu_percent(
+                                        source.inclusive_samples,
+                                        snapshot.total_samples,
+                                    ));
+                                    ui.monospace(format!(
+                                        "{:.3}",
+                                        estimated_cpu_ms_per_frame(
+                                            snapshot,
+                                            source.inclusive_samples
+                                        )
+                                    ));
+                                    ui.label(format!(
+                                        "{}:{}",
+                                        short_source_path(&source.file),
+                                        source.line
+                                    ))
+                                    .on_hover_text(source.file.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+
+            egui::CollapsingHeader::new("Source-file costs").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("cpu_source_files")
+                    .max_height(300.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("cpu_source_file_grid")
+                            .num_columns(5)
+                            .striped(true)
+                            .spacing(egui::vec2(12.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Self").strong());
+                                ui.label(RichText::new("Self ms/f").strong());
+                                ui.label(RichText::new("Total").strong());
+                                ui.label(RichText::new("Total ms/f").strong());
+                                ui.label(RichText::new("Source file").strong());
+                                ui.end_row();
+                                for source in snapshot.source_files.iter().take(300) {
+                                    ui.monospace(cpu_percent(
+                                        source.self_samples,
+                                        snapshot.total_samples,
+                                    ));
+                                    ui.monospace(format!(
+                                        "{:.3}",
+                                        estimated_cpu_ms_per_frame(snapshot, source.self_samples)
+                                    ));
+                                    ui.monospace(cpu_percent(
+                                        source.inclusive_samples,
+                                        snapshot.total_samples,
+                                    ));
+                                    ui.monospace(format!(
+                                        "{:.3}",
+                                        estimated_cpu_ms_per_frame(
+                                            snapshot,
+                                            source.inclusive_samples
+                                        )
+                                    ));
+                                    ui.label(short_source_path(&source.file))
+                                        .on_hover_text(source.file.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+
+            egui::CollapsingHeader::new("Sampled threads").show(ui, |ui| {
+                for thread in &snapshot.threads {
+                    ui.horizontal(|ui| {
+                        ui.monospace(cpu_percent(thread.samples, snapshot.total_samples));
+                        ui.label(format!("Windows thread {}", thread.thread_id));
+                    });
+                }
+            });
+        });
+}
+
+fn draw_cpu_call_tree_node(
+    ui: &mut Ui,
+    node: &engine::profiling::cpu::CpuCallTreeNode,
+    snapshot: &engine::profiling::cpu::CpuProfileSnapshot,
+    depth: usize,
+) {
+    let location = cpu_location(node.file.as_deref(), node.line, &node.module);
+    let label = format!(
+        "{} total ({:.3} ms/f)  {} self ({:.3} ms/f)  {}  [{}]",
+        cpu_percent(node.inclusive_samples, snapshot.total_samples),
+        estimated_cpu_ms_per_frame(snapshot, node.inclusive_samples),
+        cpu_percent(node.self_samples, snapshot.total_samples),
+        estimated_cpu_ms_per_frame(snapshot, node.self_samples),
+        node.function,
+        location
+    );
+
+    if node.children.is_empty() || depth >= 48 {
+        ui.label(label)
+            .on_hover_text(node.file.as_deref().unwrap_or(node.function.as_str()));
+        return;
+    }
+
+    egui::CollapsingHeader::new(label)
+        .id_salt((
+            depth,
+            node.function.as_str(),
+            node.inclusive_samples,
+            node.self_samples,
+        ))
+        .show(ui, |ui| {
+            for child in node.children.iter().take(128) {
+                draw_cpu_call_tree_node(ui, child, snapshot, depth + 1);
+            }
+        });
+}
+
+fn estimated_cpu_ms_per_frame(
+    snapshot: &engine::profiling::cpu::CpuProfileSnapshot,
+    samples: u64,
+) -> f64 {
+    samples as f64 * snapshot.sample_interval.as_secs_f64() * 1_000.0
+        / snapshot.captured_frames.max(1) as f64
+}
+
+fn cpu_percent(samples: u64, total_samples: u64) -> String {
+    format!(
+        "{:6.2}%",
+        samples as f64 * 100.0 / total_samples.max(1) as f64
+    )
+}
+
+fn cpu_location(file: Option<&str>, line: Option<u32>, module: &str) -> String {
+    match (file, line) {
+        (Some(file), Some(line)) => format!("{}:{line}", short_source_path(file)),
+        (Some(file), None) => short_source_path(file),
+        (None, _) if !module.is_empty() => module.to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn short_source_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    for marker in ["/engine/", "/editor/", "/game/", "/src/"] {
+        if let Some(index) = normalized.rfind(marker) {
+            return normalized[index + 1..].to_string();
+        }
+    }
+    normalized
+}
+
+fn metric_pill(ui: &mut Ui, label: &str, value: String) -> egui::InnerResponse<()> {
     ui.group(|ui| {
         ui.set_min_width(112.0);
         ui.label(RichText::new(label).color(Color32::from_rgb(165, 176, 188)));
         ui.label(RichText::new(value).strong());
-    });
+    })
 }
 
 fn draw_frame_time_graph(ui: &mut Ui, frames: &[engine::profiling::FrameSample]) {
