@@ -1,5 +1,5 @@
 use engine::math::{Vec3, vec3};
-use game_types::planet::{PlanetTerrainEdits, TerrainBrickKey};
+use game_types::planet::{PlanetTerrainEdits, TerrainBrickKey, TerrainBrickSamples};
 
 const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
 const EARTH_HIGHEST_ALTITUDE_METERS: f32 = 8_848.86;
@@ -8,6 +8,8 @@ const EARTH_BROAD_DETAIL_SCALE: f32 = 0.18;
 const EARTH_RIDGE_DETAIL_SCALE: f32 = 0.12;
 const EARTH_FINE_DETAIL_SCALE: f32 = 0.035;
 pub const TERRAIN_EDIT_BRICK_SIZE: f32 = 32.0;
+pub const TERRAIN_EDIT_CELL_COUNT: usize = 16;
+pub const TERRAIN_EDIT_SAMPLE_COUNT: usize = TERRAIN_EDIT_CELL_COUNT + 1;
 const TERRAIN_EDIT_LEVEL: u32 = 0;
 
 pub struct EarthHeightmap {
@@ -167,29 +169,12 @@ pub fn fbm(p: Vec3, octaves: u32) -> f32 {
     value
 }
 
-pub fn sample_terrain_edit(local_p: Vec3, terrain_edits: &PlanetTerrainEdits) -> f32 {
-    let key = TerrainBrickKey {
-        x: (local_p.x / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
-        y: (local_p.y / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
-        z: (local_p.z / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
-        level: TERRAIN_EDIT_LEVEL,
-    };
-
-    let Some(brick) = terrain_edits.modified_chunks.get(&key) else {
-        return 0.0;
-    };
-
+fn sample_terrain_brick(brick: &TerrainBrickSamples, uvw: Vec3) -> f32 {
     let resolution = brick.len();
     if resolution == 0 {
         return 0.0;
     }
 
-    let brick_min = vec3(
-        key.x as f32 * TERRAIN_EDIT_BRICK_SIZE,
-        key.y as f32 * TERRAIN_EDIT_BRICK_SIZE,
-        key.z as f32 * TERRAIN_EDIT_BRICK_SIZE,
-    );
-    let uvw = (local_p - brick_min) / TERRAIN_EDIT_BRICK_SIZE;
     let max_index = resolution.saturating_sub(1);
     if max_index == 0 {
         return brick[0]
@@ -237,6 +222,64 @@ pub fn sample_terrain_edit(local_p: Vec3, terrain_edits: &PlanetTerrainEdits) ->
     let c1 = lerp(c01, c11, ty);
 
     lerp(c0, c1, tz)
+}
+
+pub fn resample_terrain_edit_brick(
+    brick: &TerrainBrickSamples,
+    sample_count: usize,
+) -> TerrainBrickSamples {
+    if sample_count == 0 {
+        return Vec::new();
+    }
+    if brick.len() == sample_count
+        && brick.iter().all(|plane| {
+            plane.len() == sample_count && plane.iter().all(|row| row.len() == sample_count)
+        })
+    {
+        return brick.clone();
+    }
+
+    let denominator = sample_count.saturating_sub(1).max(1) as f32;
+    (0..sample_count)
+        .map(|x| {
+            (0..sample_count)
+                .map(|y| {
+                    (0..sample_count)
+                        .map(|z| {
+                            sample_terrain_brick(
+                                brick,
+                                vec3(
+                                    x as f32 / denominator,
+                                    y as f32 / denominator,
+                                    z as f32 / denominator,
+                                ),
+                            )
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub fn sample_terrain_edit(local_p: Vec3, terrain_edits: &PlanetTerrainEdits) -> f32 {
+    let key = TerrainBrickKey {
+        x: (local_p.x / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        y: (local_p.y / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        z: (local_p.z / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        level: TERRAIN_EDIT_LEVEL,
+    };
+
+    let Some(brick) = terrain_edits.modified_chunks.get(&key) else {
+        return 0.0;
+    };
+
+    let brick_min = vec3(
+        key.x as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        key.y as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        key.z as f32 * TERRAIN_EDIT_BRICK_SIZE,
+    );
+    sample_terrain_brick(brick, (local_p - brick_min) / TERRAIN_EDIT_BRICK_SIZE)
 }
 
 pub fn sdf_at_center(
@@ -353,4 +396,57 @@ pub fn spherical_terrain_height(dir: Vec3, planet_r: f32) -> f32 {
     let detail = (fbm(warped_dir * 72.0, 3) - 0.5) * planet_r * 0.004;
 
     continent_height + mountain_height + detail * mountain_mask
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use game_types::{
+        octree::DensityRange,
+        planet::{PlanetTerrainEdits, TerrainBrickKey},
+    };
+
+    use super::*;
+
+    fn linear_x_brick(brick_x: i32) -> Vec<Vec<Vec<f32>>> {
+        let spacing = TERRAIN_EDIT_BRICK_SIZE / TERRAIN_EDIT_CELL_COUNT as f32;
+        (0..TERRAIN_EDIT_SAMPLE_COUNT)
+            .map(|x| {
+                let value = brick_x as f32 * TERRAIN_EDIT_BRICK_SIZE + x as f32 * spacing;
+                vec![vec![value; TERRAIN_EDIT_SAMPLE_COUNT]; TERRAIN_EDIT_SAMPLE_COUNT]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adjacent_edit_bricks_share_endpoint_samples() {
+        let key0 = TerrainBrickKey {
+            x: 0,
+            y: 0,
+            z: 0,
+            level: 0,
+        };
+        let key1 = TerrainBrickKey {
+            x: 1,
+            y: 0,
+            z: 0,
+            level: 0,
+        };
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::from([
+                (key0, Arc::new(linear_x_brick(0))),
+                (key1, Arc::new(linear_x_brick(1))),
+            ]),
+            modified_ranges: HashMap::from([
+                (key0, DensityRange::new(0.0, 32.0)),
+                (key1, DensityRange::new(32.0, 64.0)),
+            ]),
+        };
+
+        for x in [31.5, 32.0, 32.5] {
+            let sampled = sample_terrain_edit(vec3(x, 1.0, 1.0), &edits);
+            assert!((sampled - x).abs() < 1e-5);
+        }
+    }
 }

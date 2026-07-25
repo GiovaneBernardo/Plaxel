@@ -27,7 +27,7 @@ use rand::Rng;
 use web_time::{Duration, Instant};
 
 use crate::{
-    CHUNK_SIZE, GameCamera, GameState, octree,
+    CHUNK_CELL_COUNT, GameCamera, GameState, octree,
     sdf::{EarthHeightmap, base_sdf_at_center, sample_terrain_edit, sdf_at_center},
     systems::planets::PlanetExt,
 };
@@ -35,6 +35,7 @@ use crate::{
 use crossbeam_channel::{Receiver, Sender};
 
 type DensityGrid = Vec<Vec<Vec<f32>>>;
+const CHUNK_GRID_SAMPLE_COUNT: u32 = CHUNK_CELL_COUNT as u32 + 2;
 
 fn retain_render_data(
     renderer: &mut engine::renderer::Renderer,
@@ -409,7 +410,7 @@ pub fn build_requested_mesh(
         request.node_min_corner.z,
     );
 
-    let resolution = size / CHUNK_SIZE as f32;
+    let resolution = size / CHUNK_CELL_COUNT as f32;
     let key = NodeKey {
         x: min_corner.x as i32,
         y: min_corner.y as i32,
@@ -418,9 +419,9 @@ pub fn build_requested_mesh(
     };
     let base_grid = get_or_build_base_grid(
         key,
-        34,
-        34,
-        34,
+        CHUNK_GRID_SAMPLE_COUNT,
+        CHUNK_GRID_SAMPLE_COUNT,
+        CHUNK_GRID_SAMPLE_COUNT,
         resolution,
         min_corner,
         planet_position,
@@ -471,7 +472,7 @@ fn edits_for_mesh_request(
         };
     }
 
-    let mesh_sample_spacing = request.node_size / CHUNK_SIZE as f32;
+    let mesh_sample_spacing = request.node_size / CHUNK_CELL_COUNT as f32;
     let margin = mesh_sample_spacing * 2.0 + TERRAIN_EDIT_BRICK_SIZE;
     let local_min =
         request.node_min_corner - request.planet_position - vec3(margin, margin, margin);

@@ -28,7 +28,10 @@ use game_types::game_mode::{GameMode, GameModeState};
 
 use crate::{
     GameCamera, GameState, octree,
-    sdf::{EarthHeightmap, sdf_at_center},
+    sdf::{
+        EarthHeightmap, TERRAIN_EDIT_CELL_COUNT, TERRAIN_EDIT_SAMPLE_COUNT,
+        resample_terrain_edit_brick, sdf_at_center,
+    },
     systems::planets::submit_requested_mesh_urgent,
 };
 
@@ -541,7 +544,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                 return false;
                             }
 
-                            let resolution = 16usize;
+                            let sample_count = TERRAIN_EDIT_SAMPLE_COUNT;
                             let mut terrain_edits =
                                 world.get_mut::<PlanetTerrainEdits>(hit_entity).unwrap();
                             let PlanetTerrainEdits {
@@ -562,12 +565,25 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                             modified_chunks.entry(key).or_insert_with(|| {
                                                 Arc::new(vec![
                                                     vec![
-                                                        vec![0.0; resolution];
-                                                        resolution
+                                                        vec![0.0; sample_count];
+                                                        sample_count
                                                     ];
-                                                    resolution
+                                                    sample_count
                                                 ])
                                             });
+                                        if brick.len() != sample_count
+                                            || brick.iter().any(|plane| {
+                                                plane.len() != sample_count
+                                                    || plane
+                                                        .iter()
+                                                        .any(|row| row.len() != sample_count)
+                                            })
+                                        {
+                                            *brick = Arc::new(resample_terrain_edit_brick(
+                                                brick.as_ref(),
+                                                sample_count,
+                                            ));
+                                        }
                                         let brick = Arc::make_mut(brick);
 
                                         let brick_min = vec3(
@@ -575,21 +591,19 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                             key.y as f32 * brick_size,
                                             key.z as f32 * brick_size,
                                         );
-                                        let sample_spacing = brick_size / resolution as f32;
+                                        let sample_spacing =
+                                            brick_size / TERRAIN_EDIT_CELL_COUNT as f32;
                                         let mut range_min = f32::INFINITY;
                                         let mut range_max = f32::NEG_INFINITY;
 
-                                        for sample_x in 0..resolution {
-                                            for sample_y in 0..resolution {
-                                                for sample_z in 0..resolution {
+                                        for sample_x in 0..sample_count {
+                                            for sample_y in 0..sample_count {
+                                                for sample_z in 0..sample_count {
                                                     let sample_position = brick_min
                                                         + vec3(
-                                                            (sample_x as f32 + 0.5)
-                                                                * sample_spacing,
-                                                            (sample_y as f32 + 0.5)
-                                                                * sample_spacing,
-                                                            (sample_z as f32 + 0.5)
-                                                                * sample_spacing,
+                                                            sample_x as f32 * sample_spacing,
+                                                            sample_y as f32 * sample_spacing,
+                                                            sample_z as f32 * sample_spacing,
                                                         );
                                                     let distance_from_hit =
                                                         (sample_position - hit_local).length();

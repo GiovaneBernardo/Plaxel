@@ -153,6 +153,7 @@ pub struct GpuPlanetTerrainMaterial {
 }
 
 pub enum VoxelMaterial {
+    Unknown,
     Air,
     Water,
     Dirt,

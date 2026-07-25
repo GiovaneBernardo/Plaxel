@@ -128,7 +128,8 @@ struct ChunkBounds {
 const UPLOAD_BUDGET: Duration = Duration::from_millis(2);
 
 const PLANET_SIZE: usize = 65536 * 1;
-const CHUNK_SIZE: usize = 32;
+/// Number of dual-contouring cells owned by each chunk along one axis.
+const CHUNK_CELL_COUNT: usize = 32;
 const BRICK_LOD_RADII: [f32; 7] = [160.0, 448.0, 1024.0, 2048.0, 4096.0, 8192.0, f32::MAX];
 const MAX_DEBUG_BRICKS: usize = 512;
 const BRICK_REBUILD_DISTANCE: f32 = 64.0;

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use engine::{
     game_info,
     math::{Vec3, vec3},
@@ -130,13 +132,26 @@ fn contour_cell_vertex(
         return None;
     }
 
-    let size_x = grid.len();
-    let size_y = grid[0].len();
-    let size_z = grid[0][0].len();
     let average_position = Vec3::from(average);
-    let dx = grid[(x + 1).min(size_x - 1)][y][z] - grid[x.saturating_sub(1)][y][z];
-    let dy = grid[x][(y + 1).min(size_y - 1)][z] - grid[x][y.saturating_sub(1)][z];
-    let dz = grid[x][y][(z + 1).min(size_z - 1)] - grid[x][y][z.saturating_sub(1)];
+    let local = ((average_position - base) / resolution).clamp(Vec3::ZERO, Vec3::ONE);
+    let tx = local.x;
+    let ty = local.y;
+    let tz = local.z;
+
+    // Different chunks can represent the same boundary cell as either an
+    // owned cell or a ghost cell. Deriving the gradient solely from this
+    // cell's eight corners makes both copies produce an identical normal.
+    let dx0 = (corners[1] - corners[0]) * (1.0 - ty) + (corners[3] - corners[2]) * ty;
+    let dx1 = (corners[5] - corners[4]) * (1.0 - ty) + (corners[7] - corners[6]) * ty;
+    let dx = (dx0 * (1.0 - tz) + dx1 * tz) / resolution;
+
+    let dy0 = (corners[2] - corners[0]) * (1.0 - tx) + (corners[3] - corners[1]) * tx;
+    let dy1 = (corners[6] - corners[4]) * (1.0 - tx) + (corners[7] - corners[5]) * tx;
+    let dy = (dy0 * (1.0 - tz) + dy1 * tz) / resolution;
+
+    let dz0 = (corners[4] - corners[0]) * (1.0 - tx) + (corners[5] - corners[1]) * tx;
+    let dz1 = (corners[6] - corners[2]) * (1.0 - tx) + (corners[7] - corners[3]) * tx;
+    let dz = (dz0 * (1.0 - ty) + dz1 * ty) / resolution;
     let gradient = vec3(dx, dy, dz);
     let normal = if gradient.length_squared() > 1e-12 {
         gradient.normalize()
@@ -186,7 +201,9 @@ fn append_x_edge_indices(
     let size_y = grid[0].len();
     let size_z = grid[0][0].len();
 
-    for x in 0..(size_x - 1) {
+    // There is one positive-side ghost cell. It supplies boundary vertices but
+    // does not own edge segments along the edge's direction.
+    for x in 0..(size_x - 2) {
         for y in 1..(size_y - 1) {
             for z in 1..(size_z - 1) {
                 if grid[x][y][z] * grid[x + 1][y][z] >= 0.0 {
@@ -218,7 +235,7 @@ fn append_y_edge_indices(
     let size_z = grid[0][0].len();
 
     for x in 1..(size_x - 1) {
-        for y in 0..(size_y - 1) {
+        for y in 0..(size_y - 2) {
             for z in 1..(size_z - 1) {
                 if grid[x][y][z] * grid[x][y + 1][z] >= 0.0 {
                     continue;
@@ -250,7 +267,7 @@ fn append_z_edge_indices(
 
     for x in 1..(size_x - 1) {
         for y in 1..(size_y - 1) {
-            for z in 0..(size_z - 1) {
+            for z in 0..(size_z - 2) {
                 if grid[x][y][z] * grid[x][y][z + 1] >= 0.0 {
                     continue;
                 }
@@ -266,6 +283,66 @@ fn append_z_edge_indices(
                 }
             }
         }
+    }
+}
+
+fn append_boundary_skirts(vertices: &mut Vec<PlanetVertex>, indices: &mut Vec<u32>, depth: f32) {
+    if depth <= 0.0 || indices.is_empty() {
+        return;
+    }
+
+    // Preserve the directed form from the triangle that owns each boundary
+    // edge. Interior edges occur twice and are discarded.
+    let mut edges: HashMap<(u32, u32), (u32, u32, u32)> = HashMap::new();
+    for triangle in indices.chunks_exact(3) {
+        for (start, end) in [
+            (triangle[0], triangle[1]),
+            (triangle[1], triangle[2]),
+            (triangle[2], triangle[0]),
+        ] {
+            let key = if start < end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            edges
+                .entry(key)
+                .and_modify(|edge| edge.0 += 1)
+                .or_insert((1, start, end));
+        }
+    }
+
+    let mut extruded_vertices = HashMap::<u32, u32>::new();
+    for (_, (count, start, end)) in edges {
+        if count != 1 {
+            continue;
+        }
+
+        let mut extrude = |index: u32, vertices: &mut Vec<PlanetVertex>| {
+            *extruded_vertices.entry(index).or_insert_with(|| {
+                let mut vertex = vertices[index as usize];
+                vertex.position[0] -= vertex.normal[0] * depth;
+                vertex.position[1] -= vertex.normal[1] * depth;
+                vertex.position[2] -= vertex.normal[2] * depth;
+                let extruded_index = vertices.len() as u32;
+                vertices.push(vertex);
+                extruded_index
+            })
+        };
+
+        let start_extruded = extrude(start, vertices);
+        let end_extruded = extrude(end, vertices);
+
+        // The boundary edge follows the source triangle's winding. These two
+        // triangles face away from the solid when extrusion follows -normal.
+        indices.extend_from_slice(&[
+            start,
+            end_extruded,
+            end,
+            start,
+            start_extruded,
+            end_extruded,
+        ]);
     }
 }
 
@@ -313,6 +390,7 @@ impl PlanetExt for Planet {
         append_x_edge_indices(grid, &cell_vertex, &mut indices);
         append_y_edge_indices(grid, &cell_vertex, &mut indices);
         append_z_edge_indices(grid, &cell_vertex, &mut indices);
+        append_boundary_skirts(&mut vertices, &mut indices, resolution * 2.0);
 
         (vertices, indices)
     }
@@ -359,5 +437,114 @@ impl PlanetExt for Planet {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use game_types::planet::PlanetTerrainEdits;
+
+    use super::*;
+
+    fn empty_edits() -> PlanetTerrainEdits {
+        PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        }
+    }
+
+    fn density_grid(
+        sample_count: usize,
+        offset: Vec3,
+        density: impl Fn(Vec3) -> f32,
+    ) -> Vec<Vec<Vec<f32>>> {
+        (0..sample_count)
+            .map(|x| {
+                (0..sample_count)
+                    .map(|y| {
+                        (0..sample_count)
+                            .map(|z| density(offset + vec3(x as f32, y as f32, z as f32)))
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn positive_ghost_cell_does_not_emit_owned_edge_segments() {
+        // Four samples represent two owned cells plus one positive ghost cell.
+        // This surface exists only in the ghost cell at x = 2.
+        let grid = density_grid(4, Vec3::ZERO, |p| p.x - 2.5);
+        let (_, indices) =
+            Planet::dual_contour_grid(&grid, Vec3::ZERO, 1.0, Vec3::ZERO, 0, None, &empty_edits());
+
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn owned_cell_still_emits_geometry() {
+        let grid = density_grid(4, Vec3::ZERO, |p| p.x - 1.5);
+        let (_, indices) =
+            Planet::dual_contour_grid(&grid, Vec3::ZERO, 1.0, Vec3::ZERO, 0, None, &empty_edits());
+
+        assert!(!indices.is_empty());
+    }
+
+    #[test]
+    fn owned_and_ghost_copies_of_a_cell_have_matching_vertices_and_normals() {
+        let density = |p: Vec3| p.x + 2.0 * p.y - 5.0;
+        let lower_grid = density_grid(4, Vec3::ZERO, density);
+        let neighbor_offset = vec3(2.0, 0.0, 0.0);
+        let neighbor_grid = density_grid(4, neighbor_offset, density);
+
+        let lower =
+            contour_cell_vertex(&lower_grid, 2, 1, 1, Vec3::ZERO, 1.0, Vec3::ZERO, None).unwrap();
+        let neighbor = contour_cell_vertex(
+            &neighbor_grid,
+            0,
+            1,
+            1,
+            neighbor_offset,
+            1.0,
+            Vec3::ZERO,
+            None,
+        )
+        .unwrap();
+
+        for axis in 0..3 {
+            assert!((lower.position[axis] - neighbor.position[axis]).abs() < 1e-6);
+            assert!((lower.normal[axis] - neighbor.normal[axis]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn boundary_skirts_extrude_open_edges_into_solid() {
+        let vertex = |position: [f32; 3]| PlanetVertex {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            mat_a: 0,
+            mat_b: 0,
+            blend: 0,
+            _pad: [0; 3],
+        };
+        let mut vertices = vec![
+            vertex([0.0, 0.0, 0.0]),
+            vertex([1.0, 0.0, 0.0]),
+            vertex([0.0, 1.0, 0.0]),
+        ];
+        let mut indices = vec![0, 1, 2];
+
+        append_boundary_skirts(&mut vertices, &mut indices, 2.0);
+
+        assert_eq!(vertices.len(), 6);
+        assert_eq!(indices.len(), 21);
+        assert!(
+            vertices[3..]
+                .iter()
+                .all(|vertex| (vertex.position[2] + 2.0).abs() < 1e-6)
+        );
     }
 }
