@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::octree::OctreeNode;
+use crate::octree::{DensityRange, OctreeNode};
 use engine::math::Vec3;
 use engine::{
     assets::{manager::Handle, material::TextureAsset},
@@ -106,6 +106,8 @@ impl PlanetInstance {
 #[derive(Clone)]
 pub struct PlanetTerrainEdits {
     pub modified_chunks: HashMap<TerrainBrickKey, Arc<TerrainBrickSamples>>,
+    /// Cached value bounds for each trilinearly sampled edit brick.
+    pub modified_ranges: HashMap<TerrainBrickKey, DensityRange>,
 }
 
 pub type TerrainBrickSamples = Vec<Vec<Vec<f32>>>;

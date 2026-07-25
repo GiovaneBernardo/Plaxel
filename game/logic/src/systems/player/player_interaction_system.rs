@@ -15,7 +15,7 @@ use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
 use game_types::assembly::Assembly;
-use game_types::octree::{OctreeNode, PlanetMeshRequest};
+use game_types::octree::{DensityRange, OctreeNode, PlanetMeshRequest};
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use rand::Rng;
 
@@ -515,26 +515,13 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                             let hit_planet = world.get::<Planet>(hit_entity).unwrap();
 
                             let hit_world = hit_pos;
-                            let hit_local = hit_world - hit_planet.position;
+                            let planet_position = hit_planet.position;
+                            let hit_local = hit_world - planet_position;
 
                             let brick_size = 32.0;
                             let level = 0;
                             let brush_strength = if inverse_deformation { -32.0 } else { 32.0 };
-                            let brush_bounds_min =
-                                hit_world - vec3(brush_radius, brush_radius, brush_radius);
-                            let brush_bounds_max =
-                                hit_world + vec3(brush_radius, brush_radius, brush_radius);
                             let planet_size = (hit_planet.octree_root.size * 2.0) as u32;
-                            let mut dirty_mesh_requests = Vec::new();
-                            collect_dirty_mesh_requests(
-                                &hit_planet.octree_root,
-                                hit_entity,
-                                hit_planet.position,
-                                planet_size,
-                                brush_bounds_min,
-                                brush_bounds_max,
-                                &mut dirty_mesh_requests,
-                            );
                             let min_brick = TerrainBrickKey {
                                 x: ((hit_local.x - brush_radius) / brick_size).floor() as i32,
                                 y: ((hit_local.y - brush_radius) / brick_size).floor() as i32,
@@ -547,6 +534,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                 z: ((hit_local.z + brush_radius) / brick_size).floor() as i32,
                                 level,
                             };
+                            drop(hit_planet);
 
                             if world.get::<PlanetTerrainEdits>(hit_entity).is_none() {
                                 engine::game_warn!("Planet terrain edits not found!");
@@ -554,10 +542,12 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                             }
 
                             let resolution = 16usize;
-                            let modified_chunks = &mut world
-                                .get_mut::<PlanetTerrainEdits>(hit_entity)
-                                .unwrap()
-                                .modified_chunks;
+                            let mut terrain_edits =
+                                world.get_mut::<PlanetTerrainEdits>(hit_entity).unwrap();
+                            let PlanetTerrainEdits {
+                                modified_chunks,
+                                modified_ranges,
+                            } = &mut *terrain_edits;
 
                             for brick_x in min_brick.x..=max_brick.x {
                                 for brick_y in min_brick.y..=max_brick.y {
@@ -586,6 +576,8 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                             key.z as f32 * brick_size,
                                         );
                                         let sample_spacing = brick_size / resolution as f32;
+                                        let mut range_min = f32::INFINITY;
+                                        let mut range_max = f32::NEG_INFINITY;
 
                                         for sample_x in 0..resolution {
                                             for sample_y in 0..resolution {
@@ -602,25 +594,75 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                                     let distance_from_hit =
                                                         (sample_position - hit_local).length();
 
-                                                    if distance_from_hit > brush_radius {
-                                                        continue;
+                                                    if distance_from_hit <= brush_radius {
+                                                        let normalized_distance =
+                                                            distance_from_hit / brush_radius;
+                                                        let brush_influence =
+                                                            1.0 - normalized_distance;
+                                                        let smooth_influence = brush_influence
+                                                            * brush_influence
+                                                            * (3.0 - 2.0 * brush_influence);
+
+                                                        brick[sample_x][sample_y][sample_z] +=
+                                                            brush_strength * smooth_influence;
                                                     }
 
-                                                    let normalized_distance =
-                                                        distance_from_hit / brush_radius;
-                                                    let brush_influence = 1.0 - normalized_distance;
-                                                    let smooth_influence = brush_influence
-                                                        * brush_influence
-                                                        * (3.0 - 2.0 * brush_influence);
-
-                                                    brick[sample_x][sample_y][sample_z] +=
-                                                        brush_strength * smooth_influence;
+                                                    let value = brick[sample_x][sample_y][sample_z];
+                                                    range_min = range_min.min(value);
+                                                    range_max = range_max.max(value);
                                                 }
                                             }
                                         }
+
+                                        modified_ranges
+                                            .insert(key, DensityRange::new(range_min, range_max));
                                     }
                                 }
                             }
+                            drop(terrain_edits);
+
+                            // Refresh the hierarchy after the edit data changes.
+                            // Use whole edited-brick bounds so interpolation and
+                            // leaves touching a brick boundary are included.
+                            let dirty_bounds_min = planet_position
+                                + vec3(
+                                    min_brick.x as f32 * brick_size,
+                                    min_brick.y as f32 * brick_size,
+                                    min_brick.z as f32 * brick_size,
+                                );
+                            let dirty_bounds_max = planet_position
+                                + vec3(
+                                    (max_brick.x + 1) as f32 * brick_size,
+                                    (max_brick.y + 1) as f32 * brick_size,
+                                    (max_brick.z + 1) as f32 * brick_size,
+                                );
+                            let mut dirty_mesh_requests = Vec::new();
+                            let mut query = Query::<(&mut Planet, &PlanetTerrainEdits)>::new(world);
+                            query.for_each(|entity, (planet, terrain_edits)| {
+                                if entity != hit_entity {
+                                    return;
+                                }
+
+                                octree::refresh_density_ranges_in_bounds(
+                                    &mut planet.octree_root,
+                                    dirty_bounds_min,
+                                    dirty_bounds_max,
+                                    planet.position,
+                                    planet_size,
+                                    None,
+                                    terrain_edits,
+                                );
+                                collect_dirty_mesh_requests(
+                                    &planet.octree_root,
+                                    hit_entity,
+                                    planet.position,
+                                    planet_size,
+                                    dirty_bounds_min,
+                                    dirty_bounds_max,
+                                    &mut dirty_mesh_requests,
+                                );
+                            });
+                            drop(query);
 
                             dirty_mesh_requests.sort_unstable_by(|a, b| {
                                 let a_center = a.node_min_corner

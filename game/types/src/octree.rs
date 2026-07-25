@@ -80,6 +80,33 @@ pub struct GeneratedMesh {
     pub indices: Vec<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DensityRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl DensityRange {
+    pub const ZERO: Self = Self { min: 0.0, max: 0.0 };
+
+    pub fn new(min: f32, max: f32) -> Self {
+        debug_assert!(min <= max);
+        Self { min, max }
+    }
+
+    pub fn contains_zero(self) -> bool {
+        self.min <= 0.0 && self.max >= 0.0
+    }
+
+    pub fn add(self, other: Self) -> Self {
+        Self::new(self.min + other.min, self.max + other.max)
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self::new(self.min.min(other.min), self.max.max(other.max))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OctreeNode {
     pub key: NodeKey,
@@ -87,6 +114,9 @@ pub struct OctreeNode {
     pub size: f32,
     pub children: Option<[Box<OctreeNode>; 8]>,
     pub vertex: Option<u32>,
+    /// Conservative minimum and maximum density anywhere inside this node.
+    pub density_range: DensityRange,
+    /// Cached equivalent of `density_range.contains_zero()`.
     pub has_surface: bool,
     pub state: NodeState,
 }

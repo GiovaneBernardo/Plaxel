@@ -296,6 +296,42 @@ pub fn max_terrain_height(planet_size: u32) -> f32 {
     planet_radius(planet_size) * 0.045
 }
 
+/// Conservative lower and upper bounds for terrain height above the base
+/// planet radius. Keeping this separate from SDF sampling lets the octree
+/// classify whole regions without evaluating procedural noise.
+pub fn terrain_height_bounds(planet_size: u32, heightmap: Option<&EarthHeightmap>) -> (f32, f32) {
+    let Some(heightmap) = heightmap.filter(|heightmap| {
+        heightmap.width > 0
+            && heightmap.height > 0
+            && heightmap.samples.len() >= heightmap.width as usize * heightmap.height as usize
+            && heightmap.min_height.is_finite()
+            && heightmap.max_height.is_finite()
+    }) else {
+        return (
+            min_terrain_height(planet_size),
+            max_terrain_height(planet_size),
+        );
+    };
+
+    let height_scale = planet_radius(planet_size)
+        * (EARTH_HIGHEST_ALTITUDE_METERS / EARTH_MEAN_RADIUS_METERS)
+        * EARTH_HEIGHT_EXAGGERATION;
+
+    // Four FBM octaves lie in [0, 0.9375], and three lie in [0, 0.875].
+    // Include the complete broad, ridge, fine, and ocean-depression ranges.
+    let min_detail =
+        (-0.5 * EARTH_BROAD_DETAIL_SCALE - 0.5 * EARTH_FINE_DETAIL_SCALE) * height_scale;
+    let max_detail = (0.4375 * EARTH_BROAD_DETAIL_SCALE
+        + EARTH_RIDGE_DETAIL_SCALE
+        + 0.375 * EARTH_FINE_DETAIL_SCALE)
+        * height_scale;
+
+    (
+        heightmap.min_height * height_scale + min_detail - 2.0,
+        heightmap.max_height * height_scale + max_detail,
+    )
+}
+
 pub fn spherical_terrain_height(dir: Vec3, planet_r: f32) -> f32 {
     let warp = vec3(
         fbm(dir * 3.0 + vec3(17.1, 3.7, 11.5), 4),

@@ -244,6 +244,7 @@ pub fn create_planet(
 
     let terrain_edits = PlanetTerrainEdits {
         modified_chunks: HashMap::new(),
+        modified_ranges: HashMap::new(),
     };
     let lod_strength = world
         .get_resource::<PlanetLodSettings>()
@@ -466,6 +467,7 @@ fn edits_for_mesh_request(
     if terrain_edits.modified_chunks.is_empty() {
         return PlanetTerrainEdits {
             modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
         };
     }
 
@@ -477,6 +479,7 @@ fn edits_for_mesh_request(
         + vec3(request.node_size, request.node_size, request.node_size)
         + vec3(margin, margin, margin);
     let mut relevant_chunks = HashMap::new();
+    let mut relevant_ranges = HashMap::new();
 
     for (key, brick) in &terrain_edits.modified_chunks {
         if key.level != TERRAIN_EDIT_LEVEL {
@@ -504,11 +507,15 @@ fn edits_for_mesh_request(
 
         if overlaps {
             relevant_chunks.insert(*key, Arc::clone(brick));
+            if let Some(range) = terrain_edits.modified_ranges.get(key) {
+                relevant_ranges.insert(*key, *range);
+            }
         }
     }
 
     PlanetTerrainEdits {
         modified_chunks: relevant_chunks,
+        modified_ranges: relevant_ranges,
     }
 }
 

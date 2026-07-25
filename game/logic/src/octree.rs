@@ -3,13 +3,13 @@ use std::sync::atomic::AtomicU32;
 use engine::ecs::entity::Entity;
 use engine::math::{Vec3, vec3};
 use game_types::{
-    octree::{NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest},
-    planet::PlanetTerrainEdits,
+    octree::{DensityRange, NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest},
+    planet::{PlanetTerrainEdits, TerrainBrickKey, TerrainBrickSamples},
 };
 
 use crate::{
     NodeKey,
-    sdf::{EarthHeightmap, TERRAIN_EDIT_BRICK_SIZE, sdf_at_center},
+    sdf::{EarthHeightmap, TERRAIN_EDIT_BRICK_SIZE, planet_radius, terrain_height_bounds},
 };
 
 const INITIAL_SPLIT_DISTANCE_FACTOR: f32 = 1.25;
@@ -62,7 +62,7 @@ pub fn build_node(
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> OctreeNode {
-    let has_surface = has_surface(
+    let density_range = node_density_range(
         min,
         size,
         planet_center,
@@ -70,6 +70,7 @@ pub fn build_node(
         heightmap,
         terrain_edits,
     );
+    let has_surface = density_range.contains_zero();
     let _is_behind_horizon = is_behind_horizon(
         min + vec3(size * 0.5, size * 0.5, size * 0.5),
         vec3(camera_position.x, camera_position.y, camera_position.z),
@@ -89,11 +90,12 @@ pub fn build_node(
             size,
             children: None,
             vertex: None,
-            has_surface: false,
+            density_range,
+            has_surface,
             state: NodeState::Leaf,
         };
 
-        if !has_surface && size < planet_size as f32 / 4.0 {
+        if !has_surface {
             return leaf;
         }
 
@@ -110,6 +112,7 @@ pub fn build_node(
                 size,
                 children: None,
                 vertex: None,
+                density_range,
                 has_surface,
                 state: NodeState::Leaf,
             };
@@ -117,7 +120,7 @@ pub fn build_node(
     }
 
     let child_size = size / 2.0;
-    let children = Some([
+    let children = [
         Box::new(build_node(
             min + vec3(0.0, 0.0, 0.0),
             child_size,
@@ -214,17 +217,172 @@ pub fn build_node(
             heightmap,
             terrain_edits,
         )),
-    ]);
+    ];
+    let density_range = children[1..]
+        .iter()
+        .fold(children[0].density_range, |range, child| {
+            range.union(child.density_range)
+        });
+    let has_surface = density_range.contains_zero();
 
     OctreeNode {
         key,
         min,
         size,
-        children,
+        children: Some(children),
         vertex: None,
+        density_range,
         has_surface,
         state: NodeState::Internal,
     }
+}
+
+fn brick_sample_range(brick: &TerrainBrickSamples) -> DensityRange {
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+
+    for value in brick
+        .iter()
+        .flat_map(|plane| plane.iter())
+        .flat_map(|row| row.iter())
+        .copied()
+        .filter(|value| value.is_finite())
+    {
+        min = min.min(value);
+        max = max.max(value);
+    }
+
+    if min.is_finite() && max.is_finite() {
+        DensityRange::new(min, max)
+    } else {
+        DensityRange::ZERO
+    }
+}
+
+fn base_density_range(
+    min: Vec3,
+    size: f32,
+    planet_center: Vec3,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+) -> DensityRange {
+    let max = min + Vec3::splat(size);
+    let closest = vec3(
+        planet_center.x.clamp(min.x, max.x),
+        planet_center.y.clamp(min.y, max.y),
+        planet_center.z.clamp(min.z, max.z),
+    );
+    let min_radius = (closest - planet_center).length();
+
+    let local_min = min - planet_center;
+    let local_max = max - planet_center;
+    let farthest = vec3(
+        local_min.x.abs().max(local_max.x.abs()),
+        local_min.y.abs().max(local_max.y.abs()),
+        local_min.z.abs().max(local_max.z.abs()),
+    );
+    let max_radius = farthest.length();
+
+    let radius = planet_radius(planet_size);
+    let (min_height, max_height) = terrain_height_bounds(planet_size, heightmap);
+    DensityRange::new(
+        min_radius - (radius + max_height),
+        max_radius - (radius + min_height),
+    )
+}
+
+fn edit_density_range(
+    local_min: Vec3,
+    size: f32,
+    terrain_edits: &PlanetTerrainEdits,
+) -> DensityRange {
+    let local_max = local_min + Vec3::splat(size);
+    let mut range = None;
+    let mut found_key_count = 0_i64;
+
+    let min_key = [
+        (local_min.x / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        (local_min.y / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+        (local_min.z / TERRAIN_EDIT_BRICK_SIZE).floor() as i32,
+    ];
+    let max_key = [
+        (local_max.x / TERRAIN_EDIT_BRICK_SIZE).ceil() as i32 - 1,
+        (local_max.y / TERRAIN_EDIT_BRICK_SIZE).ceil() as i32 - 1,
+        (local_max.z / TERRAIN_EDIT_BRICK_SIZE).ceil() as i32 - 1,
+    ];
+    let covered_key_count = (i64::from(max_key[0]) - i64::from(min_key[0]) + 1)
+        .saturating_mul(i64::from(max_key[1]) - i64::from(min_key[1]) + 1)
+        .saturating_mul(i64::from(max_key[2]) - i64::from(min_key[2]) + 1);
+
+    let mut include_brick = |key: &TerrainBrickKey, brick: &TerrainBrickSamples| {
+        let brick_range = terrain_edits
+            .modified_ranges
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| brick_sample_range(brick));
+        range = Some(
+            range
+                .map(|range: DensityRange| range.union(brick_range))
+                .unwrap_or(brick_range),
+        );
+        found_key_count += 1;
+    };
+
+    // Small nodes usually cover one or a handful of bricks, so direct hash
+    // lookups are O(covered bricks). Large nodes scan the sparse edit set to
+    // avoid iterating a potentially enormous empty coordinate volume.
+    if covered_key_count <= terrain_edits.modified_chunks.len() as i64 {
+        for x in min_key[0]..=max_key[0] {
+            for y in min_key[1]..=max_key[1] {
+                for z in min_key[2]..=max_key[2] {
+                    let key = TerrainBrickKey { x, y, z, level: 0 };
+                    if let Some(brick) = terrain_edits.modified_chunks.get(&key) {
+                        include_brick(&key, brick);
+                    }
+                }
+            }
+        }
+    } else {
+        for (key, brick) in &terrain_edits.modified_chunks {
+            if key.level == 0
+                && key.x >= min_key[0]
+                && key.x <= max_key[0]
+                && key.y >= min_key[1]
+                && key.y <= max_key[1]
+                && key.z >= min_key[2]
+                && key.z <= max_key[2]
+            {
+                include_brick(key, brick);
+            }
+        }
+    }
+
+    let Some(range) = range else {
+        return DensityRange::ZERO;
+    };
+
+    // Unmodified bricks evaluate to zero. Include that value unless modified
+    // bricks cover the node's complete brick-coordinate range.
+    if found_key_count < covered_key_count {
+        range.union(DensityRange::ZERO)
+    } else {
+        range
+    }
+}
+
+pub fn node_density_range(
+    min: Vec3,
+    size: f32,
+    planet_center: Vec3,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
+) -> DensityRange {
+    base_density_range(min, size, planet_center, planet_size, heightmap).add(edit_density_range(
+        min - planet_center,
+        size,
+        terrain_edits,
+    ))
 }
 
 pub fn has_surface(
@@ -235,23 +393,15 @@ pub fn has_surface(
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> bool {
-    let mut has_neg = false;
-    let mut has_pos = false;
-    for dx in [0.0, size] {
-        for dy in [0.0, size] {
-            for dz in [0.0, size] {
-                let p = min + vec3(dx, dy, dz);
-                let d = sdf_at_center(p, planet_center, planet_size, heightmap, terrain_edits);
-                if d < 0.0 {
-                    has_neg = true;
-                }
-                if d > 0.0 {
-                    has_pos = true;
-                }
-            }
-        }
-    }
-    has_neg && has_pos
+    node_density_range(
+        min,
+        size,
+        planet_center,
+        planet_size,
+        heightmap,
+        terrain_edits,
+    )
+    .contains_zero()
 }
 
 pub fn collect_octree_nodes_at_depth(
@@ -374,15 +524,7 @@ pub fn update(
         return;
     }
 
-    if should_split(
-        node,
-        camera_pos,
-        planet_position,
-        min_node_size,
-        planet_size,
-        lod_strength,
-        terrain_edits,
-    ) {
+    if should_split(node, camera_pos, min_node_size, lod_strength) {
         split_node(
             node,
             changes,
@@ -430,16 +572,14 @@ pub fn create_children(
     let child_size = parent.size * 0.5;
 
     let make_child = |min: engine::math::Vec3| {
-        let has_surface =
-            chunk_overlaps_deformation(min - planet_position, child_size, terrain_edits)
-                || has_surface(
-                    min,
-                    child_size,
-                    planet_position,
-                    planet_size,
-                    heightmap,
-                    terrain_edits,
-                );
+        let density_range = node_density_range(
+            min,
+            child_size,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+        );
         OctreeNode {
             key: NodeKey {
                 x: min.x as i32,
@@ -451,7 +591,8 @@ pub fn create_children(
             size: child_size,
             children: None,
             vertex: None,
-            has_surface,
+            density_range,
+            has_surface: density_range.contains_zero(),
             state: NodeState::Leaf,
         }
     };
@@ -488,49 +629,68 @@ pub fn node_bounds(node: &OctreeNode) -> Aabb {
     }
 }
 
-/// Returns whether a planet-local chunk overlaps any terrain-edit brick.
-/// A strict overlap avoids treating chunks that only touch at a face as edited.
-pub fn chunk_overlaps_deformation(
-    local_min: Vec3,
-    size: f32,
-    terrain_edits: &PlanetTerrainEdits,
-) -> bool {
-    let local_max = local_min + vec3(size, size, size);
+fn bounds_overlap(min_a: Vec3, max_a: Vec3, min_b: Vec3, max_b: Vec3) -> bool {
+    min_a.x <= max_b.x
+        && max_a.x >= min_b.x
+        && min_a.y <= max_b.y
+        && max_a.y >= min_b.y
+        && min_a.z <= max_b.z
+        && max_a.z >= min_b.z
+}
 
-    terrain_edits.modified_chunks.keys().any(|key| {
-        if key.level != 0 {
-            return false;
+/// Recomputes density intervals only along octree branches affected by an edit,
+/// then propagates child ranges back to their ancestors.
+pub fn refresh_density_ranges_in_bounds(
+    node: &mut OctreeNode,
+    dirty_min: Vec3,
+    dirty_max: Vec3,
+    planet_position: Vec3,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
+) {
+    let node_max = node.min + Vec3::splat(node.size);
+    if !bounds_overlap(node.min, node_max, dirty_min, dirty_max) {
+        return;
+    }
+
+    if let Some(children) = node.children.as_mut() {
+        for child in children.iter_mut() {
+            refresh_density_ranges_in_bounds(
+                child,
+                dirty_min,
+                dirty_max,
+                planet_position,
+                planet_size,
+                heightmap,
+                terrain_edits,
+            );
         }
 
-        let brick_min = vec3(
-            key.x as f32 * TERRAIN_EDIT_BRICK_SIZE,
-            key.y as f32 * TERRAIN_EDIT_BRICK_SIZE,
-            key.z as f32 * TERRAIN_EDIT_BRICK_SIZE,
+        let mut range = children[0].density_range;
+        for child in &children[1..] {
+            range = range.union(child.density_range);
+        }
+        node.density_range = range;
+    } else {
+        node.density_range = node_density_range(
+            node.min,
+            node.size,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
         );
-        let brick_max = brick_min
-            + vec3(
-                TERRAIN_EDIT_BRICK_SIZE,
-                TERRAIN_EDIT_BRICK_SIZE,
-                TERRAIN_EDIT_BRICK_SIZE,
-            );
+    }
 
-        brick_min.x < local_max.x
-            && brick_max.x > local_min.x
-            && brick_min.y < local_max.y
-            && brick_max.y > local_min.y
-            && brick_min.z < local_max.z
-            && brick_max.z > local_min.z
-    })
+    node.has_surface = node.density_range.contains_zero();
 }
 
 pub fn should_split(
     node: &OctreeNode,
     camera_pos: engine::math::Vec3,
-    planet_position: Vec3,
     min_node_size: f32,
-    planet_size: u32,
     lod_strength: f32,
-    terrain_edits: &PlanetTerrainEdits,
 ) -> bool {
     if node.children.is_some() {
         return false;
@@ -542,10 +702,7 @@ pub fn should_split(
         return false;
     }
 
-    let overlaps_deformation =
-        chunk_overlaps_deformation(bounds.min - planet_position, bounds.size(), terrain_edits);
-
-    if !node.has_surface && !overlaps_deformation && node.size < planet_size as f32 / 4.0 {
+    if !node.has_surface {
         return false;
     }
 
@@ -601,10 +758,6 @@ fn split_node(
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    if chunk_overlaps_deformation(node.min - planet_position, node.size, terrain_edits) {
-        node.has_surface = true;
-    }
-
     let children = create_children(node, planet_position, planet_size, heightmap, terrain_edits);
 
     let requests = children
@@ -765,5 +918,105 @@ pub fn traverse_octree(
 
     for (child, _) in children {
         traverse_octree(ray_origin, ray_direction, child, best_t, last_node);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use game_types::planet::TerrainBrickKey;
+
+    use super::*;
+
+    fn empty_edits() -> PlanetTerrainEdits {
+        PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn interval_keeps_surface_that_corner_signs_can_miss() {
+        let range = node_density_range(
+            vec3(99.0, -30.0, -30.0),
+            60.0,
+            Vec3::ZERO,
+            800,
+            None,
+            &empty_edits(),
+        );
+
+        assert!(range.contains_zero());
+    }
+
+    #[test]
+    fn large_nodes_far_from_terrain_are_pruned_immediately() {
+        let edits = empty_edits();
+        let min = vec3(500.0, 500.0, 500.0);
+        let size = 200.0;
+        let camera = min + Vec3::splat(size * 0.5);
+        let node = build_node(
+            min,
+            size,
+            32.0,
+            false,
+            &camera,
+            Vec3::ZERO,
+            800,
+            1.0,
+            None,
+            &edits,
+        );
+
+        assert!(node.density_range.min > 0.0);
+        assert!(!node.has_surface);
+        assert!(node.children.is_none());
+    }
+
+    #[test]
+    fn edit_range_can_create_and_propagate_a_surface_candidate() {
+        let min = vec3(105.0, 0.0, 0.0);
+        let size = 64.0;
+        let camera = min + Vec3::splat(size * 0.5);
+        let mut node = build_node(
+            min,
+            size,
+            32.0,
+            false,
+            &camera,
+            Vec3::ZERO,
+            800,
+            1.0,
+            None,
+            &empty_edits(),
+        );
+        assert!(!node.has_surface);
+
+        let key = TerrainBrickKey {
+            x: 3,
+            y: 0,
+            z: 0,
+            level: 0,
+        };
+        let samples = Arc::new(vec![vec![vec![-16.0; 2]; 2]; 2]);
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::from([(key, samples)]),
+            modified_ranges: HashMap::from([(key, DensityRange::new(-16.0, -16.0))]),
+        };
+
+        refresh_density_ranges_in_bounds(
+            &mut node,
+            vec3(96.0, 0.0, 0.0),
+            vec3(128.0, 32.0, 32.0),
+            Vec3::ZERO,
+            800,
+            None,
+            &edits,
+        );
+
+        assert!(node.density_range.contains_zero());
+        assert!(node.has_surface);
+        assert!(should_split(&node, camera, 32.0, 1.0));
     }
 }
