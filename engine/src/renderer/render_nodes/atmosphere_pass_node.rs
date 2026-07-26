@@ -350,12 +350,12 @@ pub struct AtmosphereSettings {
 
 impl Default for AtmosphereSettings {
     fn default() -> Self {
-        let terrain_radius = 65536.0 / 8.0;
+        let terrain_radius = 390000.0; //65536.0 / 8.0;
         Self {
             sun_direction: [0.3, 0.6, 0.4],
             planet_center: [0.0, 0.0, 0.0],
             planet_radius: terrain_radius * 1.0,
-            atmosphere_height: 500.0,
+            atmosphere_height: 83000.0, //500.0,
             scattering_strength: 4.0,
             wave_lengths: [700.0, 530.0, 460.0],
             density_fallof: 3.74,

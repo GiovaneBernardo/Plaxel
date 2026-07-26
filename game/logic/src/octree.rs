@@ -3,7 +3,10 @@ use std::sync::atomic::AtomicU32;
 use engine::ecs::entity::Entity;
 use engine::math::{Vec3, vec3};
 use game_types::{
-    octree::{DensityRange, NodeState, OctreeChanges, OctreeNode, PlanetMeshRequest},
+    octree::{
+        DensityRange, FaceNeighbor, FaceNeighborKind, NodeState, OctreeChanges, OctreeNode,
+        PlanetMeshRequest,
+    },
     planet::{PlanetTerrainEdits, TerrainBrickKey, TerrainBrickSamples},
 };
 
@@ -463,6 +466,133 @@ pub fn collect_leaf_nodes<'a>(node: &'a OctreeNode, out: &mut Vec<&'a OctreeNode
     }
 }
 
+pub fn has_pending_transition(node: &OctreeNode) -> bool {
+    if matches!(node.state, NodeState::Splitting | NodeState::Merging) {
+        return true;
+    }
+    node.children
+        .as_ref()
+        .is_some_and(|children| children.iter().any(|child| has_pending_transition(child)))
+}
+
+const FACE_AXES: [(usize, bool); 6] = [
+    (0, false),
+    (0, true),
+    (1, false),
+    (1, true),
+    (2, false),
+    (2, true),
+];
+
+fn component(value: Vec3, axis: usize) -> f32 {
+    match axis {
+        0 => value.x,
+        1 => value.y,
+        _ => value.z,
+    }
+}
+
+fn face_leaf_neighbors<'a>(
+    node: &'a OctreeNode,
+    target_min: Vec3,
+    target_size: f32,
+    face: usize,
+    output: &mut Vec<&'a OctreeNode>,
+) {
+    let (axis, positive) = FACE_AXES[face];
+    let target_max = target_min + Vec3::splat(target_size);
+    let node_max = node.min + Vec3::splat(node.size);
+    let plane = if positive {
+        component(target_max, axis)
+    } else {
+        component(target_min, axis)
+    };
+    let epsilon = target_size.max(node.size) * 1e-5;
+    if plane < component(node.min, axis) - epsilon || plane > component(node_max, axis) + epsilon {
+        return;
+    }
+
+    for tangent in 0..3 {
+        if tangent == axis {
+            continue;
+        }
+        // Point/edge contacts do not share a face and must not affect topology.
+        if component(node.min, tangent) >= component(target_max, tangent) - epsilon
+            || component(node_max, tangent) <= component(target_min, tangent) + epsilon
+        {
+            return;
+        }
+    }
+
+    if let Some(children) = node.children.as_ref() {
+        for child in children {
+            face_leaf_neighbors(child, target_min, target_size, face, output);
+        }
+    } else {
+        let candidate_plane = if positive {
+            component(node.min, axis)
+        } else {
+            component(node_max, axis)
+        };
+        if (candidate_plane - plane).abs() <= epsilon {
+            output.push(node);
+        }
+    }
+}
+
+/// Records only the topology needed by the mesher. This query follows octree
+/// branches touching each face, so its cost is proportional to the neighboring
+/// leaves rather than to all leaves in the planet.
+pub fn annotate_mesh_request(root: &OctreeNode, request: &mut PlanetMeshRequest) {
+    request.face_neighbors = [FaceNeighbor::SAME_OR_ABSENT; 6];
+    for face in 0..6 {
+        let mut neighbors = Vec::new();
+        face_leaf_neighbors(
+            root,
+            request.node_min_corner,
+            request.node_size,
+            face,
+            &mut neighbors,
+        );
+        if neighbors.is_empty() {
+            continue;
+        }
+
+        if let Some(neighbor) = neighbors
+            .iter()
+            .copied()
+            .filter(|neighbor| neighbor.size > request.node_size)
+            .max_by(|a, b| a.size.total_cmp(&b.size))
+        {
+            request.face_neighbors[face] = FaceNeighbor {
+                kind: FaceNeighborKind::Coarser,
+                min: neighbor.min,
+                size: neighbor.size,
+            };
+        } else if neighbors
+            .iter()
+            .any(|neighbor| neighbor.size < request.node_size)
+        {
+            request.face_neighbors[face] = FaceNeighbor {
+                kind: FaceNeighborKind::Finer,
+                min: Vec3::ZERO,
+                size: 0.0,
+            };
+        }
+    }
+}
+
+pub fn collect_face_neighbor_leaves<'a>(
+    root: &'a OctreeNode,
+    min: Vec3,
+    size: f32,
+    output: &mut Vec<&'a OctreeNode>,
+) {
+    for face in 0..6 {
+        face_leaf_neighbors(root, min, size, face, output);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
     pub min: engine::math::Vec3,
@@ -746,6 +876,7 @@ fn mesh_request(
         planet_size,
         node_min_corner: node.min,
         node_size: node.size,
+        face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
     }
 }
 
@@ -770,6 +901,7 @@ fn split_node(
         planet_entity,
         transition_key: node.key,
         completed_state: NodeState::Internal,
+        additional_transitions: Vec::new(),
         keys_to_remove: vec![node.key],
         requests,
     });
@@ -806,6 +938,7 @@ fn merge_node(
         planet_entity,
         transition_key: node.key,
         completed_state: NodeState::Leaf,
+        additional_transitions: Vec::new(),
         keys_to_remove,
         requests,
     });
@@ -934,6 +1067,69 @@ mod tests {
             modified_chunks: HashMap::new(),
             modified_ranges: HashMap::new(),
         }
+    }
+
+    fn topology_node(min: Vec3, size: f32) -> OctreeNode {
+        OctreeNode {
+            key: NodeKey {
+                x: min.x as i32,
+                y: min.y as i32,
+                z: min.z as i32,
+                size: size as i32,
+            },
+            min,
+            size,
+            children: None,
+            vertex: None,
+            density_range: DensityRange::new(-1.0, 1.0),
+            has_surface: true,
+            state: NodeState::Leaf,
+        }
+    }
+
+    fn mixed_lod_topology() -> OctreeNode {
+        let mut root = topology_node(Vec3::ZERO, 8.0);
+        root.children = Some(std::array::from_fn(|index| {
+            let min = vec3(
+                if index & 1 != 0 { 4.0 } else { 0.0 },
+                if index & 2 != 0 { 4.0 } else { 0.0 },
+                if index & 4 != 0 { 4.0 } else { 0.0 },
+            );
+            Box::new(topology_node(min, 4.0))
+        }));
+        let refined = &mut root.children.as_mut().unwrap()[1];
+        refined.children = Some(std::array::from_fn(|index| {
+            let min = refined.min
+                + vec3(
+                    if index & 1 != 0 { 2.0 } else { 0.0 },
+                    if index & 2 != 0 { 2.0 } else { 0.0 },
+                    if index & 4 != 0 { 2.0 } else { 0.0 },
+                );
+            Box::new(topology_node(min, 2.0))
+        }));
+        root
+    }
+
+    #[test]
+    fn face_neighbor_query_descends_only_into_touching_fine_leaves() {
+        let root = mixed_lod_topology();
+        let mut neighbors = Vec::new();
+        face_leaf_neighbors(&root, Vec3::ZERO, 4.0, 1, &mut neighbors);
+
+        assert_eq!(neighbors.len(), 4);
+        assert!(neighbors.iter().all(|neighbor| neighbor.size == 2.0));
+        assert!(neighbors.iter().all(|neighbor| neighbor.min.x == 4.0));
+    }
+
+    #[test]
+    fn fine_leaf_finds_the_single_coarse_leaf_across_its_face() {
+        let root = mixed_lod_topology();
+        let mut neighbors = Vec::new();
+        face_leaf_neighbors(&root, vec3(4.0, 0.0, 0.0), 2.0, 0, &mut neighbors);
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].min, Vec3::ZERO);
+        assert_eq!(neighbors[0].size, 4.0);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub enum OctreeChanges {
         planet_entity: Entity,
         transition_key: NodeKey,
         completed_state: NodeState,
+        additional_transitions: Vec<(NodeKey, NodeState)>,
         keys_to_remove: Vec<NodeKey>,
         requests: Vec<PlanetMeshRequest>,
     },
@@ -50,6 +51,29 @@ pub struct PlanetMeshRequest {
     pub planet_size: u32,
     pub node_min_corner: Vec3,
     pub node_size: f32,
+    pub face_neighbors: [FaceNeighbor; 6],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceNeighborKind {
+    SameOrAbsent,
+    Coarser,
+    Finer,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FaceNeighbor {
+    pub kind: FaceNeighborKind,
+    pub min: Vec3,
+    pub size: f32,
+}
+
+impl FaceNeighbor {
+    pub const SAME_OR_ABSENT: Self = Self {
+        kind: FaceNeighborKind::SameOrAbsent,
+        min: Vec3::ZERO,
+        size: 0.0,
+    };
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,7 +91,9 @@ pub struct GeneratedReplacement {
     pub planet_entity: Entity,
     pub transition_key: NodeKey,
     pub completed_state: NodeState,
+    pub additional_transitions: Vec<(NodeKey, NodeState)>,
     pub keys_to_remove: Vec<NodeKey>,
+    pub requests: Vec<PlanetMeshRequest>,
     pub meshes: Vec<GeneratedMesh>,
 }
 

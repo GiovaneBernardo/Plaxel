@@ -1,15 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine::{
     game_info,
     math::{Vec3, vec3},
 };
 use game_types::{
-    octree::OctreeNode,
+    octree::{FaceNeighbor, FaceNeighborKind, OctreeNode},
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
 };
 
-use crate::{octree, sdf::EarthHeightmap};
+use crate::{
+    CHUNK_CELL_COUNT, octree,
+    sdf::{EarthHeightmap, sdf_at_center},
+};
 
 pub trait PlanetExt {
     fn dual_contour_grid(
@@ -20,6 +23,7 @@ pub trait PlanetExt {
         planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
         terrain_edits: &PlanetTerrainEdits,
+        face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(
         planet_position: engine::math::Vec3,
@@ -83,17 +87,27 @@ fn contour_cell_vertex(
         grid[x + 1][y + 1][z + 1],
     ];
 
+    let base = vec3(
+        x as f32 * resolution + offset.x,
+        y as f32 * resolution + offset.y,
+        z as f32 * resolution + offset.z,
+    );
+    contour_cell_from_corners(corners, base, resolution, planet_position, heightmap)
+}
+
+fn contour_cell_from_corners(
+    corners: [f32; 8],
+    base: Vec3,
+    resolution: f32,
+    planet_position: Vec3,
+    heightmap: Option<&EarthHeightmap>,
+) -> Option<PlanetVertex> {
     let has_negative = corners.iter().any(|&density| density < 0.0);
     let has_positive = corners.iter().any(|&density| density > 0.0);
     if !(has_negative && has_positive) {
         return None;
     }
 
-    let base = vec3(
-        x as f32 * resolution + offset.x,
-        y as f32 * resolution + offset.y,
-        z as f32 * resolution + offset.z,
-    );
     let positions = [
         base,
         base + vec3(resolution, 0.0, 0.0),
@@ -196,6 +210,7 @@ fn append_x_edge_indices(
     grid: &[Vec<Vec<f32>>],
     cell_vertex: &CellVertexGrid,
     indices: &mut Vec<u32>,
+    face_neighbors: &[FaceNeighbor; 6],
 ) {
     let size_x = grid.len();
     let size_y = grid[0].len();
@@ -206,6 +221,11 @@ fn append_x_edge_indices(
     for x in 0..(size_x - 2) {
         for y in 1..(size_y - 1) {
             for z in 1..(size_z - 1) {
+                if (y == size_y - 2 && face_neighbors[3].kind != FaceNeighborKind::SameOrAbsent)
+                    || (z == size_z - 2 && face_neighbors[5].kind != FaceNeighborKind::SameOrAbsent)
+                {
+                    continue;
+                }
                 if grid[x][y][z] * grid[x + 1][y][z] >= 0.0 {
                     continue;
                 }
@@ -229,6 +249,7 @@ fn append_y_edge_indices(
     grid: &[Vec<Vec<f32>>],
     cell_vertex: &CellVertexGrid,
     indices: &mut Vec<u32>,
+    face_neighbors: &[FaceNeighbor; 6],
 ) {
     let size_x = grid.len();
     let size_y = grid[0].len();
@@ -237,6 +258,11 @@ fn append_y_edge_indices(
     for x in 1..(size_x - 1) {
         for y in 0..(size_y - 2) {
             for z in 1..(size_z - 1) {
+                if (x == size_x - 2 && face_neighbors[1].kind != FaceNeighborKind::SameOrAbsent)
+                    || (z == size_z - 2 && face_neighbors[5].kind != FaceNeighborKind::SameOrAbsent)
+                {
+                    continue;
+                }
                 if grid[x][y][z] * grid[x][y + 1][z] >= 0.0 {
                     continue;
                 }
@@ -260,6 +286,7 @@ fn append_z_edge_indices(
     grid: &[Vec<Vec<f32>>],
     cell_vertex: &CellVertexGrid,
     indices: &mut Vec<u32>,
+    face_neighbors: &[FaceNeighbor; 6],
 ) {
     let size_x = grid.len();
     let size_y = grid[0].len();
@@ -268,6 +295,11 @@ fn append_z_edge_indices(
     for x in 1..(size_x - 1) {
         for y in 1..(size_y - 1) {
             for z in 0..(size_z - 2) {
+                if (x == size_x - 2 && face_neighbors[1].kind != FaceNeighborKind::SameOrAbsent)
+                    || (y == size_y - 2 && face_neighbors[3].kind != FaceNeighborKind::SameOrAbsent)
+                {
+                    continue;
+                }
                 if grid[x][y][z] * grid[x][y][z + 1] >= 0.0 {
                     continue;
                 }
@@ -286,63 +318,285 @@ fn append_z_edge_indices(
     }
 }
 
-fn append_boundary_skirts(vertices: &mut Vec<PlanetVertex>, indices: &mut Vec<u32>, depth: f32) {
-    if depth <= 0.0 || indices.is_empty() {
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct TransitionCellKey {
+    min: [u32; 3],
+    spacing: u32,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct TransitionEdgeKey {
+    start: [u32; 3],
+    axis: u8,
+}
+
+#[inline]
+fn axis_value(value: Vec3, axis: usize) -> f32 {
+    match axis {
+        0 => value.x,
+        1 => value.y,
+        _ => value.z,
+    }
+}
+
+#[inline]
+fn with_axis(mut value: Vec3, axis: usize, component: f32) -> Vec3 {
+    match axis {
+        0 => value.x = component,
+        1 => value.y = component,
+        _ => value.z = component,
+    }
+    value
+}
+
+fn transition_cell_vertex(
+    probe: Vec3,
+    face: usize,
+    fine_min: Vec3,
+    fine_size: f32,
+    fine_spacing: f32,
+    coarse: FaceNeighbor,
+    planet_position: Vec3,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
+    cache: &mut HashMap<TransitionCellKey, Option<u32>>,
+    vertices: &mut Vec<PlanetVertex>,
+) -> Option<u32> {
+    let normal_axis = face / 2;
+    let positive_face = face % 2 == 1;
+    let plane = axis_value(fine_min, normal_axis) + if positive_face { fine_size } else { 0.0 };
+    let on_fine_side = if positive_face {
+        axis_value(probe, normal_axis) < plane
+    } else {
+        axis_value(probe, normal_axis) > plane
+    };
+    let (origin, spacing) = if on_fine_side {
+        (fine_min, fine_spacing)
+    } else {
+        (coarse.min, coarse.size / CHUNK_CELL_COUNT as f32)
+    };
+
+    let aligned = vec3(
+        origin.x + ((probe.x - origin.x) / spacing).floor() * spacing,
+        origin.y + ((probe.y - origin.y) / spacing).floor() * spacing,
+        origin.z + ((probe.z - origin.z) / spacing).floor() * spacing,
+    );
+    let key = TransitionCellKey {
+        min: [
+            aligned.x.to_bits(),
+            aligned.y.to_bits(),
+            aligned.z.to_bits(),
+        ],
+        spacing: spacing.to_bits(),
+    };
+    if let Some(index) = cache.get(&key) {
+        return *index;
+    }
+
+    let corners = [
+        aligned,
+        aligned + vec3(spacing, 0.0, 0.0),
+        aligned + vec3(0.0, spacing, 0.0),
+        aligned + vec3(spacing, spacing, 0.0),
+        aligned + vec3(0.0, 0.0, spacing),
+        aligned + vec3(spacing, 0.0, spacing),
+        aligned + vec3(0.0, spacing, spacing),
+        aligned + vec3(spacing, spacing, spacing),
+    ]
+    .map(|position| {
+        sdf_at_center(
+            position,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+        )
+    });
+    let index = contour_cell_from_corners(corners, aligned, spacing, planet_position, heightmap)
+        .map(|vertex| {
+            let index = vertices.len() as u32;
+            vertices.push(vertex);
+            index
+        });
+    cache.insert(key, index);
+    index
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_transition_edge(
+    start: Vec3,
+    edge_axis: usize,
+    density_at_start: f32,
+    face: usize,
+    fine_min: Vec3,
+    fine_size: f32,
+    fine_spacing: f32,
+    coarse: FaceNeighbor,
+    planet_position: Vec3,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
+    cache: &mut HashMap<TransitionCellKey, Option<u32>>,
+    emitted_edges: &mut HashSet<TransitionEdgeKey>,
+    vertices: &mut Vec<PlanetVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let edge_key = TransitionEdgeKey {
+        start: [start.x.to_bits(), start.y.to_bits(), start.z.to_bits()],
+        axis: edge_axis as u8,
+    };
+    if !emitted_edges.insert(edge_key) {
         return;
     }
 
-    // Preserve the directed form from the triangle that owns each boundary
-    // edge. Interior edges occur twice and are discarded.
-    let mut edges: HashMap<(u32, u32), (u32, u32, u32)> = HashMap::new();
-    for triangle in indices.chunks_exact(3) {
-        for (start, end) in [
-            (triangle[0], triangle[1]),
-            (triangle[1], triangle[2]),
-            (triangle[2], triangle[0]),
-        ] {
-            let key = if start < end {
-                (start, end)
-            } else {
-                (end, start)
-            };
-            edges
-                .entry(key)
-                .and_modify(|edge| edge.0 += 1)
-                .or_insert((1, start, end));
-        }
+    let (first_perpendicular, second_perpendicular) = match edge_axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let midpoint = with_axis(
+        start,
+        edge_axis,
+        axis_value(start, edge_axis) + fine_spacing * 0.5,
+    );
+    let epsilon = fine_spacing * 0.25;
+    let quadrants = [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)];
+    let mut quadrant_vertices = [None; 4];
+    for (slot, (first_sign, second_sign)) in quadrants.into_iter().enumerate() {
+        let probe = with_axis(
+            with_axis(
+                midpoint,
+                first_perpendicular,
+                axis_value(midpoint, first_perpendicular) + first_sign * epsilon,
+            ),
+            second_perpendicular,
+            axis_value(midpoint, second_perpendicular) + second_sign * epsilon,
+        );
+        quadrant_vertices[slot] = transition_cell_vertex(
+            probe,
+            face,
+            fine_min,
+            fine_size,
+            fine_spacing,
+            coarse,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+            cache,
+            vertices,
+        );
     }
 
-    let mut extruded_vertices = HashMap::<u32, u32>::new();
-    for (_, (count, start, end)) in edges {
-        if count != 1 {
+    let Some(quadrant_vertices) = quadrant_vertices.into_iter().collect::<Option<Vec<u32>>>()
+    else {
+        return;
+    };
+    let mut ring = Vec::with_capacity(4);
+    for slot in [0, 1, 3, 2] {
+        let vertex = quadrant_vertices[slot];
+        if ring.last().copied() != Some(vertex) {
+            ring.push(vertex);
+        }
+    }
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    if ring.len() < 3 {
+        return;
+    }
+
+    let flip = match edge_axis {
+        0 | 2 => density_at_start > 0.0,
+        _ => density_at_start < 0.0,
+    };
+    if flip {
+        ring.reverse();
+    }
+    for triangle in 1..(ring.len() - 1) {
+        indices.extend_from_slice(&[ring[0], ring[triangle], ring[triangle + 1]]);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_transition_faces(
+    grid: &[Vec<Vec<f32>>],
+    fine_min: Vec3,
+    fine_size: f32,
+    fine_spacing: f32,
+    planet_position: Vec3,
+    planet_size: u32,
+    heightmap: Option<&EarthHeightmap>,
+    terrain_edits: &PlanetTerrainEdits,
+    face_neighbors: &[FaceNeighbor; 6],
+    vertices: &mut Vec<PlanetVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let cell_count = CHUNK_CELL_COUNT;
+    let mut cache = HashMap::new();
+    let mut emitted_edges = HashSet::new();
+
+    for face in 0..6 {
+        let coarse = face_neighbors[face];
+        if coarse.kind != FaceNeighborKind::Coarser {
             continue;
         }
-
-        let mut extrude = |index: u32, vertices: &mut Vec<PlanetVertex>| {
-            *extruded_vertices.entry(index).or_insert_with(|| {
-                let mut vertex = vertices[index as usize];
-                vertex.position[0] -= vertex.normal[0] * depth;
-                vertex.position[1] -= vertex.normal[1] * depth;
-                vertex.position[2] -= vertex.normal[2] * depth;
-                let extruded_index = vertices.len() as u32;
-                vertices.push(vertex);
-                extruded_index
-            })
+        let normal_axis = face / 2;
+        let (first_tangent, second_tangent) = match normal_axis {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
         };
+        let face_sample = if face % 2 == 1 { cell_count } else { 0 };
 
-        let start_extruded = extrude(start, vertices);
-        let end_extruded = extrude(end, vertices);
+        for edge_axis in [first_tangent, second_tangent] {
+            let fixed_tangent = if edge_axis == first_tangent {
+                second_tangent
+            } else {
+                first_tangent
+            };
+            for segment in 0..cell_count {
+                for fixed_sample in 1..=cell_count {
+                    let mut sample = [0usize; 3];
+                    sample[normal_axis] = face_sample;
+                    sample[edge_axis] = segment;
+                    sample[fixed_tangent] = fixed_sample;
+                    let mut end_sample = sample;
+                    end_sample[edge_axis] += 1;
+                    let density_at_start = grid[sample[0]][sample[1]][sample[2]];
+                    let density_at_end = grid[end_sample[0]][end_sample[1]][end_sample[2]];
+                    if density_at_start * density_at_end >= 0.0 {
+                        continue;
+                    }
 
-        // The boundary edge follows the source triangle's winding. These two
-        // triangles face away from the solid when extrusion follows -normal.
-        indices.extend_from_slice(&[
-            start,
-            end_extruded,
-            end,
-            start,
-            start_extruded,
-            end_extruded,
-        ]);
+                    let start = fine_min
+                        + vec3(
+                            sample[0] as f32 * fine_spacing,
+                            sample[1] as f32 * fine_spacing,
+                            sample[2] as f32 * fine_spacing,
+                        );
+                    append_transition_edge(
+                        start,
+                        edge_axis,
+                        density_at_start,
+                        face,
+                        fine_min,
+                        fine_size,
+                        fine_spacing,
+                        coarse,
+                        planet_position,
+                        planet_size,
+                        heightmap,
+                        terrain_edits,
+                        &mut cache,
+                        &mut emitted_edges,
+                        vertices,
+                        indices,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -352,9 +606,10 @@ impl PlanetExt for Planet {
         offset: Vec3,
         resolution: f32,
         planet_position: Vec3,
-        _planet_size: u32,
+        planet_size: u32,
         heightmap: Option<&EarthHeightmap>,
-        _terrain_edits: &PlanetTerrainEdits,
+        terrain_edits: &PlanetTerrainEdits,
+        face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -387,10 +642,22 @@ impl PlanetExt for Planet {
             }
         }
 
-        append_x_edge_indices(grid, &cell_vertex, &mut indices);
-        append_y_edge_indices(grid, &cell_vertex, &mut indices);
-        append_z_edge_indices(grid, &cell_vertex, &mut indices);
-        append_boundary_skirts(&mut vertices, &mut indices, resolution * 2.0);
+        append_x_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
+        append_y_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
+        append_z_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
+        append_transition_faces(
+            grid,
+            offset,
+            resolution * CHUNK_CELL_COUNT as f32,
+            resolution,
+            planet_position,
+            planet_size,
+            heightmap,
+            terrain_edits,
+            face_neighbors,
+            &mut vertices,
+            &mut indices,
+        );
 
         (vertices, indices)
     }
@@ -455,6 +722,10 @@ mod tests {
         }
     }
 
+    fn no_neighbors() -> [FaceNeighbor; 6] {
+        [FaceNeighbor::SAME_OR_ABSENT; 6]
+    }
+
     fn density_grid(
         sample_count: usize,
         offset: Vec3,
@@ -478,8 +749,16 @@ mod tests {
         // Four samples represent two owned cells plus one positive ghost cell.
         // This surface exists only in the ghost cell at x = 2.
         let grid = density_grid(4, Vec3::ZERO, |p| p.x - 2.5);
-        let (_, indices) =
-            Planet::dual_contour_grid(&grid, Vec3::ZERO, 1.0, Vec3::ZERO, 0, None, &empty_edits());
+        let (_, indices) = Planet::dual_contour_grid(
+            &grid,
+            Vec3::ZERO,
+            1.0,
+            Vec3::ZERO,
+            0,
+            None,
+            &empty_edits(),
+            &no_neighbors(),
+        );
 
         assert!(indices.is_empty());
     }
@@ -487,8 +766,16 @@ mod tests {
     #[test]
     fn owned_cell_still_emits_geometry() {
         let grid = density_grid(4, Vec3::ZERO, |p| p.x - 1.5);
-        let (_, indices) =
-            Planet::dual_contour_grid(&grid, Vec3::ZERO, 1.0, Vec3::ZERO, 0, None, &empty_edits());
+        let (_, indices) = Planet::dual_contour_grid(
+            &grid,
+            Vec3::ZERO,
+            1.0,
+            Vec3::ZERO,
+            0,
+            None,
+            &empty_edits(),
+            &no_neighbors(),
+        );
 
         assert!(!indices.is_empty());
     }
@@ -521,30 +808,41 @@ mod tests {
     }
 
     #[test]
-    fn boundary_skirts_extrude_open_edges_into_solid() {
-        let vertex = |position: [f32; 3]| PlanetVertex {
-            position,
-            normal: [0.0, 0.0, 1.0],
-            mat_a: 0,
-            mat_b: 0,
-            blend: 0,
-            _pad: [0; 3],
+    fn mixed_lod_face_emits_valid_adaptive_polygons() {
+        let fine_min = vec3(-32.0, 0.0, -16.0);
+        let planet_size = 256;
+        let edits = empty_edits();
+        let grid = density_grid(CHUNK_CELL_COUNT + 2, fine_min, |position| {
+            sdf_at_center(position, Vec3::ZERO, planet_size, None, &edits)
+        });
+        let mut neighbors = no_neighbors();
+        neighbors[1] = FaceNeighbor {
+            kind: FaceNeighborKind::Coarser,
+            min: vec3(0.0, 0.0, -32.0),
+            size: 64.0,
         };
-        let mut vertices = vec![
-            vertex([0.0, 0.0, 0.0]),
-            vertex([1.0, 0.0, 0.0]),
-            vertex([0.0, 1.0, 0.0]),
-        ];
-        let mut indices = vec![0, 1, 2];
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
-        append_boundary_skirts(&mut vertices, &mut indices, 2.0);
-
-        assert_eq!(vertices.len(), 6);
-        assert_eq!(indices.len(), 21);
-        assert!(
-            vertices[3..]
-                .iter()
-                .all(|vertex| (vertex.position[2] + 2.0).abs() < 1e-6)
+        append_transition_faces(
+            &grid,
+            fine_min,
+            32.0,
+            1.0,
+            Vec3::ZERO,
+            planet_size,
+            None,
+            &edits,
+            &neighbors,
+            &mut vertices,
+            &mut indices,
         );
+
+        assert!(!indices.is_empty());
+        assert_eq!(indices.len() % 3, 0);
+        assert!(indices.iter().all(|&index| index < vertices.len() as u32));
+        assert!(indices.chunks_exact(3).all(|triangle| {
+            triangle[0] != triangle[1] && triangle[1] != triangle[2] && triangle[0] != triangle[2]
+        }));
     }
 }

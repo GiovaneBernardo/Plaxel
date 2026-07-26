@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
 use game_types::assembly::Assembly;
-use game_types::octree::{DensityRange, OctreeNode, PlanetMeshRequest};
+use game_types::octree::{DensityRange, FaceNeighbor, OctreeNode, PlanetMeshRequest};
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use rand::Rng;
 
@@ -269,6 +270,7 @@ fn collect_dirty_mesh_requests(
         planet_size,
         node_min_corner: node.min,
         node_size: node.size,
+        face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
     });
 }
 
@@ -675,6 +677,56 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                     dirty_bounds_max,
                                     &mut dirty_mesh_requests,
                                 );
+                                // A transition polygon contains dual vertices from both
+                                // sides of an LOD boundary. If deformation changes either
+                                // side, remesh the opposite-resolution leaves as well.
+                                let dirty_snapshot = dirty_mesh_requests.clone();
+                                let mut scheduled: HashSet<(i32, i32, i32, i32)> =
+                                    dirty_mesh_requests
+                                        .iter()
+                                        .map(|request| {
+                                            (
+                                                request.node_min_corner.x as i32,
+                                                request.node_min_corner.y as i32,
+                                                request.node_min_corner.z as i32,
+                                                request.node_size as i32,
+                                            )
+                                        })
+                                        .collect();
+                                for dirty in dirty_snapshot {
+                                    let mut neighbors = Vec::new();
+                                    octree::collect_face_neighbor_leaves(
+                                        &planet.octree_root,
+                                        dirty.node_min_corner,
+                                        dirty.node_size,
+                                        &mut neighbors,
+                                    );
+                                    for neighbor in neighbors {
+                                        let key = (
+                                            neighbor.min.x as i32,
+                                            neighbor.min.y as i32,
+                                            neighbor.min.z as i32,
+                                            neighbor.size as i32,
+                                        );
+                                        if neighbor.size == dirty.node_size
+                                            || !neighbor.has_surface
+                                            || !scheduled.insert(key)
+                                        {
+                                            continue;
+                                        }
+                                        dirty_mesh_requests.push(PlanetMeshRequest {
+                                            planet_entity: hit_entity,
+                                            planet_position: planet.position,
+                                            planet_size,
+                                            node_min_corner: neighbor.min,
+                                            node_size: neighbor.size,
+                                            face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+                                        });
+                                    }
+                                }
+                                for request in &mut dirty_mesh_requests {
+                                    octree::annotate_mesh_request(&planet.octree_root, request);
+                                }
                             });
                             drop(query);
 
