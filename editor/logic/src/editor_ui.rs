@@ -1547,6 +1547,16 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                      This can exceed wall-clock frame time when threads run in parallel.",
                 );
                 metric_pill(ui, "Frames", snapshot.captured_frames.to_string());
+                metric_pill(
+                    ui,
+                    "Source locations",
+                    format!(
+                        "{} / {}",
+                        snapshot.source_location_addresses, snapshot.symbolized_addresses
+                    ),
+                )
+                .response
+                .on_hover_text("Sampled instruction addresses resolved to both a source file and line.");
             });
             ui.add_space(6.0);
 
@@ -1610,7 +1620,7 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                 });
 
             egui::CollapsingHeader::new("Top-down call tree").show(ui, |ui| {
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .id_salt("cpu_call_tree")
                     .max_height(420.0)
                     .auto_shrink([false, false])
@@ -1626,7 +1636,7 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                     "Starts at the code that was executing, then expands toward the callers \
                      responsible for it.",
                 );
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .id_salt("cpu_bottom_up")
                     .max_height(420.0)
                     .auto_shrink([false, false])
@@ -1637,7 +1647,17 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                     });
             });
 
-            egui::CollapsingHeader::new("Hot source lines").show(ui, |ui| {
+            egui::CollapsingHeader::new(format!(
+                "Hot source lines ({})",
+                snapshot.source_lines.len()
+            ))
+            .show(ui, |ui| {
+                if snapshot.source_lines.is_empty() {
+                    ui.label(
+                        "No source lines were resolved. Use a build with debug information and keep the matching PDB beside the executable or in a Cargo target profile directory.",
+                    );
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("cpu_source_lines")
                     .max_height(320.0)
@@ -1686,7 +1706,17 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                     });
             });
 
-            egui::CollapsingHeader::new("Source-file costs").show(ui, |ui| {
+            egui::CollapsingHeader::new(format!(
+                "Source-file costs ({})",
+                snapshot.source_files.len()
+            ))
+            .show(ui, |ui| {
+                if snapshot.source_files.is_empty() {
+                    ui.label(
+                        "No source files were resolved. The capture still contains function and module costs.",
+                    );
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("cpu_source_files")
                     .max_height(300.0)
@@ -1748,23 +1778,22 @@ fn draw_cpu_call_tree_node(
     snapshot: &engine::profiling::cpu::CpuProfileSnapshot,
     depth: usize,
 ) {
-    let location = cpu_location(node.file.as_deref(), node.line, &node.module);
-    let label = format!(
-        "{} total ({:.3} ms/f)  {} self ({:.3} ms/f)  {}  [{}]",
-        cpu_percent(node.inclusive_samples, snapshot.total_samples),
-        estimated_cpu_ms_per_frame(snapshot, node.inclusive_samples),
-        cpu_percent(node.self_samples, snapshot.total_samples),
-        estimated_cpu_ms_per_frame(snapshot, node.self_samples),
-        node.function,
-        location
-    );
+    let mut chain = vec![node];
+    while chain.len() + depth < 48 {
+        let tail = *chain.last().unwrap();
+        if tail.self_samples > 0 || tail.children.len() != 1 {
+            break;
+        }
+        chain.push(&tail.children[0]);
+    }
+    let tail = *chain.last().unwrap();
 
-    if node.children.is_empty() || depth >= 48 {
-        ui.label(label)
-            .on_hover_text(node.file.as_deref().unwrap_or(node.function.as_str()));
+    if tail.children.is_empty() || depth + chain.len() >= 48 {
+        draw_cpu_call_chain(ui, &chain, snapshot);
         return;
     }
 
+    let label = cpu_call_tree_label(node, snapshot);
     egui::CollapsingHeader::new(label)
         .id_salt((
             depth,
@@ -1773,10 +1802,77 @@ fn draw_cpu_call_tree_node(
             node.self_samples,
         ))
         .show(ui, |ui| {
-            for child in node.children.iter().take(128) {
-                draw_cpu_call_tree_node(ui, child, snapshot, depth + 1);
+            if chain.len() > 1 {
+                ui.group(|ui| {
+                    ui.label(
+                        RichText::new(format!("Single path · {} frames", chain.len() - 1))
+                            .small()
+                            .color(Color32::from_rgb(145, 158, 171)),
+                    );
+                    for chained_node in chain.iter().skip(1) {
+                        draw_cpu_call_tree_row(ui, chained_node, snapshot);
+                    }
+                });
+            }
+            for child in tail.children.iter().take(128) {
+                draw_cpu_call_tree_node(ui, child, snapshot, depth + chain.len());
             }
         });
+}
+
+fn draw_cpu_call_chain(
+    ui: &mut Ui,
+    chain: &[&engine::profiling::cpu::CpuCallTreeNode],
+    snapshot: &engine::profiling::cpu::CpuProfileSnapshot,
+) {
+    if chain.len() == 1 {
+        draw_cpu_call_tree_row(ui, chain[0], snapshot);
+        return;
+    }
+
+    ui.group(|ui| {
+        ui.label(
+            RichText::new(format!("Single path · {} frames", chain.len()))
+                .small()
+                .color(Color32::from_rgb(145, 158, 171)),
+        );
+        for node in chain {
+            draw_cpu_call_tree_row(ui, node, snapshot);
+        }
+    });
+}
+
+fn draw_cpu_call_tree_row(
+    ui: &mut Ui,
+    node: &engine::profiling::cpu::CpuCallTreeNode,
+    snapshot: &engine::profiling::cpu::CpuProfileSnapshot,
+) {
+    let response = ui.label(cpu_call_tree_label(node, snapshot));
+    response.on_hover_text(cpu_call_tree_hover(node));
+}
+
+fn cpu_call_tree_label(
+    node: &engine::profiling::cpu::CpuCallTreeNode,
+    snapshot: &engine::profiling::cpu::CpuProfileSnapshot,
+) -> String {
+    let location = cpu_location(node.file.as_deref(), node.line, &node.module);
+    format!(
+        "{} total · {:.3} ms/f   {} self · {:.3} ms/f   {}   — {}",
+        cpu_percent(node.inclusive_samples, snapshot.total_samples),
+        estimated_cpu_ms_per_frame(snapshot, node.inclusive_samples),
+        cpu_percent(node.self_samples, snapshot.total_samples),
+        estimated_cpu_ms_per_frame(snapshot, node.self_samples),
+        node.function,
+        location
+    )
+}
+
+fn cpu_call_tree_hover(node: &engine::profiling::cpu::CpuCallTreeNode) -> String {
+    match (&node.file, node.line) {
+        (Some(file), Some(line)) => format!("{}\n{file}:{line}\n{}", node.function, node.module),
+        (Some(file), None) => format!("{}\n{file}\n{}", node.function, node.module),
+        (None, _) => format!("{}\n{}", node.function, node.module),
+    }
 }
 
 fn estimated_cpu_ms_per_frame(

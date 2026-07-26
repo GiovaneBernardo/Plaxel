@@ -72,7 +72,6 @@
                         ),
                         tabs: [
                             Viewport,
-                            Profiler,
                         ],
                         active: (0),
                         scroll: 0.0,
@@ -178,6 +177,7 @@
                             Textures,
                             RenderGraph,
                             Timeline,
+                            Profiler,
                         ],
                         active: (3),
                         scroll: 0.0,

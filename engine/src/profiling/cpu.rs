@@ -65,6 +65,7 @@ pub struct CpuProfileSnapshot {
     pub captured_frames: u64,
     pub sample_interval: Duration,
     pub symbolized_addresses: usize,
+    pub source_location_addresses: usize,
     pub unresolved_addresses: usize,
     pub functions: Vec<CpuFunctionHotspot>,
     pub source_files: Vec<CpuSourceHotspot>,
@@ -95,6 +96,7 @@ impl Default for CpuProfileSnapshot {
             captured_frames: 0,
             sample_interval: Duration::from_millis(1),
             symbolized_addresses: 0,
+            source_location_addresses: 0,
             unresolved_addresses: 0,
             functions: Vec::new(),
             source_files: Vec::new(),
@@ -695,7 +697,7 @@ mod platform {
                         .to_string_lossy()
                         .into_owned();
                     let demangled = try_demangle(&raw_name)
-                        .map(|name| name.to_string())
+                        .map(|name| format!("{name:#}"))
                         .unwrap_or(raw_name);
                     ((*symbol).Address, demangled, true)
                 } else {
@@ -710,7 +712,7 @@ mod platform {
                     )
                 }
             };
-            let (file, line) = self.source_line(address);
+            let (file, line) = self.source_line(address, key);
             let frame = ResolvedFrame {
                 key,
                 function,
@@ -736,7 +738,16 @@ mod platform {
             }
         }
 
-        fn source_line(&self, address: u64) -> (Option<String>, Option<u32>) {
+        fn source_line(&self, address: u64, symbol_address: u64) -> (Option<String>, Option<u32>) {
+            for candidate in [address, address.saturating_sub(1), symbol_address] {
+                if let Some(location) = self.source_line_at(candidate) {
+                    return location;
+                }
+            }
+            (None, None)
+        }
+
+        fn source_line_at(&self, address: u64) -> Option<(Option<String>, Option<u32>)> {
             unsafe {
                 let mut info: IMAGEHLP_LINE64 = zeroed();
                 info.SizeOfStruct = size_of::<IMAGEHLP_LINE64>() as u32;
@@ -744,16 +755,16 @@ mod platform {
                 if SymGetLineFromAddr64(self.process, address, &mut displacement, &mut info) == 0
                     || info.FileName.is_null()
                 {
-                    return (None, None);
+                    return None;
                 }
-                (
+                Some((
                     Some(
                         CStr::from_ptr(info.FileName.cast())
                             .to_string_lossy()
                             .into_owned(),
                     ),
                     Some(info.LineNumber),
-                )
+                ))
             }
         }
     }
@@ -808,7 +819,16 @@ mod platform {
             let frames = stack
                 .addresses
                 .into_iter()
-                .map(|address| symbolizer.resolve(address))
+                .enumerate()
+                .map(|(index, address)| {
+                    // The first entry is the sampled instruction pointer. The rest are return
+                    // addresses, which point just beyond their call instruction.
+                    symbolizer.resolve(if index == 0 {
+                        address
+                    } else {
+                        address.saturating_sub(1)
+                    })
+                })
                 .collect::<Vec<_>>();
             let Some(leaf) = frames.first() else {
                 continue;
@@ -861,6 +881,11 @@ mod platform {
             .cache
             .values()
             .filter(|frame| frame.symbolized)
+            .count();
+        let source_location_addresses = symbolizer
+            .cache
+            .values()
+            .filter(|frame| frame.file.is_some() && frame.line.is_some())
             .count();
         let unresolved_addresses = symbolizer.cache.len().saturating_sub(symbolized_addresses);
 
@@ -932,6 +957,7 @@ mod platform {
             captured_frames,
             sample_interval,
             symbolized_addresses,
+            source_location_addresses,
             unresolved_addresses,
             functions: function_rows,
             source_files: source_rows,
@@ -991,10 +1017,17 @@ mod platform {
             if let Some(directory) = executable.parent() {
                 paths.push(directory.to_string_lossy().into_owned());
                 paths.push(directory.join("deps").to_string_lossy().into_owned());
+                if let Some(target) = directory
+                    .ancestors()
+                    .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "target"))
+                {
+                    add_target_symbol_directories(&mut paths, target);
+                }
             }
         }
         if let Ok(directory) = std::env::current_dir() {
             paths.push(directory.to_string_lossy().into_owned());
+            add_target_symbol_directories(&mut paths, &directory.join("target"));
         }
         for variable in ["_NT_ALT_SYMBOL_PATH", "_NT_SYMBOL_PATH"] {
             if let Ok(path) = std::env::var(variable) {
@@ -1004,6 +1037,53 @@ mod platform {
             }
         }
         wide_null(&paths.join(";"))
+    }
+
+    fn add_target_symbol_directories(paths: &mut Vec<String>, target: &std::path::Path) {
+        let Ok(target_entries) = std::fs::read_dir(target) else {
+            return;
+        };
+
+        for entry in target_entries.flatten() {
+            let directory = entry.path();
+            if !directory.is_dir() {
+                continue;
+            }
+            add_directory_if_it_contains_pdb(paths, &directory);
+            add_directory_if_it_contains_pdb(paths, &directory.join("deps"));
+
+            // Cargo can place target-specific profiles one level deeper, for example
+            // target/x86_64-pc-windows-msvc/desktop-dev. Dioxus then copies the executable
+            // elsewhere without copying its PDB, so include those original build folders.
+            let Ok(profile_entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for profile_entry in profile_entries.flatten() {
+                let profile_directory = profile_entry.path();
+                if !profile_directory.is_dir() {
+                    continue;
+                }
+                add_directory_if_it_contains_pdb(paths, &profile_directory);
+                add_directory_if_it_contains_pdb(paths, &profile_directory.join("deps"));
+            }
+        }
+    }
+
+    fn add_directory_if_it_contains_pdb(paths: &mut Vec<String>, directory: &std::path::Path) {
+        let contains_pdb = std::fs::read_dir(directory).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pdb"))
+            })
+        });
+        if contains_pdb {
+            let path = directory.to_string_lossy().into_owned();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
     }
 
     fn guid_eq(left: GUID, right: GUID) -> bool {
