@@ -185,7 +185,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let light_dir = normalize(shadow.light_direction);
     let diffuse = max(dot(normal, light_dir), 0.0);
-    let visibility = shadow_visibility(in.shadow_position);
+    let visibility = 1.0;//shadow_visibility(in.shadow_position);
     let lighting = 0.35 + 0.95 * diffuse * visibility;
 
     let distance = length(in.world_position - in.camera_position);

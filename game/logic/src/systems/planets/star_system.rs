@@ -29,7 +29,7 @@ pub fn create_star_system(ctx: &mut SystemContext, commands: &mut Commands) {
     world.insert(
         star_entity,
         TransformComponent {
-            position: vec3(1e3, 1e6, 0.0),
+            position: vec3(149.0 * 1_000_000_000.0, 1e6, 0.0),
             rotation: Quat::IDENTITY,
             scale: vec3(1e5, 1e5, 1e5),
             velocity: vec3(0.0, 0.0, 0.0),
@@ -39,7 +39,7 @@ pub fn create_star_system(ctx: &mut SystemContext, commands: &mut Commands) {
     create_star_render_object(ctx, star_entity);
 
     // Create planets
-    for i in 0..7 {
+    for i in 0..1 {
         let position = if i == 0 {
             Some(vec3(0.0, 0.0, 0.0))
         } else {

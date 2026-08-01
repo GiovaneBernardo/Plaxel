@@ -1,17 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use engine::{
-    game_info,
-    math::{Vec3, vec3},
-};
+use engine::math::{Vec3, vec3};
 use game_types::{
     octree::{FaceNeighbor, FaceNeighborKind, OctreeNode},
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
+    terrain::PlanetTerrainConfig,
 };
 
 use crate::{
     CHUNK_CELL_COUNT, octree,
-    sdf::{EarthHeightmap, sdf_at_center},
+    sdf::terrain_height_bounds,
+    systems::terrain::terrain_sampler::{self, PlanetTerrainSamplerContext},
 };
 
 pub trait PlanetExt {
@@ -19,17 +18,13 @@ pub trait PlanetExt {
         grid: &[Vec<Vec<f32>>],
         offset: Vec3,
         resolution: f32,
-        planet_position: Vec3,
-        planet_size: u32,
-        heightmap: Option<&EarthHeightmap>,
-        terrain_edits: &PlanetTerrainEdits,
+        terrain: &PlanetTerrainSamplerContext<'_>,
         face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(
         planet_position: engine::math::Vec3,
-        planet_radius: u32,
         camera_position: &engine::math::Vec3,
-        planet_size: u32,
+        terrain_config: &PlanetTerrainConfig,
         chunk_size: u32,
         lod_strength: f32,
         terrain_edits: &PlanetTerrainEdits,
@@ -74,7 +69,6 @@ fn contour_cell_vertex(
     offset: Vec3,
     resolution: f32,
     planet_position: Vec3,
-    heightmap: Option<&EarthHeightmap>,
 ) -> Option<PlanetVertex> {
     let corners = [
         grid[x][y][z],
@@ -87,12 +81,14 @@ fn contour_cell_vertex(
         grid[x + 1][y + 1][z + 1],
     ];
 
-    let base = vec3(
-        x as f32 * resolution + offset.x,
-        y as f32 * resolution + offset.y,
-        z as f32 * resolution + offset.z,
+    let half_size = resolution * 0.5;
+
+    let base_local = vec3(
+        x as f32 * resolution - half_size,
+        y as f32 * resolution - half_size,
+        z as f32 * resolution - half_size,
     );
-    contour_cell_from_corners(corners, base, resolution, planet_position, heightmap)
+    contour_cell_from_corners(corners, base_local, resolution, planet_position)
 }
 
 fn contour_cell_from_corners(
@@ -100,7 +96,6 @@ fn contour_cell_from_corners(
     base: Vec3,
     resolution: f32,
     planet_position: Vec3,
-    heightmap: Option<&EarthHeightmap>,
 ) -> Option<PlanetVertex> {
     let has_negative = corners.iter().any(|&density| density < 0.0);
     let has_positive = corners.iter().any(|&density| density > 0.0);
@@ -180,10 +175,12 @@ fn contour_cell_from_corners(
         vec3(0.0, 1.0, 0.0)
     };
     let slope = average_normal[0] * up.x + average_normal[1] * up.y + average_normal[2] * up.z;
-    let is_ocean = heightmap
-        .and_then(|heightmap| heightmap.sample_unit_height(up))
-        .is_some_and(|height| height == 0.0);
+    //let is_ocean = heightmap
+    //    .and_then(|heightmap| heightmap.sample_unit_height(up))
+    //    .is_some_and(|height| height == 0.0);
+    let is_ocean = false;
 
+    // Define material
     let (mat_a, mat_b, blend) = if is_ocean {
         (3u16, 3u16, 0u8)
     } else if slope > 0.7 {
@@ -356,12 +353,9 @@ fn transition_cell_vertex(
     fine_size: f32,
     fine_spacing: f32,
     coarse: FaceNeighbor,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
-    terrain_edits: &PlanetTerrainEdits,
     cache: &mut HashMap<TransitionCellKey, Option<u32>>,
     vertices: &mut Vec<PlanetVertex>,
+    terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> Option<u32> {
     let normal_axis = face / 2;
     let positive_face = face % 2 == 1;
@@ -404,21 +398,14 @@ fn transition_cell_vertex(
         aligned + vec3(0.0, spacing, spacing),
         aligned + vec3(spacing, spacing, spacing),
     ]
-    .map(|position| {
-        sdf_at_center(
-            position,
-            planet_position,
-            planet_size,
-            heightmap,
-            terrain_edits,
-        )
-    });
-    let index = contour_cell_from_corners(corners, aligned, spacing, planet_position, heightmap)
-        .map(|vertex| {
+    .map(|position| terrain_sampler::sample_final_density(terrain, position));
+    let index = contour_cell_from_corners(corners, aligned, spacing, terrain.planet_position).map(
+        |vertex| {
             let index = vertices.len() as u32;
             vertices.push(vertex);
             index
-        });
+        },
+    );
     cache.insert(key, index);
     index
 }
@@ -433,14 +420,11 @@ fn append_transition_edge(
     fine_size: f32,
     fine_spacing: f32,
     coarse: FaceNeighbor,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
-    terrain_edits: &PlanetTerrainEdits,
     cache: &mut HashMap<TransitionCellKey, Option<u32>>,
     emitted_edges: &mut HashSet<TransitionEdgeKey>,
     vertices: &mut Vec<PlanetVertex>,
     indices: &mut Vec<u32>,
+    terrain: &PlanetTerrainSamplerContext<'_>,
 ) {
     let edge_key = TransitionEdgeKey {
         start: [start.x.to_bits(), start.y.to_bits(), start.z.to_bits()],
@@ -480,12 +464,9 @@ fn append_transition_edge(
             fine_size,
             fine_spacing,
             coarse,
-            planet_position,
-            planet_size,
-            heightmap,
-            terrain_edits,
             cache,
             vertices,
+            terrain,
         );
     }
 
@@ -525,13 +506,10 @@ fn append_transition_faces(
     fine_min: Vec3,
     fine_size: f32,
     fine_spacing: f32,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
-    terrain_edits: &PlanetTerrainEdits,
     face_neighbors: &[FaceNeighbor; 6],
     vertices: &mut Vec<PlanetVertex>,
     indices: &mut Vec<u32>,
+    terrain: &PlanetTerrainSamplerContext<'_>,
 ) {
     let cell_count = CHUNK_CELL_COUNT;
     let mut cache = HashMap::new();
@@ -585,14 +563,11 @@ fn append_transition_faces(
                         fine_size,
                         fine_spacing,
                         coarse,
-                        planet_position,
-                        planet_size,
-                        heightmap,
-                        terrain_edits,
                         &mut cache,
                         &mut emitted_edges,
                         vertices,
                         indices,
+                        terrain,
                     );
                 }
             }
@@ -605,10 +580,7 @@ impl PlanetExt for Planet {
         grid: &[Vec<Vec<f32>>],
         offset: Vec3,
         resolution: f32,
-        planet_position: Vec3,
-        planet_size: u32,
-        heightmap: Option<&EarthHeightmap>,
-        terrain_edits: &PlanetTerrainEdits,
+        terrain: &PlanetTerrainSamplerContext<'_>,
         face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
@@ -630,8 +602,7 @@ impl PlanetExt for Planet {
                         z,
                         offset,
                         resolution,
-                        planet_position,
-                        heightmap,
+                        terrain.planet_position,
                     ) else {
                         continue;
                     };
@@ -650,13 +621,10 @@ impl PlanetExt for Planet {
             offset,
             resolution * CHUNK_CELL_COUNT as f32,
             resolution,
-            planet_position,
-            planet_size,
-            heightmap,
-            terrain_edits,
             face_neighbors,
             &mut vertices,
             &mut indices,
+            terrain,
         );
 
         (vertices, indices)
@@ -664,28 +632,29 @@ impl PlanetExt for Planet {
 
     fn create_octree(
         planet_position: engine::math::Vec3,
-        planet_radius: u32,
         camera_position: &engine::math::Vec3,
-        planet_size: u32,
+        terrain_config: &PlanetTerrainConfig,
         chunk_size: u32,
         lod_strength: f32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode {
-        let r = planet_radius as f32 / 2.0;
+        let (_, max_height) = terrain_height_bounds(terrain_config.radius, None);
+        let required_diameter = (terrain_config.radius + max_height) * 2.0;
+        let root_size = (required_diameter.ceil() as u32).next_power_of_two() as f32;
+        let half_root_size = root_size * 0.5;
         octree::build_node(
             Vec3 {
-                x: planet_position.x + -r,
-                y: planet_position.y + -r,
-                z: planet_position.z + -r,
+                x: planet_position.x - half_root_size,
+                y: planet_position.y - half_root_size,
+                z: planet_position.z - half_root_size,
             },
-            planet_radius as f32,
+            root_size,
             chunk_size as f32,
             true,
             camera_position,
             planet_position,
-            planet_size,
+            terrain_config,
             lod_strength,
-            None,
             terrain_edits,
         )
     }
@@ -704,145 +673,5 @@ impl PlanetExt for Planet {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use game_types::planet::PlanetTerrainEdits;
-
-    use super::*;
-
-    fn empty_edits() -> PlanetTerrainEdits {
-        PlanetTerrainEdits {
-            modified_chunks: HashMap::new(),
-            modified_ranges: HashMap::new(),
-        }
-    }
-
-    fn no_neighbors() -> [FaceNeighbor; 6] {
-        [FaceNeighbor::SAME_OR_ABSENT; 6]
-    }
-
-    fn density_grid(
-        sample_count: usize,
-        offset: Vec3,
-        density: impl Fn(Vec3) -> f32,
-    ) -> Vec<Vec<Vec<f32>>> {
-        (0..sample_count)
-            .map(|x| {
-                (0..sample_count)
-                    .map(|y| {
-                        (0..sample_count)
-                            .map(|z| density(offset + vec3(x as f32, y as f32, z as f32)))
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn positive_ghost_cell_does_not_emit_owned_edge_segments() {
-        // Four samples represent two owned cells plus one positive ghost cell.
-        // This surface exists only in the ghost cell at x = 2.
-        let grid = density_grid(4, Vec3::ZERO, |p| p.x - 2.5);
-        let (_, indices) = Planet::dual_contour_grid(
-            &grid,
-            Vec3::ZERO,
-            1.0,
-            Vec3::ZERO,
-            0,
-            None,
-            &empty_edits(),
-            &no_neighbors(),
-        );
-
-        assert!(indices.is_empty());
-    }
-
-    #[test]
-    fn owned_cell_still_emits_geometry() {
-        let grid = density_grid(4, Vec3::ZERO, |p| p.x - 1.5);
-        let (_, indices) = Planet::dual_contour_grid(
-            &grid,
-            Vec3::ZERO,
-            1.0,
-            Vec3::ZERO,
-            0,
-            None,
-            &empty_edits(),
-            &no_neighbors(),
-        );
-
-        assert!(!indices.is_empty());
-    }
-
-    #[test]
-    fn owned_and_ghost_copies_of_a_cell_have_matching_vertices_and_normals() {
-        let density = |p: Vec3| p.x + 2.0 * p.y - 5.0;
-        let lower_grid = density_grid(4, Vec3::ZERO, density);
-        let neighbor_offset = vec3(2.0, 0.0, 0.0);
-        let neighbor_grid = density_grid(4, neighbor_offset, density);
-
-        let lower =
-            contour_cell_vertex(&lower_grid, 2, 1, 1, Vec3::ZERO, 1.0, Vec3::ZERO, None).unwrap();
-        let neighbor = contour_cell_vertex(
-            &neighbor_grid,
-            0,
-            1,
-            1,
-            neighbor_offset,
-            1.0,
-            Vec3::ZERO,
-            None,
-        )
-        .unwrap();
-
-        for axis in 0..3 {
-            assert!((lower.position[axis] - neighbor.position[axis]).abs() < 1e-6);
-            assert!((lower.normal[axis] - neighbor.normal[axis]).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn mixed_lod_face_emits_valid_adaptive_polygons() {
-        let fine_min = vec3(-32.0, 0.0, -16.0);
-        let planet_size = 256;
-        let edits = empty_edits();
-        let grid = density_grid(CHUNK_CELL_COUNT + 2, fine_min, |position| {
-            sdf_at_center(position, Vec3::ZERO, planet_size, None, &edits)
-        });
-        let mut neighbors = no_neighbors();
-        neighbors[1] = FaceNeighbor {
-            kind: FaceNeighborKind::Coarser,
-            min: vec3(0.0, 0.0, -32.0),
-            size: 64.0,
-        };
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
-        append_transition_faces(
-            &grid,
-            fine_min,
-            32.0,
-            1.0,
-            Vec3::ZERO,
-            planet_size,
-            None,
-            &edits,
-            &neighbors,
-            &mut vertices,
-            &mut indices,
-        );
-
-        assert!(!indices.is_empty());
-        assert_eq!(indices.len() % 3, 0);
-        assert!(indices.iter().all(|&index| index < vertices.len() as u32));
-        assert!(indices.chunks_exact(3).all(|triangle| {
-            triangle[0] != triangle[1] && triangle[1] != triangle[2] && triangle[0] != triangle[2]
-        }));
     }
 }

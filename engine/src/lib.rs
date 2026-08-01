@@ -187,7 +187,13 @@ impl State {
         }
     }
 
-    fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+    fn handle_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        code: KeyCode,
+        is_pressed: bool,
+        is_repeat: bool,
+    ) {
         if code == KeyCode::Escape && is_pressed {
             event_loop.exit();
         } else {
@@ -200,6 +206,13 @@ impl State {
 
         if code == KeyCode::KeyR && is_pressed {
             self.global_resources.renderer.renderer_api.reload_shaders();
+        }
+
+        if code == KeyCode::F10 && is_pressed && !is_repeat {
+            self.global_resources
+                .renderer
+                .renderer_api
+                .toggle_present_mode();
         }
 
         let world = self.active_scene_mut().unwrap().world_mut();
@@ -1206,11 +1219,12 @@ fn app_window_event(
                 KeyEvent {
                     physical_key: PhysicalKey::Code(code),
                     state: key_state,
+                    repeat,
                     ..
                 },
             ..
         } => {
-            state.handle_key(event_loop, code, key_state.is_pressed());
+            state.handle_key(event_loop, code, key_state.is_pressed(), repeat);
             if let Some(f) = &mut app.on_key {
                 f(state, code, key_state.is_pressed());
             }

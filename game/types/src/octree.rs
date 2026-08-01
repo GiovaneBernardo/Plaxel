@@ -47,8 +47,8 @@ pub enum OctreeChanges {
 #[derive(Debug, Clone, Copy)]
 pub struct PlanetMeshRequest {
     pub planet_entity: Entity,
+    pub node_key: NodeKey,
     pub planet_position: Vec3,
-    pub planet_size: u32,
     pub node_min_corner: Vec3,
     pub node_size: f32,
     pub face_neighbors: [FaceNeighbor; 6],
@@ -149,8 +149,8 @@ pub struct OctreeNode {
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord)]
 pub struct NodeKey {
+    pub level: i8,
     pub x: i32,
     pub y: i32,
     pub z: i32,
-    pub size: i32,
 }

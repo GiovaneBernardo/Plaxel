@@ -11,13 +11,13 @@ use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::components::renderer::MeshRendererComponent;
 use engine::ecs::entity::Entity;
 use engine::ecs::query::Query;
-use engine::game_info;
 use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
 use game_types::assembly::Assembly;
 use game_types::octree::{DensityRange, FaceNeighbor, OctreeNode, PlanetMeshRequest};
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
+use game_types::terrain::PlanetTerrainConfig;
 use rand::Rng;
 
 use engine::math::{Quat, Vec3, vec3};
@@ -29,11 +29,11 @@ use game_types::game_mode::{GameMode, GameModeState};
 
 use crate::{
     GameCamera, GameState, octree,
-    sdf::{
-        EarthHeightmap, TERRAIN_EDIT_CELL_COUNT, TERRAIN_EDIT_SAMPLE_COUNT,
-        resample_terrain_edit_brick, sdf_at_center,
+    sdf::{TERRAIN_EDIT_CELL_COUNT, TERRAIN_EDIT_SAMPLE_COUNT, resample_terrain_edit_brick},
+    systems::{
+        planets::submit_requested_mesh_urgent,
+        terrain::terrain_sampler::{self, PlanetTerrainSamplerContext},
     },
-    systems::planets::submit_requested_mesh_urgent,
 };
 
 #[allow(dead_code)]
@@ -141,20 +141,11 @@ fn trace_terrain_surface(
     ray_direction: Vec3,
     ray_start_distance: f32,
     ray_end_distance: f32,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
-    terrain_edits: &PlanetTerrainEdits,
+    terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> Option<(f32, engine::math::Vec3)> {
     let mut previous_distance = ray_start_distance.max(0.0);
     let previous_position = ray_origin + ray_direction * previous_distance;
-    let mut previous_density = sdf_at_center(
-        previous_position,
-        planet_position,
-        planet_size,
-        heightmap,
-        terrain_edits,
-    );
+    let mut previous_density = terrain_sampler::sample_final_density(terrain, previous_position);
 
     if previous_density.abs() < 0.5 {
         return Some((previous_distance, previous_position));
@@ -171,13 +162,7 @@ fn trace_terrain_surface(
         current_distance = (current_distance + step_distance).min(ray_end_distance);
 
         let current_position = ray_origin + ray_direction * current_distance;
-        let current_density = sdf_at_center(
-            current_position,
-            planet_position,
-            planet_size,
-            heightmap,
-            terrain_edits,
-        );
+        let current_density = terrain_sampler::sample_final_density(terrain, current_position);
 
         if current_density.abs() < 0.5 {
             return Some((current_distance, current_position));
@@ -191,13 +176,8 @@ fn trace_terrain_surface(
             for _ in 0..16 {
                 let middle_distance = (lower_distance + upper_distance) * 0.5;
                 let middle_position = ray_origin + ray_direction * middle_distance;
-                let middle_density = sdf_at_center(
-                    middle_position,
-                    planet_position,
-                    planet_size,
-                    heightmap,
-                    terrain_edits,
-                );
+                let middle_density =
+                    terrain_sampler::sample_final_density(terrain, middle_position);
 
                 if middle_density.abs() < 0.5 {
                     return Some((middle_distance, middle_position));
@@ -240,7 +220,6 @@ fn collect_dirty_mesh_requests(
     node: &OctreeNode,
     planet_entity: Entity,
     planet_position: Vec3,
-    planet_size: u32,
     bounds_min: Vec3,
     bounds_max: Vec3,
     requests: &mut Vec<PlanetMeshRequest>,
@@ -255,7 +234,6 @@ fn collect_dirty_mesh_requests(
                 child,
                 planet_entity,
                 planet_position,
-                planet_size,
                 bounds_min,
                 bounds_max,
                 requests,
@@ -266,8 +244,8 @@ fn collect_dirty_mesh_requests(
 
     requests.push(PlanetMeshRequest {
         planet_entity,
+        node_key: node.key,
         planet_position,
-        planet_size,
         node_min_corner: node.min,
         node_size: node.size,
         face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
@@ -480,9 +458,13 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                         viewport_size.y as f32,
                     ) {
                         let mut closest_hit = None;
-                        let mut query = Query::<(&Planet, &PlanetTerrainEdits)>::new(world);
+                        let mut query = Query::<(
+                            &Planet,
+                            &PlanetTerrainEdits,
+                            &Arc<PlanetTerrainConfig>,
+                        )>::new(world);
 
-                        query.for_each(|entity, (planet, terrain_edits)| {
+                        query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
                             let Some((planet_entry_distance, planet_exit_distance)) =
                                 octree::ray_intersects(
                                     &planet.octree_root,
@@ -493,16 +475,17 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                 return;
                             };
 
-                            let planet_size = (planet.octree_root.size * 2.0) as u32;
+                            let terrain = PlanetTerrainSamplerContext {
+                                config: terrain_config.as_ref(),
+                                edits: terrain_edits,
+                                planet_position: planet.position,
+                            };
                             let Some((surface_distance, surface_position)) = trace_terrain_surface(
                                 ray_origin,
                                 ray_direction,
                                 planet_entry_distance,
                                 planet_exit_distance,
-                                planet.position,
-                                planet_size,
-                                None, //heightmap.as_deref(),
-                                terrain_edits,
+                                &terrain,
                             ) else {
                                 return;
                             };
@@ -526,7 +509,6 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                             let brick_size = 32.0;
                             let level = 0;
                             let brush_strength = if inverse_deformation { -32.0 } else { 32.0 };
-                            let planet_size = (hit_planet.octree_root.size * 2.0) as u32;
                             let min_brick = TerrainBrickKey {
                                 x: ((hit_local.x - brush_radius) / brick_size).floor() as i32,
                                 y: ((hit_local.y - brush_radius) / brick_size).floor() as i32,
@@ -653,8 +635,12 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                     (max_brick.z + 1) as f32 * brick_size,
                                 );
                             let mut dirty_mesh_requests = Vec::new();
-                            let mut query = Query::<(&mut Planet, &PlanetTerrainEdits)>::new(world);
-                            query.for_each(|entity, (planet, terrain_edits)| {
+                            let mut query = Query::<(
+                                &mut Planet,
+                                &PlanetTerrainEdits,
+                                &Arc<PlanetTerrainConfig>,
+                            )>::new(world);
+                            query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
                                 if entity != hit_entity {
                                     return;
                                 }
@@ -664,15 +650,13 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                     dirty_bounds_min,
                                     dirty_bounds_max,
                                     planet.position,
-                                    planet_size,
-                                    None,
+                                    terrain_config.as_ref(),
                                     terrain_edits,
                                 );
                                 collect_dirty_mesh_requests(
                                     &planet.octree_root,
                                     hit_entity,
                                     planet.position,
-                                    planet_size,
                                     dirty_bounds_min,
                                     dirty_bounds_max,
                                     &mut dirty_mesh_requests,
@@ -716,8 +700,8 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                         }
                                         dirty_mesh_requests.push(PlanetMeshRequest {
                                             planet_entity: hit_entity,
+                                            node_key: neighbor.key,
                                             planet_position: planet.position,
-                                            planet_size,
                                             node_min_corner: neighbor.min,
                                             node_size: neighbor.size,
                                             face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],

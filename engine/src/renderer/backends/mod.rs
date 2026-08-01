@@ -25,6 +25,7 @@ pub trait RendererAPI {
 
     fn compile(&mut self);
     fn resize(&mut self, width: u32, height: u32);
+    fn toggle_present_mode(&mut self);
     fn resize_texture(&mut self, texture_handle: &TextureHandle, descriptor: &TextureDescriptor);
     fn compile_pipeline(&mut self, node: &dyn RenderNode) -> PipelineHandle;
     fn submit(&mut self, graph: &RenderGraph);

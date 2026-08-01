@@ -443,6 +443,7 @@ pub struct WgpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     surface: wgpu::Surface<'static>,
     depth_texture: texture::Texture,
     pipelines: HashMap<PipelineHandle, wgpu::RenderPipeline>,
@@ -593,6 +594,33 @@ impl RendererAPI for WgpuBackend {
             &self.surface_config,
             "depth_texture",
         );
+    }
+
+    fn toggle_present_mode(&mut self) {
+        let next_mode = match self.surface_config.present_mode {
+            wgpu::PresentMode::Mailbox => wgpu::PresentMode::Immediate,
+            wgpu::PresentMode::Immediate => wgpu::PresentMode::Mailbox,
+            _ if self
+                .supported_present_modes
+                .contains(&wgpu::PresentMode::Mailbox) =>
+            {
+                wgpu::PresentMode::Mailbox
+            }
+            _ => wgpu::PresentMode::Immediate,
+        };
+
+        if !self.supported_present_modes.contains(&next_mode) {
+            log::warn!(
+                "Cannot switch presentation mode from {:?} to {:?}: mode is unsupported",
+                self.surface_config.present_mode,
+                next_mode
+            );
+            return;
+        }
+
+        self.surface_config.present_mode = next_mode;
+        self.surface.configure(&self.device, &self.surface_config);
+        engine_info!("Presentation mode switched to {next_mode:?}");
     }
 
     fn resize_texture(&mut self, texture_handle: &TextureHandle, descriptor: &TextureDescriptor) {
@@ -1669,6 +1697,8 @@ impl WgpuBackend {
                 .find(|f| f.is_srgb())
                 .copied()
                 .unwrap_or(surface_caps.formats[0]);
+
+            engine_info!("PRESENT MODE: {:?}", surface_caps.present_modes[0]);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: surface_format,
@@ -1699,6 +1729,7 @@ impl WgpuBackend {
                 queue,
                 surface,
                 surface_config: config,
+                supported_present_modes: surface_caps.present_modes,
                 depth_texture,
                 pipelines: HashMap::new(),
                 pipelines_by_uuid: HashMap::new(),

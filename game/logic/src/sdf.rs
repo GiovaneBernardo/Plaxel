@@ -282,25 +282,26 @@ pub fn sample_terrain_edit(local_p: Vec3, terrain_edits: &PlanetTerrainEdits) ->
     sample_terrain_brick(brick, (local_p - brick_min) / TERRAIN_EDIT_BRICK_SIZE)
 }
 
+// This already accounts for terrain edits (better for gameplay code most of the time)
 pub fn sdf_at_center(
     p: engine::math::Vec3,
     planet_center: engine::math::Vec3,
-    planet_size: u32,
+    planet_radius: f32,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> f32 {
     let local_p = p - planet_center;
-    base_sdf_at_center(p, planet_center, planet_size, heightmap)
+    base_sdf_at_center(p, planet_center, planet_radius, heightmap)
         + sample_terrain_edit(local_p, terrain_edits)
 }
 
+// This doesnt takes into account terrain edits
 pub fn base_sdf_at_center(
     p: engine::math::Vec3,
     planet_center: engine::math::Vec3,
-    planet_size: u32,
+    planet_radius: f32,
     heightmap: Option<&EarthHeightmap>,
 ) -> f32 {
-    let planet_r = planet_radius(planet_size);
     let local_p = p - planet_center;
     let dist_from_center = local_p.length();
     let dir = if dist_from_center > 1e-6 {
@@ -310,9 +311,9 @@ pub fn base_sdf_at_center(
     };
 
     let height = heightmap
-        .and_then(|heightmap| heightmap.sample_height(dir, planet_r))
-        .unwrap_or_else(|| spherical_terrain_height(dir, planet_r));
-    let terrain = dist_from_center - (planet_r + height);
+        .and_then(|heightmap| heightmap.sample_height(dir, planet_radius))
+        .unwrap_or_else(|| spherical_terrain_height(dir, planet_radius));
+    let terrain = dist_from_center - (planet_radius + height);
     return terrain;
 
     // let depth_below_surface = -terrain;
@@ -327,22 +328,18 @@ pub fn base_sdf_at_center(
     // }
 }
 
-pub fn planet_radius(planet_size: u32) -> f32 {
-    planet_size as f32 / 8.0
+pub fn min_terrain_height(planet_radius: f32) -> f32 {
+    -planet_radius * 0.011
 }
 
-pub fn min_terrain_height(planet_size: u32) -> f32 {
-    -planet_radius(planet_size) * 0.011
-}
-
-pub fn max_terrain_height(planet_size: u32) -> f32 {
-    planet_radius(planet_size) * 0.045
+pub fn max_terrain_height(planet_radius: f32) -> f32 {
+    planet_radius * 0.045
 }
 
 /// Conservative lower and upper bounds for terrain height above the base
 /// planet radius. Keeping this separate from SDF sampling lets the octree
 /// classify whole regions without evaluating procedural noise.
-pub fn terrain_height_bounds(planet_size: u32, heightmap: Option<&EarthHeightmap>) -> (f32, f32) {
+pub fn terrain_height_bounds(planet_radius: f32, heightmap: Option<&EarthHeightmap>) -> (f32, f32) {
     let Some(heightmap) = heightmap.filter(|heightmap| {
         heightmap.width > 0
             && heightmap.height > 0
@@ -351,12 +348,12 @@ pub fn terrain_height_bounds(planet_size: u32, heightmap: Option<&EarthHeightmap
             && heightmap.max_height.is_finite()
     }) else {
         return (
-            min_terrain_height(planet_size),
-            max_terrain_height(planet_size),
+            min_terrain_height(planet_radius),
+            max_terrain_height(planet_radius),
         );
     };
 
-    let height_scale = planet_radius(planet_size)
+    let height_scale = planet_radius
         * (EARTH_HIGHEST_ALTITUDE_METERS / EARTH_MEAN_RADIUS_METERS)
         * EARTH_HEIGHT_EXAGGERATION;
 

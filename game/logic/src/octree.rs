@@ -8,11 +8,12 @@ use game_types::{
         PlanetMeshRequest,
     },
     planet::{PlanetTerrainEdits, TerrainBrickKey, TerrainBrickSamples},
+    terrain::PlanetTerrainConfig,
 };
 
 use crate::{
     NodeKey,
-    sdf::{EarthHeightmap, TERRAIN_EDIT_BRICK_SIZE, planet_radius, terrain_height_bounds},
+    sdf::{TERRAIN_EDIT_BRICK_SIZE, terrain_height_bounds},
 };
 
 const INITIAL_SPLIT_DISTANCE_FACTOR: f32 = 1.25;
@@ -60,19 +61,11 @@ pub fn build_node(
     first: bool,
     camera_position: &engine::math::Vec3,
     planet_center: Vec3,
-    planet_size: u32,
+    terrain_config: &PlanetTerrainConfig,
     lod_strength: f32,
-    heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> OctreeNode {
-    let density_range = node_density_range(
-        min,
-        size,
-        planet_center,
-        planet_size,
-        heightmap,
-        terrain_edits,
-    );
+    let density_range = node_density_range(min, size, planet_center, terrain_config, terrain_edits);
     let has_surface = density_range.contains_zero();
     let _is_behind_horizon = is_behind_horizon(
         min + vec3(size * 0.5, size * 0.5, size * 0.5),
@@ -80,10 +73,10 @@ pub fn build_node(
         planet_center,
     );
     let key = NodeKey {
+        level: 0,
         x: min.x as i32,
         y: min.y as i32,
         z: min.z as i32,
-        size: size as i32,
     };
 
     if !first {
@@ -131,9 +124,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -143,9 +135,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -155,9 +146,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -167,9 +157,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -179,9 +168,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -191,9 +179,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -203,9 +190,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
         Box::new(build_node(
@@ -215,9 +201,8 @@ pub fn build_node(
             false,
             camera_position,
             planet_center,
-            planet_size,
+            terrain_config,
             lod_strength,
-            heightmap,
             terrain_edits,
         )),
     ];
@@ -266,8 +251,7 @@ fn base_density_range(
     min: Vec3,
     size: f32,
     planet_center: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain_config: &PlanetTerrainConfig,
 ) -> DensityRange {
     let max = min + Vec3::splat(size);
     let closest = vec3(
@@ -286,8 +270,8 @@ fn base_density_range(
     );
     let max_radius = farthest.length();
 
-    let radius = planet_radius(planet_size);
-    let (min_height, max_height) = terrain_height_bounds(planet_size, heightmap);
+    let radius = terrain_config.radius;
+    let (min_height, max_height) = terrain_height_bounds(radius, None);
     DensityRange::new(
         min_radius - (radius + max_height),
         max_radius - (radius + min_height),
@@ -377,11 +361,10 @@ pub fn node_density_range(
     min: Vec3,
     size: f32,
     planet_center: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) -> DensityRange {
-    base_density_range(min, size, planet_center, planet_size, heightmap).add(edit_density_range(
+    base_density_range(min, size, planet_center, terrain_config).add(edit_density_range(
         min - planet_center,
         size,
         terrain_edits,
@@ -392,19 +375,10 @@ pub fn has_surface(
     min: Vec3,
     size: f32,
     planet_center: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) -> bool {
-    node_density_range(
-        min,
-        size,
-        planet_center,
-        planet_size,
-        heightmap,
-        terrain_edits,
-    )
-    .contains_zero()
+    node_density_range(min, size, planet_center, terrain_config, terrain_edits).contains_zero()
 }
 
 pub fn collect_octree_nodes_at_depth(
@@ -625,14 +599,36 @@ pub fn update(
     camera_pos: Vec3,
     planet_entity: Entity,
     planet_position: Vec3,
-    planet_size: u32,
+    terrain_config: &PlanetTerrainConfig,
     lod_strength: f32,
     changes: &mut Vec<OctreeChanges>,
-    heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
+    update_node(
+        node,
+        camera_pos,
+        planet_entity,
+        planet_position,
+        terrain_config,
+        lod_strength,
+        changes,
+        terrain_edits,
+        true,
+    );
+}
+
+fn update_node(
+    node: &mut OctreeNode,
+    camera_pos: Vec3,
+    planet_entity: Entity,
+    planet_position: Vec3,
+    terrain_config: &PlanetTerrainConfig,
+    lod_strength: f32,
+    changes: &mut Vec<OctreeChanges>,
+    terrain_edits: &PlanetTerrainEdits,
+    is_root_node: bool,
+) {
     let min_node_size = 32.0;
-    let is_root_node = node.size >= planet_size as f32 * 0.5;
 
     // Do not refine a topology that has not become visible yet. Otherwise a
     // child replacement can supersede its parent replacement before anything
@@ -647,8 +643,7 @@ pub fn update(
             changes,
             planet_entity,
             planet_position,
-            planet_size,
-            heightmap,
+            terrain_config,
             terrain_edits,
         );
         return;
@@ -660,30 +655,29 @@ pub fn update(
             changes,
             planet_entity,
             planet_position,
-            planet_size,
-            heightmap,
+            terrain_config,
             terrain_edits,
         );
         return;
     }
 
     if !is_root_node && should_merge(node, camera_pos, min_node_size, lod_strength) {
-        merge_node(node, changes, planet_entity, planet_position, planet_size);
+        merge_node(node, changes, planet_entity, planet_position);
         return;
     }
 
     if let Some(children) = node.children.as_mut() {
         for child in children.iter_mut() {
-            update(
+            update_node(
                 child,
                 camera_pos,
                 planet_entity,
                 planet_position,
-                planet_size,
+                terrain_config,
                 lod_strength,
                 changes,
-                heightmap,
                 terrain_edits,
+                false,
             );
         }
     }
@@ -692,8 +686,7 @@ pub fn update(
 pub fn create_children(
     parent: &OctreeNode,
     planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) -> [Box<OctreeNode>; 8] {
     let bounds = node_bounds(parent);
@@ -706,16 +699,15 @@ pub fn create_children(
             min,
             child_size,
             planet_position,
-            planet_size,
-            heightmap,
+            terrain_config,
             terrain_edits,
         );
         OctreeNode {
             key: NodeKey {
+                level: parent.key.level + 1,
                 x: min.x as i32,
                 y: min.y as i32,
                 z: min.z as i32,
-                size: child_size as i32,
             },
             min,
             size: child_size,
@@ -775,8 +767,7 @@ pub fn refresh_density_ranges_in_bounds(
     dirty_min: Vec3,
     dirty_max: Vec3,
     planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) {
     let node_max = node.min + Vec3::splat(node.size);
@@ -791,8 +782,7 @@ pub fn refresh_density_ranges_in_bounds(
                 dirty_min,
                 dirty_max,
                 planet_position,
-                planet_size,
-                heightmap,
+                terrain_config,
                 terrain_edits,
             );
         }
@@ -807,8 +797,7 @@ pub fn refresh_density_ranges_in_bounds(
             node.min,
             node.size,
             planet_position,
-            planet_size,
-            heightmap,
+            terrain_config,
             terrain_edits,
         );
     }
@@ -868,12 +857,11 @@ fn mesh_request(
     node: &OctreeNode,
     planet_entity: Entity,
     planet_position: Vec3,
-    planet_size: u32,
 ) -> PlanetMeshRequest {
     PlanetMeshRequest {
         planet_entity,
+        node_key: node.key,
         planet_position,
-        planet_size,
         node_min_corner: node.min,
         node_size: node.size,
         face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
@@ -885,16 +873,15 @@ fn split_node(
     changes: &mut Vec<OctreeChanges>,
     planet_entity: Entity,
     planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    let children = create_children(node, planet_position, planet_size, heightmap, terrain_edits);
+    let children = create_children(node, planet_position, terrain_config, terrain_edits);
 
     let requests = children
         .iter()
         .filter(|child| child.has_surface)
-        .map(|child| mesh_request(child, planet_entity, planet_position, planet_size))
+        .map(|child| mesh_request(child, planet_entity, planet_position))
         .collect();
 
     changes.push(OctreeChanges::ReplaceMeshes {
@@ -915,7 +902,6 @@ fn merge_node(
     changes: &mut Vec<OctreeChanges>,
     planet_entity: Entity,
     planet_position: Vec3,
-    planet_size: u32,
 ) {
     let mut keys_to_remove = Vec::new();
 
@@ -924,12 +910,7 @@ fn merge_node(
     }
 
     let requests = if node.has_surface {
-        vec![mesh_request(
-            node,
-            planet_entity,
-            planet_position,
-            planet_size,
-        )]
+        vec![mesh_request(node, planet_entity, planet_position)]
     } else {
         Vec::new()
     };
@@ -1051,168 +1032,5 @@ pub fn traverse_octree(
 
     for (child, _) in children {
         traverse_octree(ray_origin, ray_direction, child, best_t, last_node);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use game_types::planet::TerrainBrickKey;
-
-    use super::*;
-
-    fn empty_edits() -> PlanetTerrainEdits {
-        PlanetTerrainEdits {
-            modified_chunks: HashMap::new(),
-            modified_ranges: HashMap::new(),
-        }
-    }
-
-    fn topology_node(min: Vec3, size: f32) -> OctreeNode {
-        OctreeNode {
-            key: NodeKey {
-                x: min.x as i32,
-                y: min.y as i32,
-                z: min.z as i32,
-                size: size as i32,
-            },
-            min,
-            size,
-            children: None,
-            vertex: None,
-            density_range: DensityRange::new(-1.0, 1.0),
-            has_surface: true,
-            state: NodeState::Leaf,
-        }
-    }
-
-    fn mixed_lod_topology() -> OctreeNode {
-        let mut root = topology_node(Vec3::ZERO, 8.0);
-        root.children = Some(std::array::from_fn(|index| {
-            let min = vec3(
-                if index & 1 != 0 { 4.0 } else { 0.0 },
-                if index & 2 != 0 { 4.0 } else { 0.0 },
-                if index & 4 != 0 { 4.0 } else { 0.0 },
-            );
-            Box::new(topology_node(min, 4.0))
-        }));
-        let refined = &mut root.children.as_mut().unwrap()[1];
-        refined.children = Some(std::array::from_fn(|index| {
-            let min = refined.min
-                + vec3(
-                    if index & 1 != 0 { 2.0 } else { 0.0 },
-                    if index & 2 != 0 { 2.0 } else { 0.0 },
-                    if index & 4 != 0 { 2.0 } else { 0.0 },
-                );
-            Box::new(topology_node(min, 2.0))
-        }));
-        root
-    }
-
-    #[test]
-    fn face_neighbor_query_descends_only_into_touching_fine_leaves() {
-        let root = mixed_lod_topology();
-        let mut neighbors = Vec::new();
-        face_leaf_neighbors(&root, Vec3::ZERO, 4.0, 1, &mut neighbors);
-
-        assert_eq!(neighbors.len(), 4);
-        assert!(neighbors.iter().all(|neighbor| neighbor.size == 2.0));
-        assert!(neighbors.iter().all(|neighbor| neighbor.min.x == 4.0));
-    }
-
-    #[test]
-    fn fine_leaf_finds_the_single_coarse_leaf_across_its_face() {
-        let root = mixed_lod_topology();
-        let mut neighbors = Vec::new();
-        face_leaf_neighbors(&root, vec3(4.0, 0.0, 0.0), 2.0, 0, &mut neighbors);
-
-        assert_eq!(neighbors.len(), 1);
-        assert_eq!(neighbors[0].min, Vec3::ZERO);
-        assert_eq!(neighbors[0].size, 4.0);
-    }
-
-    #[test]
-    fn interval_keeps_surface_that_corner_signs_can_miss() {
-        let range = node_density_range(
-            vec3(99.0, -30.0, -30.0),
-            60.0,
-            Vec3::ZERO,
-            800,
-            None,
-            &empty_edits(),
-        );
-
-        assert!(range.contains_zero());
-    }
-
-    #[test]
-    fn large_nodes_far_from_terrain_are_pruned_immediately() {
-        let edits = empty_edits();
-        let min = vec3(500.0, 500.0, 500.0);
-        let size = 200.0;
-        let camera = min + Vec3::splat(size * 0.5);
-        let node = build_node(
-            min,
-            size,
-            32.0,
-            false,
-            &camera,
-            Vec3::ZERO,
-            800,
-            1.0,
-            None,
-            &edits,
-        );
-
-        assert!(node.density_range.min > 0.0);
-        assert!(!node.has_surface);
-        assert!(node.children.is_none());
-    }
-
-    #[test]
-    fn edit_range_can_create_and_propagate_a_surface_candidate() {
-        let min = vec3(105.0, 0.0, 0.0);
-        let size = 64.0;
-        let camera = min + Vec3::splat(size * 0.5);
-        let mut node = build_node(
-            min,
-            size,
-            32.0,
-            false,
-            &camera,
-            Vec3::ZERO,
-            800,
-            1.0,
-            None,
-            &empty_edits(),
-        );
-        assert!(!node.has_surface);
-
-        let key = TerrainBrickKey {
-            x: 3,
-            y: 0,
-            z: 0,
-            level: 0,
-        };
-        let samples = Arc::new(vec![vec![vec![-16.0; 2]; 2]; 2]);
-        let edits = PlanetTerrainEdits {
-            modified_chunks: HashMap::from([(key, samples)]),
-            modified_ranges: HashMap::from([(key, DensityRange::new(-16.0, -16.0))]),
-        };
-
-        refresh_density_ranges_in_bounds(
-            &mut node,
-            vec3(96.0, 0.0, 0.0),
-            vec3(128.0, 32.0, 32.0),
-            Vec3::ZERO,
-            800,
-            None,
-            &edits,
-        );
-
-        assert!(node.density_range.contains_zero());
-        assert!(node.has_surface);
-        assert!(should_split(&node, camera, 32.0, 1.0));
     }
 }

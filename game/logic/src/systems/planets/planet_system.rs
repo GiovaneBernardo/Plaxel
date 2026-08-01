@@ -21,6 +21,10 @@ use game_types::{
         OctreeNode, PlanetLodSettings, PlanetMeshRequest,
     },
     planet::{Planet, PlanetTerrainEdits},
+    terrain::{
+        BiomeConfig, ClimateConfig, FeatureConfig, GeologyConfig, LandformConfig,
+        PlanetTerrainConfig,
+    },
     universe::StarSystemComponent,
 };
 use rand::Rng;
@@ -29,8 +33,10 @@ use web_time::{Duration, Instant};
 
 use crate::{
     CHUNK_CELL_COUNT, GameCamera, GameState, octree,
-    sdf::{EarthHeightmap, base_sdf_at_center, planet_radius, sample_terrain_edit, sdf_at_center},
-    systems::planets::PlanetExt,
+    systems::{
+        planets::PlanetExt,
+        terrain::terrain_sampler::{self, PlanetTerrainSamplerContext, PlanetTerrainSnapshot},
+    },
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -106,9 +112,43 @@ const TERRAIN_EDIT_BRICK_SIZE: f32 = 32.0;
 const TERRAIN_EDIT_LEVEL: u32 = 0;
 
 const PLANET_COUNT: usize = 128;
-const PLANET_RADIUS_MULTIPLIER: f32 = 48.0; //0.1;
-const PLANET_SPAWN_RANGE: f32 = 1_000_000.0 * PLANET_RADIUS_MULTIPLIER;
+const PLANET_SPAWN_RANGE: f32 = 50_000_000.0;
 const MAX_PLANET_SPAWN_ATTEMPTS: usize = 256;
+const INITIAL_CAMERA_ALTITUDE: f32 = 256.0;
+
+pub fn default_planet_terrain_config() -> PlanetTerrainConfig {
+    PlanetTerrainConfig {
+        seed: 1,
+        radius: 6_430_000.0,
+        sea_level: 10.0,
+        rotation_axis: vec3(0.0, 0.3987, 0.9171),
+        geology: GeologyConfig {
+            definitions: Vec::new(),
+            province_scale: 1.0,
+            strata_scale: 1.0,
+        },
+        landforms: LandformConfig {
+            continent_height: 50.0,
+            continent_scale: 1.0,
+            mountain_height: 500.0,
+            mountain_width: 300.0,
+        },
+        climate: ClimateConfig {
+            equator_temperature: 20.0,
+            pole_temperature: -20.0,
+            altitude_cooling: 1.0,
+            humidity_scale: 1.0,
+        },
+        biomes: BiomeConfig {
+            definitions: Vec::new(),
+        },
+        features: FeatureConfig {
+            cave_frequency: 0.0,
+            cave_size: 0.0,
+            overhang_strength: 0.0,
+        },
+    }
+}
 
 struct CameraAltitudeLogState {
     last_log: Option<Instant>,
@@ -216,11 +256,10 @@ fn log_camera_altitude(ctx: &mut SystemContext, camera_pos: Vec3) {
     }
 
     let mut nearest = None;
-    let mut query = Query::<(&Planet,)>::new(&mut ctx.world);
-    query.for_each(|_, (planet,)| {
-        let planet_size = (planet.octree_root.size * 2.0) as u32;
-        let radius = planet_radius(planet_size);
-        let altitude_above_sea = (camera_pos - planet.position).length() - radius;
+    let mut query =
+        Query::<(&Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>::new(&mut ctx.world);
+    query.for_each(|_, (planet, terrain_edits, terrain_config)| {
+        let altitude_above_sea = (camera_pos - planet.position).length() - terrain_config.radius;
         let distance_to_sea = altitude_above_sea.abs();
         if nearest
             .as_ref()
@@ -229,8 +268,12 @@ fn log_camera_altitude(ctx: &mut SystemContext, camera_pos: Vec3) {
             return;
         }
 
-        let altitude_above_terrain =
-            base_sdf_at_center(camera_pos, planet.position, planet_size, None);
+        let terrain = PlanetTerrainSamplerContext {
+            config: terrain_config.as_ref(),
+            edits: terrain_edits,
+            planet_position: planet.position,
+        };
+        let altitude_above_terrain = terrain_sampler::sample_final_density(&terrain, camera_pos);
         let terrain_elevation = altitude_above_sea - altitude_above_terrain;
         nearest = Some((
             distance_to_sea,
@@ -265,14 +308,14 @@ pub fn create_planet(
         camera.entity
     };
 
-    let camera_pos = world
+    let mut camera_pos = world
         .get::<TransformComponent>(camera_entity)
         .unwrap()
         .position;
 
-    let planet_size = 65536.0 * PLANET_RADIUS_MULTIPLIER;
+    let terrain_config = Arc::new(default_planet_terrain_config());
     let chunk_size = 32;
-    let min_planet_distance = planet_size as f32;
+    let min_planet_distance = terrain_config.radius * 2.1;
     let mut rng = rand::thread_rng();
 
     let mut planet_positions = Vec::new();
@@ -309,15 +352,41 @@ pub fn create_planet(
         modified_chunks: HashMap::new(),
         modified_ranges: HashMap::new(),
     };
+
+    if forced_position.is_some() {
+        let spawn_direction = Vec3::Y;
+        let terrain = PlanetTerrainSamplerContext {
+            config: terrain_config.as_ref(),
+            edits: &terrain_edits,
+            planet_position,
+        };
+        let point_at_base_radius = planet_position + spawn_direction * terrain_config.radius;
+        let surface_radius = terrain_config.radius
+            - terrain_sampler::sample_original_density(&terrain, point_at_base_radius);
+        camera_pos = planet_position + spawn_direction * (surface_radius + INITIAL_CAMERA_ALTITUDE);
+        let spawn_orientation = engine::camera::Camera::look_at(
+            vec3(0.01, -1.0, 0.0).normalize(),
+            vec3(0.0, 0.0, -1.0),
+        );
+
+        let mut camera_transform = world.get_mut::<TransformComponent>(camera_entity).unwrap();
+        camera_transform.position = camera_pos;
+        camera_transform.rotation = spawn_orientation;
+        drop(camera_transform);
+        if let Some(mut camera) = world.get_resource_mut::<GameCamera>() {
+            camera.camera.position = camera_pos;
+            camera.camera.orientation = spawn_orientation;
+            camera.velocity_sample_pos = camera_pos;
+        }
+    }
     let lod_strength = world
         .get_resource::<PlanetLodSettings>()
         .map_or(1.0, |settings| settings.strength);
 
     let octree = Planet::create_octree(
         planet_position,
-        planet_size as u32 / 2,
         &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
-        planet_size as u32,
+        terrain_config.as_ref(),
         chunk_size,
         lod_strength,
         &terrain_edits,
@@ -345,8 +414,8 @@ pub fn create_planet(
     for leaf in leaf_nodes {
         let mut request = PlanetMeshRequest {
             planet_entity: new_planet,
+            node_key: leaf.key,
             planet_position: planet.position,
-            planet_size: planet_size as u32,
             node_min_corner: leaf.min,
             node_size: leaf.size,
             face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
@@ -357,6 +426,7 @@ pub fn create_planet(
 
     ctx.world.insert(new_planet, planet);
     ctx.world.insert(new_planet, terrain_edits);
+    ctx.world.insert(new_planet, terrain_config);
 
     for request in mesh_requests {
         submit_requested_mesh(ctx, request);
@@ -390,9 +460,10 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         .map_or(1.0, |settings| settings.strength);
     let mut atmosphere_planet = None;
     {
-        let mut query = Query::<(&mut Planet, &PlanetTerrainEdits)>::new(&mut ctx.world);
-        query.for_each(|entity, (planet, terrain_edits)| {
-            let planet_size = (planet.octree_root.size * 2.0) as u32;
+        let mut query = Query::<(&mut Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>::new(
+            &mut ctx.world,
+        );
+        query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
             let change_start = changes.len();
             // Keep one atomic topology generation in flight per planet. A
             // second generation could otherwise invalidate a shared boundary
@@ -403,10 +474,9 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                     camera_pos,
                     entity,
                     planet.position,
-                    planet_size,
+                    terrain_config.as_ref(),
                     lod_strength,
                     &mut changes,
-                    None, //heightmap.as_deref(),
                     terrain_edits,
                 );
             }
@@ -439,7 +509,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 requests.iter().map(mesh_request_key).collect();
             for &(key, _) in &transitions {
                 let min = vec3(key.x as f32, key.y as f32, key.z as f32);
-                let size = key.size as f32;
+                let size = planet.octree_root.size / 2.0_f32.powi(i32::from(key.level));
                 let mut neighbors = Vec::new();
                 octree::collect_face_neighbor_leaves(
                     &planet.octree_root,
@@ -453,8 +523,8 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                     }
                     let mut request = PlanetMeshRequest {
                         planet_entity: entity,
+                        node_key: neighbor.key,
                         planet_position: planet.position,
-                        planet_size,
                         node_min_corner: neighbor.min,
                         node_size: neighbor.size,
                         face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
@@ -545,11 +615,9 @@ pub fn build_requested_mesh(
     request: PlanetMeshRequest,
     version: u64,
     urgent: bool,
-    heightmap: Option<Arc<EarthHeightmap>>,
-    terrain_edits: &PlanetTerrainEdits,
+    terrain: &PlanetTerrainSamplerContext<'_>,
     base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
 ) -> GeneratedMesh {
-    let planet_position = request.planet_position;
     let size = request.node_size;
     let min_corner = vec3(
         request.node_min_corner.x,
@@ -562,7 +630,7 @@ pub fn build_requested_mesh(
         x: min_corner.x as i32,
         y: min_corner.y as i32,
         z: min_corner.z as i32,
-        size: size as i32,
+        level: request.node_key.level,
     };
     let base_grid = get_or_build_base_grid(
         key,
@@ -571,32 +639,21 @@ pub fn build_requested_mesh(
         CHUNK_GRID_SAMPLE_COUNT,
         resolution,
         min_corner,
-        planet_position,
-        request.planet_size,
-        heightmap.as_deref(),
+        terrain,
         &base_grid_cache,
     );
     let grid;
-    let grid_ref = if terrain_edits.modified_chunks.is_empty() {
+    let grid_ref = if terrain_sampler::is_terrain_edits_empty(terrain) {
         base_grid.as_ref()
     } else {
-        grid = generate_grid_from_base(
-            base_grid.as_ref(),
-            resolution,
-            min_corner,
-            planet_position,
-            terrain_edits,
-        );
+        grid = generate_grid_from_base(base_grid.as_ref(), resolution, min_corner, terrain);
         &grid
     };
     let (vertices, indices) = Planet::dual_contour_grid(
         grid_ref,
         min_corner,
         resolution,
-        planet_position,
-        request.planet_size,
-        heightmap.as_deref(),
-        terrain_edits,
+        terrain,
         &request.face_neighbors,
     );
 
@@ -678,7 +735,7 @@ fn mesh_request_key(request: &PlanetMeshRequest) -> NodeKey {
         x: request.node_min_corner.x as i32,
         y: request.node_min_corner.y as i32,
         z: request.node_min_corner.z as i32,
-        size: request.node_size as i32,
+        level: request.node_key.level,
     }
 }
 
@@ -778,15 +835,23 @@ fn start_mesh_job(
         edits_for_mesh_request(&terrain_edits, &request)
     };
 
+    let terrain_config = {
+        let terrain_config = ctx
+            .world
+            .get::<Arc<PlanetTerrainConfig>>(request.planet_entity)
+            .unwrap();
+        Arc::clone(&terrain_config)
+    };
+
+    let terrain = PlanetTerrainSnapshot {
+        config: terrain_config,
+        edits: terrain_edits,
+        planet_position: request.planet_position,
+    };
+
     let job = move || {
-        let mesh = build_requested_mesh(
-            request,
-            version,
-            urgent,
-            None, //heightmap,
-            &terrain_edits,
-            base_grid_cache,
-        );
+        let sampler = terrain.sampler_context();
+        let mesh = build_requested_mesh(request, version, urgent, &sampler, base_grid_cache);
         let _ = sender.send(mesh);
     };
 
@@ -1211,6 +1276,13 @@ fn submit_replacement(
     drop(mesh_jobs);
 
     // Prepare ECS-owned data on the main thread. The worker only receives owned data.
+    let terrain_config = {
+        let terrain_config = ctx
+            .world
+            .get::<Arc<PlanetTerrainConfig>>(planet_entity)
+            .unwrap();
+        Arc::clone(&terrain_config)
+    };
     let prepared: Vec<_> = requests
         .iter()
         .map(|request| {
@@ -1218,7 +1290,14 @@ fn submit_replacement(
                 .world
                 .get::<PlanetTerrainEdits>(request.planet_entity)
                 .unwrap();
-            (*request, edits_for_mesh_request(&terrain_edits, request))
+            (
+                *request,
+                PlanetTerrainSnapshot {
+                    config: Arc::clone(&terrain_config),
+                    edits: edits_for_mesh_request(&terrain_edits, request),
+                    planet_position: request.planet_position,
+                },
+            )
         })
         .collect();
 
@@ -1254,13 +1333,13 @@ fn submit_replacement(
             .zip(versions)
             .collect::<Vec<_>>()
             .into_par_iter()
-            .map(|((request, terrain_edits), version)| {
+            .map(|((request, terrain), version)| {
+                let sampler = terrain.sampler_context();
                 build_requested_mesh(
                     request,
                     version,
                     false,
-                    None,
-                    &terrain_edits,
+                    &sampler,
                     Arc::clone(&base_grid_cache),
                 )
             })
@@ -1352,43 +1431,6 @@ fn set_octree_node_state(node: &mut OctreeNode, key: NodeKey, state: NodeState) 
         .any(|child| set_octree_node_state(child, key, state))
 }
 
-pub fn generate_grid_from_min(
-    nx: u32,
-    ny: u32,
-    nz: u32,
-    resolution: f32,
-    min: Vec3,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
-    terrain_edits: &PlanetTerrainEdits,
-) -> Vec<Vec<Vec<f32>>> {
-    let mut grid = Vec::new();
-    for xi in 0..nx {
-        let mut plane = Vec::new();
-        for yi in 0..ny {
-            let mut row = Vec::new();
-            for zi in 0..nz {
-                let position = vec3(
-                    min.x + xi as f32 * resolution,
-                    min.y + yi as f32 * resolution,
-                    min.z + zi as f32 * resolution,
-                );
-                row.push(sdf_at_center(
-                    position,
-                    planet_position,
-                    planet_size,
-                    heightmap,
-                    terrain_edits,
-                ));
-            }
-            plane.push(row);
-        }
-        grid.push(plane);
-    }
-    grid
-}
-
 fn get_or_build_base_grid(
     key: NodeKey,
     nx: u32,
@@ -1396,9 +1438,7 @@ fn get_or_build_base_grid(
     nz: u32,
     resolution: f32,
     min: Vec3,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain: &PlanetTerrainSamplerContext<'_>,
     base_grid_cache: &Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
 ) -> Arc<DensityGrid> {
     if let Some(grid) = base_grid_cache
@@ -1410,14 +1450,7 @@ fn get_or_build_base_grid(
     }
 
     let grid = Arc::new(generate_base_grid_from_min(
-        nx,
-        ny,
-        nz,
-        resolution,
-        min,
-        planet_position,
-        planet_size,
-        heightmap,
+        nx, ny, nz, resolution, min, terrain,
     ));
 
     if let Ok(mut cache) = base_grid_cache.lock() {
@@ -1436,9 +1469,7 @@ fn generate_base_grid_from_min(
     nz: u32,
     resolution: f32,
     min: Vec3,
-    planet_position: Vec3,
-    planet_size: u32,
-    heightmap: Option<&EarthHeightmap>,
+    terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> DensityGrid {
     let mut grid = Vec::with_capacity(nx as usize);
     for xi in 0..nx {
@@ -1451,12 +1482,7 @@ fn generate_base_grid_from_min(
                     min.y + yi as f32 * resolution,
                     min.z + zi as f32 * resolution,
                 );
-                row.push(base_sdf_at_center(
-                    position,
-                    planet_position,
-                    planet_size,
-                    heightmap,
-                ));
+                row.push(terrain_sampler::sample_original_density(terrain, position));
             }
             plane.push(row);
         }
@@ -1469,8 +1495,7 @@ fn generate_grid_from_base(
     base_grid: &DensityGrid,
     resolution: f32,
     min: Vec3,
-    planet_position: Vec3,
-    terrain_edits: &PlanetTerrainEdits,
+    terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> DensityGrid {
     let nx = base_grid.len();
     let ny = base_grid.first().map_or(0, Vec::len);
@@ -1492,7 +1517,7 @@ fn generate_grid_from_base(
                 );
                 row.push(
                     base_grid[xi][yi][zi]
-                        + sample_terrain_edit(position - planet_position, terrain_edits),
+                        + terrain_sampler::sample_terrain_edits_density(terrain, position),
                 );
             }
             plane.push(row);
