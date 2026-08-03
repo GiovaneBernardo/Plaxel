@@ -348,66 +348,87 @@ impl RenderDatabase {
     pub fn sync_ecs(&mut self, world: &mut World, assets: &AssetManager) {
         let last = self.ecs_cursor.tick;
         let now = world.change_tick();
-        let mut changed_entities = HashSet::new();
-        if let Some(mesh_renderers) = world.get_storage::<MeshRendererComponent>() {
-            for (entity, _) in mesh_renderers.iter_changed_since(last, now) {
-                changed_entities.insert(entity);
+        let changed_entities = {
+            crate::profile_scope!("render_database.collect_changed_entities");
+            let mut changed_entities = HashSet::new();
+            if let Some(mesh_renderers) = world.get_storage::<MeshRendererComponent>() {
+                for (entity, _) in mesh_renderers.iter_changed_since(last, now) {
+                    changed_entities.insert(entity);
+                }
             }
-        }
-        if let Some(transforms) = world.get_storage::<TransformComponent>() {
-            for (entity, _) in transforms.iter_changed_since(last, now) {
-                changed_entities.insert(entity);
+            if let Some(transforms) = world.get_storage::<TransformComponent>() {
+                for (entity, _) in transforms.iter_changed_since(last, now) {
+                    changed_entities.insert(entity);
+                }
             }
-        }
+            changed_entities
+        };
+        crate::profile_counter!(
+            "render_database.changed_entities",
+            changed_entities.len() as f64
+        );
 
-        for entity in changed_entities {
-            let Some(mesh_renderer) = world.get::<MeshRendererComponent>(entity) else {
-                if let Some(id) = self.entity_objects.remove(&entity) {
-                    self.remove(id);
+        {
+            crate::profile_scope!("render_database.apply_changed_entities");
+            for entity in changed_entities {
+                let Some(mesh_renderer) = world.get::<MeshRendererComponent>(entity) else {
+                    if let Some(id) = self.entity_objects.remove(&entity) {
+                        self.remove(id);
+                    }
+                    continue;
+                };
+                let Some(transform) = world.get::<TransformComponent>(entity) else {
+                    if let Some(id) = self.entity_objects.remove(&entity) {
+                        self.remove(id);
+                    }
+                    continue;
+                };
+                let Some(material) = assets.get_by_uuid::<Material>(mesh_renderer.material) else {
+                    if let Some(id) = self.entity_objects.remove(&entity) {
+                        self.remove(id);
+                    }
+                    continue;
+                };
+                let object = RenderObject::new(
+                    mesh_renderer.mesh,
+                    material.clone(),
+                    transform_instance(&transform, material.material_index),
+                );
+                if let Some(id) = self.entity_objects.get(&entity).copied() {
+                    self.update(id, object);
+                } else {
+                    let id = self.insert(object);
+                    self.entity_objects.insert(entity, id);
                 }
-                continue;
-            };
-            let Some(transform) = world.get::<TransformComponent>(entity) else {
-                if let Some(id) = self.entity_objects.remove(&entity) {
-                    self.remove(id);
-                }
-                continue;
-            };
-            let Some(material) = assets.get_by_uuid::<Material>(mesh_renderer.material) else {
-                if let Some(id) = self.entity_objects.remove(&entity) {
-                    self.remove(id);
-                }
-                continue;
-            };
-            let object = RenderObject::new(
-                mesh_renderer.mesh,
-                material.clone(),
-                transform_instance(&transform, material.material_index),
-            );
-            if let Some(id) = self.entity_objects.get(&entity).copied() {
-                self.update(id, object);
-            } else {
-                let id = self.insert(object);
-                self.entity_objects.insert(entity, id);
             }
         }
-        let removals: Vec<_> = world
-            .changes_since(&self.ecs_cursor)
-            .filter_map(|change| {
-                let removes_renderer = change.kind == WorldChangeKind::Despawned
-                    || (change.kind == WorldChangeKind::Removed
-                        && matches!(change.component_type,
+        let removals: Vec<_> = {
+            crate::profile_scope!("render_database.collect_removals");
+            world
+                .changes_since(&self.ecs_cursor)
+                .filter_map(|change| {
+                    let removes_renderer = change.kind == WorldChangeKind::Despawned
+                        || (change.kind == WorldChangeKind::Removed
+                            && matches!(change.component_type,
                             Some(name) if name == type_name::<MeshRendererComponent>()
                                 || name == type_name::<TransformComponent>()));
-                removes_renderer.then_some(change.entity)
-            })
-            .collect();
-        for entity in removals {
-            if let Some(id) = self.entity_objects.remove(&entity) {
-                self.remove(id);
+                    removes_renderer.then_some(change.entity)
+                })
+                .collect()
+        };
+        crate::profile_counter!("render_database.removals", removals.len() as f64);
+        {
+            crate::profile_scope!("render_database.apply_removals");
+            for entity in removals {
+                if let Some(id) = self.entity_objects.remove(&entity) {
+                    self.remove(id);
+                }
             }
         }
-        world.acknowledge_changes(&mut self.ecs_cursor);
+        {
+            crate::profile_scope!("render_database.acknowledge_changes");
+            world.acknowledge_changes(&mut self.ecs_cursor);
+        }
     }
 }
 impl Default for RenderDatabase {

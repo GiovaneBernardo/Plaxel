@@ -882,9 +882,12 @@ impl State {
 
     fn update(&mut self) {
         crate::profile_scope!("engine.update");
-        if let Some(scene_index) = self.active_scene_index.map(|i| i as usize) {
-            if let Some(scene) = self.scenes.get_mut(scene_index) {
-                scene.update(&mut self.global_resources);
+        {
+            crate::profile_scope!("engine.scene.update");
+            if let Some(scene_index) = self.active_scene_index.map(|i| i as usize) {
+                if let Some(scene) = self.scenes.get_mut(scene_index) {
+                    scene.update(&mut self.global_resources);
+                }
             }
         }
 
@@ -904,6 +907,7 @@ impl State {
     fn update_after_render(&mut self) {
         crate::profile_scope!("engine.update_after_render");
         let world = self.active_scene_mut().unwrap().world_mut();
+        crate::profile_scope!("engine.input.clear");
         Self::clear_input_system(world);
     }
 
@@ -933,6 +937,7 @@ impl State {
         input.mouse_just_released.clear();
         input.mouse_delta = (0.0, 0.0);
         input.scroll = 0.0;
+        //input.is_mouse_over_game_view = false;
     }
 
     fn insert_engine_resources(world: &mut World) {
@@ -1282,9 +1287,46 @@ fn app_device_event(
 }
 
 fn app_redraw_requested(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
-    let mut prepare = subsecond::HotFn::current(prepare_app_redraw);
-    if !prepare.call((app, event_loop)) {
+    if pause_app_redraw_if_needed(app, event_loop) {
         return false;
+    }
+
+    let Some(state) = app.state.as_mut() else {
+        return false;
+    };
+    crate::profiling::sync_enabled(state.global_resources.profiling_enabled);
+    crate::profiling::begin_frame(state.frame_index as u64);
+
+    crate::profile_scope!("frame.total");
+    {
+        let mut prepare = {
+            crate::profile_scope!("frame.resolve.prepare");
+            subsecond::HotFn::current(prepare_app_redraw)
+        };
+        {
+            crate::profile_scope!("frame.prepare");
+            prepare.call((app, event_loop));
+        }
+    }
+
+    {
+        let Some(state) = app.state.as_mut() else {
+            return false;
+        };
+        if !state.registered_systems {
+            crate::profile_scope!("engine.register_systems");
+            if let Some(f) = &mut app.on_register_system {
+                {
+                    crate::profile_scope!("engine.register_systems.callback");
+                    f(state);
+                }
+            }
+            {
+                crate::profile_scope!("engine.scene.init");
+                state.init_active_scene();
+            }
+            state.registered_systems = true;
+        }
     }
 
     {
@@ -1299,8 +1341,14 @@ fn app_redraw_requested(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         let Some(state) = app.state.as_mut() else {
             return false;
         };
-        let mut after_systems = subsecond::HotFn::current(after_frame_systems);
-        after_systems.call((state,));
+        let mut after_systems = {
+            crate::profile_scope!("frame.resolve.after_systems");
+            subsecond::HotFn::current(after_frame_systems)
+        };
+        {
+            crate::profile_scope!("frame.after_systems");
+            after_systems.call((state,));
+        }
     }
 
     if let Some(f) = &mut app.on_update {
@@ -1315,21 +1363,45 @@ fn app_redraw_requested(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         return false;
     };
 
-    let mut before_render = subsecond::HotFn::current(before_frame_render);
-    before_render.call((state,));
+    {
+        let mut before_render = {
+            crate::profile_scope!("frame.resolve.before_render");
+            subsecond::HotFn::current(before_frame_render)
+        };
+        {
+            crate::profile_scope!("frame.before_render");
+            before_render.call((state,));
+        }
+    }
 
-    let mut render = subsecond::HotFn::current(render_frame);
-    render.call((state,));
+    {
+        let mut render = {
+            crate::profile_scope!("frame.resolve.render");
+            subsecond::HotFn::current(render_frame)
+        };
+        {
+            crate::profile_scope!("frame.render");
+            render.call((state,));
+        }
+    }
 
-    let mut after_render = subsecond::HotFn::current(after_frame_render);
-    after_render.call((state,));
+    {
+        let mut after_render = {
+            crate::profile_scope!("frame.resolve.after_render");
+            subsecond::HotFn::current(after_frame_render)
+        };
+        {
+            crate::profile_scope!("frame.after_render");
+            after_render.call((state,));
+        }
+    }
     true
 }
 
-fn prepare_app_redraw(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
+fn pause_app_redraw_if_needed(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
     let state = match &mut app.state {
         Some(state) => state,
-        None => return false,
+        None => return true,
     };
 
     if app
@@ -1342,32 +1414,30 @@ fn prepare_app_redraw(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(redraw_at));
         state.events.clear();
         state.update_after_render();
-        return false;
+        return true;
     }
+
+    false
+}
+
+fn prepare_app_redraw(app: &mut App, event_loop: &ActiveEventLoop) {
+    let Some(state) = app.state.as_mut() else {
+        return;
+    };
 
     app.paused_redraw_at = None;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
     if let Some(size) = app.pending_resize.take() {
-        state.resize(size.width, size.height);
+        {
+            crate::profile_scope!("frame.resize");
+            state.resize(size.width, size.height);
+        }
         if let Some(f) = &mut app.on_resize {
+            crate::profile_scope!("frame.resize.callback");
             f(state, size.width, size.height);
         }
     }
-
-    crate::profiling::sync_enabled(state.global_resources.profiling_enabled);
-    let frame_index = state.frame_index as u64;
-    crate::profiling::begin_frame(frame_index);
-    if !state.registered_systems {
-        crate::profile_scope!("engine.register_systems");
-        if let Some(f) = &mut app.on_register_system {
-            f(state);
-        }
-        state.init_active_scene();
-        state.registered_systems = true;
-    }
-
-    true
 }
 
 fn after_frame_systems(state: &mut State) {
@@ -1375,14 +1445,25 @@ fn after_frame_systems(state: &mut State) {
 }
 
 fn before_frame_render(state: &mut State) {
-    state.sync_render_queues();
-    state.events.clear();
+    {
+        crate::profile_scope!("frame.sync_render_queues");
+        state.sync_render_queues();
+    }
+    {
+        crate::profile_scope!("frame.clear_events");
+        state.events.clear();
+    }
     crate::profile_counter!("frame.index", state.frame_index as f64);
 }
 
 fn render_frame(state: &mut State) {
-    match state.global_resources.renderer.render() {
+    let result = {
+        crate::profile_scope!("frame.renderer.render");
+        state.global_resources.renderer.render()
+    };
+    match result {
         Ok(_) => {
+            crate::profile_scope!("frame.capture.finish");
             state
                 .global_resources
                 .frame_capturer

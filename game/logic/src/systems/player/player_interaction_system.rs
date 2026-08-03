@@ -11,6 +11,7 @@ use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::components::renderer::MeshRendererComponent;
 use engine::ecs::entity::Entity;
 use engine::ecs::query::Query;
+use engine::game_info;
 use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::{FrameBindings, GeometryPassNode};
@@ -323,6 +324,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
     let mouse_position = input.mouse_position;
     let mouse_delta = input.mouse_delta;
     let scroll = input.scroll;
+    let is_mouse_over_game_view = input.is_mouse_over_game_view;
     let viewport_size = ctx.globals.renderer.renderer_api.get_surface_size();
     //let heightmap = world
     //    .get_resource::<Arc<EarthHeightmap>>()
@@ -441,7 +443,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
 
         let terrain_ok = run_terrain_edit_phase(|| {
             // Deform with left click
-            if left_mouse_pressed {
+            if left_mouse_pressed && is_mouse_over_game_view {
                 if let Some((mouse_position_x, mouse_position_y)) = mouse_position {
                     let current_camera = engine::camera::Camera {
                         position: engine::math::vec3(

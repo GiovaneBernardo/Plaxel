@@ -391,6 +391,11 @@ pub trait InspectorVisitor {
 }
 
 pub trait RenderNode {
+    /// Human-readable profiler label supplied automatically by the concrete pass type.
+    fn profile_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     fn describe_pass(&self) -> RenderNodeDescriptor;
     fn compile(&mut self, ctx: &mut NodeCompileContext);
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI);
@@ -794,21 +799,27 @@ impl Renderer {
                     .map(|camera| (frame.camera_buffer, camera.uniform))
             });
         if let Some((buffer, uniform)) = camera_upload {
+            crate::profile_scope!("renderer.prepare.camera");
             self.renderer_api
                 .write_buffer(buffer, bytemuck::bytes_of(&uniform));
         }
-        self.producer_registry.prepare(
-            &self.view_registry,
-            &mut self.render_resources,
-            self.renderer_api.as_mut(),
-        );
+        {
+            crate::profile_scope!("renderer.prepare.producers");
+            self.producer_registry.prepare(
+                &self.view_registry,
+                &mut self.render_resources,
+                self.renderer_api.as_mut(),
+            );
+        }
         let disabled_nodes = self.render_graph.disabled_nodes.clone();
         for (index, node) in &mut self.render_graph.nodes {
             if disabled_nodes.contains(index) {
                 continue;
             }
-            let _profile_scope =
-                crate::profiling::Scope::new_owned(format!("render_node.prepare.{index}"));
+            crate::profile_dynamic_scope!(
+                "render.pass.prepare",
+                format!("render.pass.prepare.{}", node.profile_name())
+            );
             node.prepare(&mut self.render_resources, self.renderer_api.as_mut());
         }
     }
@@ -851,8 +862,14 @@ impl Renderer {
         world: &mut World,
         assets: &crate::assets::manager::AssetManager,
     ) {
-        self.render_database.sync_ecs(world, assets);
-        let dirty_ranges = self.render_database.take_dirty_ranges();
+        {
+            crate::profile_scope!("render_database.sync_ecs");
+            self.render_database.sync_ecs(world, assets);
+        }
+        let dirty_ranges = {
+            crate::profile_scope!("render_database.take_dirty_ranges");
+            self.render_database.take_dirty_ranges()
+        };
         let revision = self.render_database.structural_revision();
         let needs_rebuild = self
             .producer_registry
@@ -860,6 +877,7 @@ impl Renderer {
             .is_some_and(|producer| producer.database_revision != revision);
 
         if needs_rebuild {
+            crate::profile_scope!("render_database.rebuild");
             let ids = self
                 .render_database
                 .phase_objects(crate::renderer::phases::OPAQUE)
@@ -883,65 +901,74 @@ impl Renderer {
                 .expect("shadow bindings must exist while preparing retained draws")
                 .view_layout;
             let mut draws = Vec::with_capacity(ids.len());
-            for id in ids {
-                let Some(object) = self.render_database.get(id) else {
-                    continue;
-                };
-                let mut pipelines = Vec::with_capacity(2);
-                let forward_pass = material_passes::FORWARD_OPAQUE;
-                if object.flags.contains(RenderFlags::VISIBLE_MAIN)
-                    && object.material.supports_pass(forward_pass)
-                {
-                    let pipeline = object.pipeline_override(forward_pass).unwrap_or_else(|| {
-                        self.renderer_api.create_pipeline(
-                            &object.material,
-                            forward_pass,
-                            &[camera_layout, textures_layout],
-                            &geometry_target,
-                        )
-                    });
-                    pipelines.push(PipelineOverride {
-                        material_pass: forward_pass,
-                        pipeline,
-                    });
-                }
+            {
+                crate::profile_scope!("render_database.rebuild_draws");
+                for id in ids {
+                    let Some(object) = self.render_database.get(id) else {
+                        continue;
+                    };
+                    let mut pipelines = Vec::with_capacity(2);
+                    let forward_pass = material_passes::FORWARD_OPAQUE;
+                    if object.flags.contains(RenderFlags::VISIBLE_MAIN)
+                        && object.material.supports_pass(forward_pass)
+                    {
+                        let pipeline =
+                            object.pipeline_override(forward_pass).unwrap_or_else(|| {
+                                self.renderer_api.create_pipeline(
+                                    &object.material,
+                                    forward_pass,
+                                    &[camera_layout, textures_layout],
+                                    &geometry_target,
+                                )
+                            });
+                        pipelines.push(PipelineOverride {
+                            material_pass: forward_pass,
+                            pipeline,
+                        });
+                    }
 
-                let shadow_pass = material_passes::SHADOW;
-                if object.flags.contains(RenderFlags::CASTS_SHADOWS)
-                    && object.material.supports_pass(shadow_pass)
-                {
-                    let pipeline = object.pipeline_override(shadow_pass).unwrap_or_else(|| {
-                        self.renderer_api.create_pipeline(
-                            &object.material,
-                            shadow_pass,
-                            &[shadow_layout, textures_layout],
-                            &shadow_target,
-                        )
-                    });
-                    pipelines.push(PipelineOverride {
-                        material_pass: shadow_pass,
-                        pipeline,
-                    });
-                }
+                    let shadow_pass = material_passes::SHADOW;
+                    if object.flags.contains(RenderFlags::CASTS_SHADOWS)
+                        && object.material.supports_pass(shadow_pass)
+                    {
+                        let pipeline = object.pipeline_override(shadow_pass).unwrap_or_else(|| {
+                            self.renderer_api.create_pipeline(
+                                &object.material,
+                                shadow_pass,
+                                &[shadow_layout, textures_layout],
+                                &shadow_target,
+                            )
+                        });
+                        pipelines.push(PipelineOverride {
+                            material_pass: shadow_pass,
+                            pipeline,
+                        });
+                    }
 
-                if pipelines.is_empty() {
-                    continue;
+                    if pipelines.is_empty() {
+                        continue;
+                    }
+                    draws.push(StandardDraw {
+                        mesh: object.mesh,
+                        pipelines,
+                        transform_index: id.index() as u32,
+                        extra_bind_groups: object.extra_bind_groups.clone(),
+                    });
                 }
-                draws.push(StandardDraw {
-                    mesh: object.mesh,
-                    pipelines,
-                    transform_index: id.index() as u32,
-                    extra_bind_groups: object.extra_bind_groups.clone(),
-                });
             }
-            let transforms = (0..self.render_database.slot_count())
-                .map(|index| self.render_database.gpu_transform_at(index))
-                .collect();
+            let transforms = {
+                crate::profile_scope!("render_database.rebuild_transforms");
+                (0..self.render_database.slot_count())
+                    .map(|index| self.render_database.gpu_transform_at(index))
+                    .collect()
+            };
+            crate::profile_scope!("render_database.replace_producer_data");
             self.producer_registry
                 .get_mut::<StandardMeshProducer>(crate::renderer::producers::STANDARD_MESHES)
                 .expect("standard mesh producer must stay registered")
                 .replace(draws, transforms, revision);
         } else if !dirty_ranges.is_empty() {
+            crate::profile_scope!("render_database.update_transforms");
             let updates = dirty_ranges
                 .into_iter()
                 .map(|range| {

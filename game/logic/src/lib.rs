@@ -6,6 +6,7 @@ use engine::ecs::world::World;
 
 use engine::core::components::physics::RapierColliderHandle;
 use engine::core::physics::physics::Physics;
+use engine::game_info;
 use engine::math::Vec3;
 use engine::math::{Quat, vec3};
 use engine::renderer::DebugPassNode;
@@ -319,6 +320,7 @@ pub fn render() {}
 
 #[unsafe(no_mangle)]
 pub fn update(state: &mut engine::State) {
+    engine::profile_scope!("game.update");
     let mut update = subsecond::HotFn::current(update_impl);
     update.call((state,));
 }
@@ -336,10 +338,22 @@ fn update_impl(state: &mut engine::State) {
 
     // borrow renderer after using scenes to avoid overlapping mutable borrows
     let renderer = &mut state.global_resources.renderer;
-    sync_camera_to_renderer(renderer, scene.world());
-    sync_planet_debug(renderer, scene.world());
-    sync_planet_octree_debug(renderer, scene.world());
-    sync_physics_debug(renderer, scene.world());
+    {
+        engine::profile_scope!("game.update.sync_camera");
+        sync_camera_to_renderer(renderer, scene.world());
+    }
+    {
+        engine::profile_scope!("game.update.sync_planet_debug");
+        sync_planet_debug(renderer, scene.world());
+    }
+    {
+        engine::profile_scope!("game.update.sync_octree_debug");
+        sync_planet_octree_debug(renderer, scene.world());
+    }
+    {
+        engine::profile_scope!("game.update.sync_physics_debug");
+        sync_physics_debug(renderer, scene.world());
+    }
     state.frame_index += 1;
 }
 
@@ -678,6 +692,7 @@ pub fn handle_resize(state: &mut engine::State, width: u32, height: u32) {
 }
 
 fn handle_resize_impl(state: &mut engine::State, width: u32, height: u32) {
+    game_info!("Teste C");
     if width == 0 || height == 0 {
         return;
     }

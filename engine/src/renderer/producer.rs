@@ -93,6 +93,11 @@ pub trait RenderProducer: Any + Send + Sync {
     fn id(&self) -> RenderProducerId;
     fn routes(&self) -> &[RenderRoute];
 
+    /// Human-readable profiler label supplied automatically by the concrete producer type.
+    fn profile_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     fn prepare_frame(&mut self, _ctx: &mut ProducerPrepareContext<'_>) {}
 
     fn prepare_views(
@@ -153,8 +158,20 @@ impl RenderProducerRegistry {
     ) {
         for producer in &mut self.producers {
             let mut ctx = ProducerPrepareContext { resources, api };
-            producer.prepare_frame(&mut ctx);
-            producer.prepare_views(views, &mut ctx);
+            {
+                crate::profile_dynamic_scope!(
+                    "render.producer.prepare_frame",
+                    format!("render.producer.prepare_frame.{}", producer.profile_name())
+                );
+                producer.prepare_frame(&mut ctx);
+            }
+            {
+                crate::profile_dynamic_scope!(
+                    "render.producer.prepare_views",
+                    format!("render.producer.prepare_views.{}", producer.profile_name())
+                );
+                producer.prepare_views(views, &mut ctx);
+            }
         }
     }
 
@@ -169,6 +186,10 @@ impl RenderProducerRegistry {
             for producer in &self.producers {
                 for route in producer.routes() {
                     if route.graph_pass == graph_pass && route.views.matches(view.kind) {
+                        crate::profile_dynamic_scope!(
+                            "render.producer.record",
+                            format!("render.producer.record.{}", producer.profile_name())
+                        );
                         producer.record(context, resources, &RenderPassContext { route, view });
                     }
                 }

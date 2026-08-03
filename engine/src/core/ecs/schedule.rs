@@ -62,8 +62,7 @@ impl Schedule {
     pub fn run(&mut self, ctx: &mut SystemContext) {
         crate::profile_scope!("ecs.schedule");
         for scheduled in &mut self.systems {
-            let _profile_scope =
-                crate::profiling::Scope::new_owned(format!("ecs.system.{}", scheduled.name));
+            crate::profile_dynamic_scope!("ecs.system", format!("ecs.system.{}", scheduled.name));
             let mut commands = Commands::new();
             let this_run_tick = ctx.world.advance_change_tick();
             ctx.last_run_tick = scheduled.last_run_tick;

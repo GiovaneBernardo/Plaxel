@@ -59,63 +59,89 @@ impl EguiRenderNode {
 
     /// Process input and build egui UI. Call during the update phase.
     pub fn process(&mut self, state: &mut engine::State) {
-        self.init_winit(&state.window);
+        {
+            engine::profile_scope!("editor.egui.init_winit");
+            self.init_winit(&state.window);
+        }
         let egui_winit = self.egui_winit.as_mut().unwrap();
 
-        for event in &state.events {
-            let _ = egui_winit.on_window_event(&state.window, event);
+        {
+            engine::profile_scope!("editor.egui.window_events");
+            for event in &state.events {
+                let _ = egui_winit.on_window_event(&state.window, event);
+            }
         }
 
-        let raw_input = egui_winit.take_egui_input(&state.window);
-
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            let open_viewport_menu = ctx.input(|input| {
-                input.modifiers.alt && input.pointer.button_pressed(egui::PointerButton::Secondary)
-            });
-
-            if open_viewport_menu {
-                self.viewport_menu_open = true;
-                self.viewport_menu_pos = ctx
-                    .input(|input| input.pointer.latest_pos())
-                    .unwrap_or_default();
-            }
-
-            self.editor_ui.show(ctx, state);
-
-            if self.viewport_menu_open {
-                let response = viewport_context_menu(
-                    &mut self.viewport_menu_pos,
-                    &mut self.viewport_menu_open,
-                    state,
-                    ctx,
-                );
-
-                let close_menu = ctx.input(|input| {
-                    input.key_pressed(egui::Key::Escape)
-                        || (!open_viewport_menu
-                            && input.pointer.any_pressed()
-                            && !response
-                                .rect
-                                .contains(input.pointer.latest_pos().unwrap_or_default()))
-                });
-
-                if close_menu {
-                    self.viewport_menu_open = false;
-                }
-            }
-        });
-
-        egui_winit.handle_platform_output(&state.window, full_output.platform_output);
-
-        let size = state.window.inner_size();
-        self.screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [size.width, size.height],
-            pixels_per_point: state.window.scale_factor() as f32,
+        let raw_input = {
+            engine::profile_scope!("editor.egui.take_input");
+            egui_winit.take_egui_input(&state.window)
         };
 
-        self.clipped_primitives = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let full_output = {
+            engine::profile_scope!("editor.egui.run");
+            self.egui_ctx.run(raw_input, |ctx| {
+                let open_viewport_menu = ctx.input(|input| {
+                    input.modifiers.alt
+                        && input.pointer.button_pressed(egui::PointerButton::Secondary)
+                });
+
+                if open_viewport_menu {
+                    self.viewport_menu_open = true;
+                    self.viewport_menu_pos = ctx
+                        .input(|input| input.pointer.latest_pos())
+                        .unwrap_or_default();
+                }
+
+                {
+                    engine::profile_scope!("editor.egui.ui");
+                    self.editor_ui.show(ctx, state);
+                }
+
+                if self.viewport_menu_open {
+                    engine::profile_scope!("editor.egui.viewport_menu");
+                    let response = viewport_context_menu(
+                        &mut self.viewport_menu_pos,
+                        &mut self.viewport_menu_open,
+                        state,
+                        ctx,
+                    );
+
+                    let close_menu = ctx.input(|input| {
+                        input.key_pressed(egui::Key::Escape)
+                            || (!open_viewport_menu
+                                && input.pointer.any_pressed()
+                                && !response
+                                    .rect
+                                    .contains(input.pointer.latest_pos().unwrap_or_default()))
+                    });
+
+                    if close_menu {
+                        self.viewport_menu_open = false;
+                    }
+                }
+            })
+        };
+
+        {
+            engine::profile_scope!("editor.egui.platform_output");
+            egui_winit.handle_platform_output(&state.window, full_output.platform_output);
+        }
+
+        {
+            engine::profile_scope!("editor.egui.screen_descriptor");
+            let size = state.window.inner_size();
+            self.screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [size.width, size.height],
+                pixels_per_point: state.window.scale_factor() as f32,
+            };
+        }
+
+        {
+            engine::profile_scope!("editor.egui.tessellate");
+            self.clipped_primitives = self
+                .egui_ctx
+                .tessellate(full_output.shapes, full_output.pixels_per_point);
+        }
         self.textures_delta = full_output.textures_delta;
     }
 }

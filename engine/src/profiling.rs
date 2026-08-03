@@ -101,7 +101,16 @@ impl Profiler {
 
 impl Scope {
     pub fn new(name: &'static str) -> Self {
-        Self::new_owned(name.to_string())
+        let enabled = is_enabled();
+        Self {
+            name: if enabled {
+                name.to_string()
+            } else {
+                String::new()
+            },
+            start: Instant::now(),
+            enabled,
+        }
     }
 
     pub fn new_owned(name: impl Into<String>) -> Self {
@@ -306,6 +315,40 @@ macro_rules! profile_scope {
         };
 
         let _plaxel_profile_scope = $crate::profiling::Scope::new($name);
+    };
+}
+
+/// Profiles a scope whose display name is only known at runtime.
+///
+/// `$category` remains stable for profilers that identify a scope by call site, while
+/// `$name` is used as the detailed label in Tracy and the built-in frame profiler and
+/// as Puffin's per-scope data.
+#[macro_export]
+macro_rules! profile_dynamic_scope {
+    ($category:expr, $name:expr) => {
+        let _plaxel_profile_name = $crate::profiling::is_enabled().then(|| $name);
+
+        #[cfg(feature = "puffin")]
+        puffin::profile_scope_if!(
+            _plaxel_profile_name.is_some(),
+            $category,
+            _plaxel_profile_name.as_deref().unwrap_or("")
+        );
+
+        #[cfg(feature = "tracy")]
+        let _plaxel_tracy_span = if $crate::profiling::external_scopes_enabled() {
+            _plaxel_profile_name.as_deref().and_then(|name| {
+                tracy_client::Client::running().map(|client| {
+                    client.span_alloc(Some(name), module_path!(), file!(), line!(), 0)
+                })
+            })
+        } else {
+            None
+        };
+
+        let _plaxel_profile_scope = _plaxel_profile_name
+            .as_ref()
+            .map(|name| $crate::profiling::Scope::new_owned(name.clone()));
     };
 }
 

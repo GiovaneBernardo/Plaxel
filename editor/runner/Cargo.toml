@@ -12,8 +12,14 @@ default = ["static-game-logic", "profiling", "renderdoc"]
 dynamic_linking = ["editor-logic/dynamic_linking"]
 hot-reload = ["dep:hot-lib-reloader", "dynamic_linking"]
 static-game-logic = ["dep:static-game-logic"]
-profiling = ["engine/profiling", "engine/puffin", "editor-logic/puffin-ui"]
-tracy = ["engine/tracy"]
+profiling = [
+    "engine/profiling",
+    "engine/puffin",
+    "editor-logic/puffin-ui",
+    "static-game-logic?/profiling",
+    "static-game-logic?/puffin",
+]
+tracy = ["engine/tracy", "editor-logic/tracy", "static-game-logic?/tracy"]
 renderdoc = ["engine/renderdoc"]
 
 [lib]

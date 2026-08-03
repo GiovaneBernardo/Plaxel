@@ -682,7 +682,10 @@ impl RendererAPI for WgpuBackend {
 
         let _surface = &self.surface;
 
-        let output = self.surface.get_current_texture()?;
+        let output = {
+            crate::profile_scope!("wgpu.acquire_surface");
+            self.surface.get_current_texture()?
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -694,12 +697,15 @@ impl RendererAPI for WgpuBackend {
             });
 
         // Check if the global textures arrays are dirty to update them
-        if self.dirty_global_textures {
-            self.update_global_textures(render_resources);
-        }
+        {
+            crate::profile_scope!("wgpu.update_global_resources");
+            if self.dirty_global_textures {
+                self.update_global_textures(render_resources);
+            }
 
-        if self.dirty_global_materials {
-            self.update_global_materials(render_resources);
+            if self.dirty_global_materials {
+                self.update_global_materials(render_resources);
+            }
         }
 
         let disabled_nodes = render_graph.disabled_nodes.clone();
@@ -707,8 +713,10 @@ impl RendererAPI for WgpuBackend {
             if disabled_nodes.contains(index) {
                 continue;
             }
-            let _profile_scope =
-                crate::profiling::Scope::new_owned(format!("render_node.run.{index}"));
+            crate::profile_dynamic_scope!(
+                "render.pass.run",
+                format!("render.pass.run.{}", node.profile_name())
+            );
             self.render_node(
                 *index,
                 node.as_mut(),
@@ -721,9 +729,15 @@ impl RendererAPI for WgpuBackend {
             );
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        {
+            crate::profile_scope!("wgpu.submit");
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
         crate::profile_counter!("render.nodes", render_graph.nodes.len() as f64);
-        output.present();
+        {
+            crate::profile_scope!("wgpu.present");
+            output.present();
+        }
         Ok(())
     }
 

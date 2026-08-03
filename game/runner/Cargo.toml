@@ -12,8 +12,10 @@ renderdoc = ["engine/renderdoc"]
 profiling = [
     "engine/profiling",
     "engine/puffin",
+    "static-game-logic?/profiling",
+    "static-game-logic?/puffin",
 ]
-tracy = ["engine/tracy"]
+tracy = ["engine/tracy", "static-game-logic?/tracy"]
 
 [dependencies]
 engine = { path = "../../engine" }

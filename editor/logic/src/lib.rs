@@ -53,19 +53,27 @@ pub fn update_editor(state: &mut engine::State) {
 }
 
 fn update_editor_impl(state: &mut engine::State) {
-    if let Some(mut taken_node) = state
-        .global_resources
-        .renderer
-        .render_graph
-        .take_node(EGUI_NODE_INDEX)
-    {
-        if let Some(egui_node) = taken_node.as_any_mut().downcast_mut::<EguiRenderNode>() {
-            egui_node.process(state);
-        }
+    engine::profile_scope!("editor.update");
+    let taken_node = {
+        engine::profile_scope!("editor.egui.take_node");
         state
             .global_resources
             .renderer
             .render_graph
-            .return_node(taken_node);
+            .take_node(EGUI_NODE_INDEX)
+    };
+    if let Some(mut taken_node) = taken_node {
+        if let Some(egui_node) = taken_node.as_any_mut().downcast_mut::<EguiRenderNode>() {
+            engine::profile_scope!("editor.egui.process");
+            egui_node.process(state);
+        }
+        {
+            engine::profile_scope!("editor.egui.return_node");
+            state
+                .global_resources
+                .renderer
+                .render_graph
+                .return_node(taken_node);
+        }
     }
 }

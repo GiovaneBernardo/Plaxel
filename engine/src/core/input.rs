@@ -13,6 +13,9 @@ pub struct InputState {
     pub mouse_position: Option<(f32, f32)>,
     pub mouse_delta: (f32, f32),
     pub scroll: f32,
+
+    // Mouse UI
+    pub is_mouse_over_game_view: bool,
 }
 
 impl InputState {
@@ -27,6 +30,7 @@ impl InputState {
             mouse_position: None,
             mouse_delta: (0.0, 0.0),
             scroll: 0.0,
+            is_mouse_over_game_view: true,
         }
     }
 }

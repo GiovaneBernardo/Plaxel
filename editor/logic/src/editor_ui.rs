@@ -1,5 +1,6 @@
-use egui::{Color32, RichText, Ui, WidgetText};
+use egui::{Color32, InputState, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use engine::engine_info;
 use engine::math::vec3;
 use engine::{
     assets::{
@@ -133,47 +134,69 @@ impl EditorUi {
     #[inline(never)]
     fn show_impl(&mut self, ctx: &egui::Context, state: &mut engine::State) {
         if !self.style_applied {
+            engine::profile_scope!("editor.ui.apply_style");
             let mut apply_style = subsecond::HotFn::current(apply_editor_style);
             apply_style.call((ctx,));
             self.style_applied = true;
         }
 
-        let mut sanitize_selection = subsecond::HotFn::current(Self::sanitize_selection);
-        sanitize_selection.call((self, state));
+        {
+            engine::profile_scope!("editor.ui.sanitize_selection");
+            let mut sanitize_selection = subsecond::HotFn::current(Self::sanitize_selection);
+            sanitize_selection.call((self, state));
+        }
 
-        let mut top_toolbar = subsecond::HotFn::current(Self::top_toolbar);
-        top_toolbar.call((self, ctx, state));
+        {
+            engine::profile_scope!("editor.ui.top_toolbar");
+            let mut top_toolbar = subsecond::HotFn::current(Self::top_toolbar);
+            top_toolbar.call((self, ctx, state));
+        }
 
-        let mut status_bar = subsecond::HotFn::current(Self::status_bar);
-        status_bar.call((&*self, ctx, &*state));
+        {
+            engine::profile_scope!("editor.ui.status_bar");
+            let mut status_bar = subsecond::HotFn::current(Self::status_bar);
+            status_bar.call((&*self, ctx, &*state));
+        }
 
         if self.maximize_viewport {
-            let mut show_maximized = subsecond::HotFn::current(Self::show_maximized_viewport);
-            show_maximized.call((self, ctx, state));
+            {
+                engine::profile_scope!("editor.ui.maximized_viewport");
+                let mut show_maximized = subsecond::HotFn::current(Self::show_maximized_viewport);
+                show_maximized.call((self, ctx, state));
+            }
 
-            let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
-            save_layout.call((self, ctx));
+            {
+                engine::profile_scope!("editor.ui.save_layout");
+                let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
+                save_layout.call((self, ctx));
+            }
             return;
         }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(Color32::TRANSPARENT))
-            .show(ctx, |ui| {
-                let mut viewer = EditorTabViewer {
-                    state,
-                    selected_entity: &mut self.selected_entity,
-                    selected_render_node: &mut self.selected_render_node,
-                    show_puffin_profiler: &mut self.show_puffin_profiler,
-                    assets: &mut self.assets,
-                };
-                let style = Style::from_egui(ui.style().as_ref());
-                DockArea::new(&mut self.dock_state)
-                    .style(style)
-                    .show_inside(ui, &mut viewer);
-            });
+        {
+            engine::profile_scope!("editor.ui.dock_area");
+            egui::CentralPanel::default()
+                .frame(egui::Frame::default().fill(Color32::TRANSPARENT))
+                .show(ctx, |ui| {
+                    let mut viewer = EditorTabViewer {
+                        state,
+                        selected_entity: &mut self.selected_entity,
+                        selected_render_node: &mut self.selected_render_node,
+                        show_puffin_profiler: &mut self.show_puffin_profiler,
+                        assets: &mut self.assets,
+                    };
+                    let style = Style::from_egui(ui.style().as_ref());
+                    DockArea::new(&mut self.dock_state)
+                        .style(style)
+                        .show_inside(ui, &mut viewer);
+                });
+        }
 
-        let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
-        save_layout.call((self, ctx));
+        {
+            engine::profile_scope!("editor.ui.save_layout");
+            let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
+            save_layout.call((self, ctx));
+        }
     }
 
     fn top_toolbar(&mut self, ctx: &egui::Context, state: &mut engine::State) {
@@ -593,42 +616,52 @@ impl TabViewer for EditorTabViewer<'_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
             EditorTab::Viewport => {
+                engine::profile_scope!("editor.ui.tab.viewport");
                 let mut draw = subsecond::HotFn::current(draw_viewport_tab);
-                draw.call((ui,));
+                draw.call((ui, &mut *self.state));
             }
             EditorTab::Hierarchy => {
+                engine::profile_scope!("editor.ui.tab.hierarchy");
                 let mut draw = subsecond::HotFn::current(draw_hierarchy);
                 draw.call((ui, &mut *self.state, &mut *self.selected_entity));
             }
             EditorTab::Inspector => {
+                engine::profile_scope!("editor.ui.tab.inspector");
                 let mut draw = subsecond::HotFn::current(draw_inspector);
                 draw.call((ui, &mut *self.state, &mut *self.selected_entity));
             }
             EditorTab::Console => {
+                engine::profile_scope!("editor.ui.tab.console");
                 let mut draw = subsecond::HotFn::current(draw_console);
                 draw.call((ui,));
             }
             EditorTab::Assets => {
+                engine::profile_scope!("editor.ui.tab.assets");
                 let mut draw = subsecond::HotFn::current(draw_asset_browser);
                 draw.call((ui, &mut *self.state, &mut *self.assets));
             }
             EditorTab::Textures => {
+                engine::profile_scope!("editor.ui.tab.textures");
                 let mut draw = subsecond::HotFn::current(draw_texture_explorer);
                 draw.call((ui, &mut *self.state, &mut *self.assets));
             }
             EditorTab::RenderGraph => {
+                engine::profile_scope!("editor.ui.tab.render_graph");
                 let mut draw = subsecond::HotFn::current(draw_render_graph);
                 draw.call((ui, &mut *self.state, &mut *self.selected_render_node));
             }
             EditorTab::Profiler => {
+                engine::profile_scope!("editor.ui.tab.profiler");
                 let mut draw = subsecond::HotFn::current(draw_profiler);
                 draw.call((ui, &mut *self.state, &mut *self.show_puffin_profiler));
             }
             EditorTab::Timeline => {
+                engine::profile_scope!("editor.ui.tab.timeline");
                 let mut draw = subsecond::HotFn::current(draw_timeline);
                 draw.call((ui,));
             }
             EditorTab::Physics => {
+                engine::profile_scope!("editor.ui.tab.physics");
                 let mut draw = subsecond::HotFn::current(draw_physics);
                 draw.call((ui,));
             }
@@ -652,11 +685,21 @@ impl TabViewer for EditorTabViewer<'_> {
     }
 }
 
-fn draw_viewport_tab(ui: &mut Ui) {
+fn draw_viewport_tab(ui: &mut Ui, state: &mut engine::State) {
     ui.add_space(10.0);
     egui::Frame::popup(ui.style()).show(ui, |ui| {
         ui.label(RichText::new("Game").strong());
         ui.label("Rendered behind the dock UI");
+
+        // Update input state of active world, this looks bad and is a hack, but no way I'll refactor it right now, it's not even that bad
+        // And why is input state both a global resource and world resource?? makes no sense
+        state
+            .active_scene()
+            .unwrap()
+            .world()
+            .get_resource_mut::<engine::core::input::InputState>()
+            .unwrap()
+            .is_mouse_over_game_view = ui.rect_contains_pointer(ui.max_rect());
     });
 }
 
