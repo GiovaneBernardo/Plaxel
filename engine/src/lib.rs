@@ -312,24 +312,27 @@ impl State {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg"))
         {
             let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-            self.global_resources.renderer.renderer_api.load_texture(
-                &path.to_str().unwrap().to_string(),
-                &crate::renderer::TextureDescriptor {
-                    label: file_name,
-                    format: TextureFormat::Rgba8Srgb,
-                    size: TextureSize::Custom {
-                        width: 256,
-                        height: 256,
+            self.global_resources
+                .renderer
+                .renderer_api
+                .load_texture_to_index(
+                    &path.to_str().unwrap().to_string(),
+                    &crate::renderer::TextureDescriptor {
+                        label: file_name,
+                        format: TextureFormat::Rgba8Srgb,
+                        size: TextureSize::Custom {
+                            width: 256,
+                            height: 256,
+                        },
+                        dimension: TextureDimension::D2,
+                        usage: TextureUsages::COPY_SRC
+                            | TextureUsages::COPY_DST
+                            | TextureUsages::TEXTURE_BINDING,
+                        mip_levels: 1,
+                        sample_count: 1,
                     },
-                    dimension: TextureDimension::D2,
-                    usage: TextureUsages::COPY_SRC
-                        | TextureUsages::COPY_DST
-                        | TextureUsages::TEXTURE_BINDING,
-                    mip_levels: 1,
-                    sample_count: 1,
-                },
-                None,
-            );
+                    None,
+                );
             return;
         }
 
@@ -406,7 +409,7 @@ impl State {
                     .global_resources
                     .renderer
                     .renderer_api
-                    .upload_mesh(&mesh);
+                    .upload_mesh_asset(&mesh);
                 engine_info!("Uploaded mesh: {:?}", handle);
 
                 let material_uuid = self
@@ -826,7 +829,7 @@ impl State {
             .global_resources
             .renderer
             .renderer_api
-            .upload_mesh(&mesh);
+            .upload_mesh_asset(&mesh);
 
         let Some(scene_index) = self.active_scene_index.map(|i| i as usize) else {
             return Ok(());

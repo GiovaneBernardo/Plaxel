@@ -87,13 +87,14 @@ impl ShadowPassNode {
             (camera_position.y / texel_world_size).round() * texel_world_size,
             (camera_position.z / texel_world_size).round() * texel_world_size,
         );
-        let eye = center + light_direction * (SHADOW_DEPTH_RANGE * 0.5);
+        let center_relative = center - camera_position;
+        let eye_relative = center_relative + light_direction * (SHADOW_DEPTH_RANGE * 0.5);
         let up = if light_direction.y.abs() > 0.95 {
             Vec3::Z
         } else {
             Vec3::Y
         };
-        let view = Mat4::look_at_rh(eye, center, up);
+        let view = Mat4::look_at_rh(eye_relative, center_relative, up);
         // `orthographic_rh` maps depth directly to wgpu's [0, 1] range: near = 0, far = 1.
         let projection = Mat4::orthographic_rh(
             -SHADOW_HALF_EXTENT,
@@ -242,10 +243,9 @@ mod tests {
         let view_proj = Mat4::from_cols_array_2d(&uniform.view_proj);
         let light_direction = Vec3::from_array(uniform.light_direction);
 
-        let toward_light = view_proj
-            .project_point3(camera_position + light_direction * (SHADOW_MAX_DISTANCE * 0.5));
-        let away_from_light = view_proj
-            .project_point3(camera_position - light_direction * (SHADOW_MAX_DISTANCE * 0.5));
+        let toward_light = view_proj.project_point3(light_direction * (SHADOW_MAX_DISTANCE * 0.5));
+        let away_from_light =
+            view_proj.project_point3(-light_direction * (SHADOW_MAX_DISTANCE * 0.5));
 
         assert!(toward_light.z < away_from_light.z);
         assert!((toward_light.z - 0.25).abs() < 0.001);
@@ -257,7 +257,8 @@ mod tests {
         let camera_position = Vec3::new(0.0, 8_573.0, 0.0);
         let terrain_position = Vec3::new(0.0, 8_192.0, 0.0);
         let uniform = ShadowPassNode::uniform(camera_position);
-        let ndc = Mat4::from_cols_array_2d(&uniform.view_proj).project_point3(terrain_position);
+        let ndc = Mat4::from_cols_array_2d(&uniform.view_proj)
+            .project_point3(terrain_position - camera_position);
 
         assert!(ndc.x.abs() <= 1.0, "shadow x was {}", ndc.x);
         assert!(ndc.y.abs() <= 1.0, "shadow y was {}", ndc.y);

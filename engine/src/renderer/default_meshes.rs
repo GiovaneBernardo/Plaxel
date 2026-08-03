@@ -19,9 +19,9 @@ pub struct DefaultMeshes {
 
 impl DefaultMeshes {
     pub(crate) fn upload(api: &mut dyn RendererAPI) -> Self {
-        let cube = api.upload_mesh(&cube_mesh());
-        let sphere = api.upload_mesh(&sphere_mesh(12, 24));
-        let wire_cube = api.upload_mesh(&wire_cube_mesh());
+        let cube = api.upload_mesh_asset(&cube_mesh());
+        let sphere = api.upload_mesh_asset(&sphere_mesh(12, 24));
+        let wire_cube = api.upload_mesh_asset(&wire_cube_mesh());
 
         Self {
             cube,

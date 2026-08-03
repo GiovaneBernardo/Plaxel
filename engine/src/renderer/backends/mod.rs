@@ -13,8 +13,8 @@ use crate::renderer::core::{
 use crate::renderer::ids::MaterialPassId;
 use crate::renderer::{
     BindGroupDescriptor, BindGroupHandle, BindGroupLayoutDescriptor, BindGroupLayoutHandle,
-    BufferDescriptor, RenderData, RenderResources, SamplerDescriptor, SamplerHandle,
-    TextureDescriptor,
+    BufferDescriptor, GpuMeshBinding, GpuMeshHandle, MeshUpload, MeshUploadError, RenderData,
+    RenderResources, SamplerDescriptor, SamplerHandle, TextureDescriptor,
 };
 use crate::texture;
 use uuid::Uuid;
@@ -44,13 +44,22 @@ pub trait RendererAPI {
     fn get_white_texture(&self) -> TextureHandle;
     fn get_default_sampler(&self) -> SamplerHandle;
 
-    fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
+    fn upload_mesh_asset(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset>;
     fn create_texture_asset(&mut self, texture: &TextureAsset) -> TextureHandle;
     fn upload_texture_asset(&mut self, texture: &TextureAsset, index: Option<u32>)
     -> TextureHandle;
     fn is_texture_asset_uploaded(&self, uuid: Uuid) -> bool;
     fn upload_material_asset(&mut self, material: &Material, index: Option<u32>) -> u32;
-    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor, index: Option<u32>);
+    fn load_texture_to_index(
+        &mut self,
+        path: &String,
+        descriptor: &TextureDescriptor,
+        index: Option<u32>,
+    ) -> TextureHandle;
+    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor) -> TextureHandle {
+        self.load_texture_to_index(path, descriptor, None)
+    }
+
     fn load_material(&mut self, header: &AssetHeader) -> Material;
     fn create_pipeline(
         &mut self,
@@ -86,16 +95,15 @@ pub trait RendererAPI {
 
     fn read_texture_bytes_at(&mut self, texture: &TextureHandle, x: f32, y: f32, out: &mut [u8]);
     fn upload_texture(&mut self, texture: &TextureHandle, index: Option<u32>);
+    fn upload_mesh(&mut self, upload: MeshUpload<'_>) -> Result<GpuMeshHandle, MeshUploadError>;
+    fn remove_mesh(&mut self, handle: GpuMeshHandle) -> bool;
+    fn remove_mesh_asset(&mut self, handle: Handle<MeshAsset>) -> bool;
+    fn get_gpu_mesh_binding(&mut self, mesh: GpuMeshHandle) -> Option<GpuMeshBinding>;
 
     // Get using uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle>;
 
-    fn get_mesh_vertex_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
-    fn get_mesh_index_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
-    fn get_mesh_index_count(&mut self, mesh: &Handle<MeshAsset>) -> u32;
-    fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange;
-    fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32;
-    fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle;
+    fn get_mesh_binding(&mut self, mesh: &Handle<MeshAsset>) -> Option<GpuMeshBinding>;
 
     fn get_texture_size(&self, handle: &TextureHandle) -> UVec2;
     fn get_surface_size(&self) -> UVec2;
@@ -128,6 +136,7 @@ pub trait RenderContext {
     );
     fn draw_indirect(&mut self, buffer: BufferHandle, offset: u64);
     fn draw_indexed_indirect(&mut self, buffer: BufferHandle, offset: u64);
+    fn multi_draw_indexed_indirect(&mut self, buffer: BufferHandle, offset: u64, count: u32);
 
     /// Run a closure with the raw wgpu render pass (with 'static lifetime via forget_lifetime).
     /// This is the escape hatch for nodes that need direct backend access (e.g. egui).
@@ -136,23 +145,11 @@ pub trait RenderContext {
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle> {
         self.api().get_pipeline(uuid)
     }
-    fn get_mesh_vertex_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        self.api().get_mesh_vertex_buffer(mesh)
+    fn get_mesh_binding(&mut self, mesh: &Handle<MeshAsset>) -> Option<GpuMeshBinding> {
+        self.api().get_mesh_binding(mesh)
     }
-    fn get_mesh_index_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        self.api().get_mesh_index_buffer(mesh)
-    }
-    fn get_mesh_index_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
-        self.api().get_mesh_index_count(mesh)
-    }
-    fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange {
-        self.api().get_mesh_draw_range(mesh)
-    }
-    fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
-        self.api().get_mesh_instance_count(mesh)
-    }
-    fn get_mesh_instance_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        self.api().get_mesh_instance_buffer(mesh)
+    fn get_gpu_mesh_binding(&mut self, mesh: GpuMeshHandle) -> Option<GpuMeshBinding> {
+        self.api().get_gpu_mesh_binding(mesh)
     }
 }
 

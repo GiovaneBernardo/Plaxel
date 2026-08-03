@@ -1,6 +1,8 @@
 pub mod backends;
 pub mod core;
 pub mod default_meshes;
+pub mod gpu;
+pub mod gpu_mesh;
 pub mod ids;
 pub mod model;
 pub mod pool;
@@ -13,6 +15,8 @@ pub use backends::*;
 pub use core::Renderer;
 pub use core::*;
 pub use default_meshes::*;
+pub use gpu::*;
+pub use gpu_mesh::*;
 pub use ids::*;
 pub use producer::*;
 pub use render_database::*;

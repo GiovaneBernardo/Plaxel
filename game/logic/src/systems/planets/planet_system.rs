@@ -8,8 +8,9 @@ use engine::{
     core::components::core::TransformComponent,
     ecs::{commands::Commands, query::Query, system::SystemContext},
     game_info,
+    model::{AttributeFormat, StepMode, Vertex, VertexAttribute, VertexLayout},
     multithreading::job_system::JobPriorityHandle,
-    renderer::{AtmospherePassNode, RenderData, RenderFlags, RenderObject, RenderObjectId},
+    renderer::AtmospherePassNode,
 };
 use engine::{
     ecs::entity::Entity,
@@ -33,6 +34,9 @@ use web_time::{Duration, Instant};
 
 use crate::{
     CHUNK_CELL_COUNT, GameCamera, GameState, octree,
+    render::producers::planet_terrain_producer::{
+        PendingTerrainChunk, PlanetTerrainCommand, PlanetTerrainRenderQueue,
+    },
     systems::{
         planets::PlanetExt,
         terrain::terrain_sampler::{self, PlanetTerrainSamplerContext, PlanetTerrainSnapshot},
@@ -44,32 +48,51 @@ use crossbeam_channel::{Receiver, Sender};
 type DensityGrid = Vec<Vec<Vec<f32>>>;
 const CHUNK_GRID_SAMPLE_COUNT: u32 = CHUNK_CELL_COUNT as u32 + 2;
 
-fn retain_render_data(
-    renderer: &mut engine::renderer::Renderer,
-    render_data: RenderData,
-    shadow_pipeline: engine::renderer::PipelineHandle,
-) -> RenderObjectId {
-    let material_index = render_data.material.material_index;
-    let pipeline = render_data.pipeline;
-    renderer.objects().insert(
-        RenderObject::new(
-            render_data.mesh,
-            render_data.material,
-            engine::model::TransformInstance {
-                model_matrix: engine::math::Mat4::IDENTITY.to_cols_array_2d(),
-                material_index,
-            },
-        )
-        .with_flags(
-            RenderFlags::VISIBLE_MAIN
-                | RenderFlags::DEPTH_PREPASS
-                | RenderFlags::CASTS_SHADOWS
-                | RenderFlags::RECEIVES_SHADOWS,
-        )
-        .with_pipeline_override(engine::renderer::material_passes::FORWARD_OPAQUE, pipeline)
-        .with_pipeline_override(engine::renderer::material_passes::SHADOW, shadow_pipeline)
-        .with_bind_groups(render_data.extra_bind_groups),
-    )
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct PlanetNodeInstance {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub level: u32,
+}
+
+impl Vertex for PlanetNodeInstance {
+    fn layout() -> VertexLayout {
+        use std::mem;
+
+        VertexLayout {
+            stride: mem::size_of::<PlanetNodeInstance>() as u64,
+            step_mode: StepMode::Instance,
+            attributes: vec![
+                VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as u64,
+                    shader_location: 6,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as u64,
+                    shader_location: 7,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as u64,
+                    shader_location: 8,
+                    format: AttributeFormat::Float32x4,
+                },
+                VertexAttribute {
+                    offset: mem::size_of::<[[f32; 4]; 4]>() as u64,
+                    shader_location: 9,
+                    format: AttributeFormat::Uint32,
+                },
+            ],
+        }
+    }
 }
 
 pub struct MeshJobResults {
@@ -375,6 +398,8 @@ pub fn create_planet(
         drop(camera_transform);
         if let Some(mut camera) = world.get_resource_mut::<GameCamera>() {
             camera.camera.position = camera_pos;
+            camera.world_position = camera_pos.as_dvec3();
+            camera.previous_world_position = camera.world_position;
             camera.camera.orientation = spawn_orientation;
             camera.velocity_sample_pos = camera_pos;
         }
@@ -442,6 +467,8 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         camera.entity
     };
 
+    let update_octree = ctx.world.get_resource::<GameState>().unwrap().update_octree;
+
     let camera_pos = ctx
         .world
         .get::<TransformComponent>(camera_entity)
@@ -468,7 +495,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
             // Keep one atomic topology generation in flight per planet. A
             // second generation could otherwise invalidate a shared boundary
             // mesh while leaving the first generation's nodes transitional.
-            if !octree::has_pending_transition(&planet.octree_root) {
+            if update_octree && !octree::has_pending_transition(&planet.octree_root) {
                 octree::update(
                     &mut planet.octree_root,
                     camera_pos,
@@ -505,8 +532,8 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 }
             }
 
-            let mut scheduled_keys: HashSet<NodeKey> =
-                requests.iter().map(mesh_request_key).collect();
+            let mut scheduled_keys = HashSet::new();
+            requests.retain(|request| scheduled_keys.insert(mesh_request_key(request)));
             for &(key, _) in &transitions {
                 let min = vec3(key.x as f32, key.y as f32, key.z as f32);
                 let size = planet.octree_root.size / 2.0_f32.powi(i32::from(key.level));
@@ -658,7 +685,11 @@ pub fn build_requested_mesh(
     );
 
     GeneratedMesh {
+        planet_entity: request.planet_entity,
         key,
+        node_origin_planet: (engine::math::IVec3::new(key.x, key.y, key.z)
+            - request.planet_position.floor().as_ivec3())
+        .to_array(),
         version,
         urgent,
         vertices,
@@ -1057,68 +1088,27 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
         let additional_transitions = replacement.additional_transitions.clone();
         let replacement_mesh_keys: Vec<NodeKey> =
             replacement.meshes.iter().map(|mesh| mesh.key).collect();
-        let mut keys_to_clear = replacement.keys_to_remove.clone();
-        keys_to_clear.extend(replacement_mesh_keys.iter().copied());
-        keys_to_clear.sort_unstable();
-        keys_to_clear.dedup();
-
-        // Create every new GPU mesh before changing the visible mesh map.
-        let mut uploaded = Vec::new();
-        for mesh in replacement.meshes {
-            if mesh.indices.is_empty() {
-                continue;
-            }
-            let (
-                solid_material,
-                solid_pipeline,
-                solid_shadow_pipeline,
-                terrain_materials_bind_group,
-            ) = {
-                let game_state = ctx.world.get_resource::<GameState>().unwrap();
-                (
-                    game_state.solid_material.clone(),
-                    game_state.solid_pipeline,
-                    game_state.solid_shadow_pipeline,
-                    game_state.terrain_materials_bind_group,
-                )
-            };
-            let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
-            let mut render_data = ctx.globals.renderer.renderer_api.create_render_data(
-                &vertex_bytes,
-                &mesh.indices,
-                solid_material,
-                &solid_pipeline,
-            );
-            render_data
-                .extra_bind_groups
-                .push((2, terrain_materials_bind_group));
-            let object = retain_render_data(
-                &mut ctx.globals.renderer,
-                render_data,
-                solid_shadow_pipeline,
-            );
-            uploaded.push((mesh.key, object));
-        }
-
-        let mut game_state = ctx.world.get_resource_mut::<GameState>().unwrap();
-        let mut removed = Vec::new();
-        // A requested chunk that contours to nothing must remove any previous
-        // render object for that key instead of silently preserving it.
-        for key in keys_to_clear {
-            if let Some(object) = game_state.planets_meshes.remove(&key) {
-                removed.push(object);
-            }
-        }
-        for (key, object) in uploaded {
-            if let Some(previous) = game_state.planets_meshes.insert(key, object) {
-                removed.push(previous);
-            }
-        }
-        drop(game_state);
-        let mut objects = ctx.globals.renderer.objects();
-        for object in removed {
-            objects.remove(object);
-        }
+        let queue = ctx
+            .world
+            .get_resource::<PlanetTerrainRenderQueue>()
+            .expect("planet terrain producer must be initialized first")
+            .clone();
+        queue
+            .send(PlanetTerrainCommand::ReplaceChunks {
+                planet: planet_entity,
+                remove: replacement.keys_to_remove,
+                insert: replacement
+                    .meshes
+                    .into_iter()
+                    .map(|mesh| PendingTerrainChunk {
+                        key: mesh.key,
+                        node_origin_planet: mesh.node_origin_planet,
+                        vertices: mesh.vertices,
+                        indices: mesh.indices,
+                    })
+                    .collect(),
+            })
+            .expect("planet terrain producer command channel must remain connected");
         complete_replacement_transition(ctx, planet_entity, transition_key, completed_state);
         for (transition_key, completed_state) in additional_transitions {
             complete_replacement_transition(ctx, planet_entity, transition_key, completed_state);
@@ -1157,51 +1147,23 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
                 .unwrap_or(0);
             mesh_jobs.ready_meshes.remove(next_index)
         };
-        if mesh.indices.is_empty() {
-            let previous = ctx
-                .world
-                .get_resource_mut::<GameState>()
-                .unwrap()
-                .planets_meshes
-                .remove(&mesh.key);
-            if let Some(previous) = previous {
-                ctx.globals.renderer.objects().remove(previous);
-            }
-            continue;
-        }
-        let (solid_material, solid_pipeline, solid_shadow_pipeline, terrain_materials_bind_group) = {
-            let game_state = ctx.world.get_resource::<GameState>().unwrap();
-            (
-                game_state.solid_material.clone(),
-                game_state.solid_pipeline,
-                game_state.solid_shadow_pipeline,
-                game_state.terrain_materials_bind_group,
-            )
-        };
-        let vertex_bytes: Vec<u8> = bytemuck::cast_slice(&mesh.vertices).to_vec();
-        let mut render_data = ctx.globals.renderer.renderer_api.create_render_data(
-            &vertex_bytes,
-            &mesh.indices,
-            solid_material,
-            &solid_pipeline,
-        );
-        render_data
-            .extra_bind_groups
-            .push((2, terrain_materials_bind_group));
-        let object = retain_render_data(
-            &mut ctx.globals.renderer,
-            render_data,
-            solid_shadow_pipeline,
-        );
-        let previous = ctx
+        let queue = ctx
             .world
-            .get_resource_mut::<GameState>()
-            .unwrap()
-            .planets_meshes
-            .insert(mesh.key, object);
-        if let Some(previous) = previous {
-            ctx.globals.renderer.objects().remove(previous);
-        }
+            .get_resource::<PlanetTerrainRenderQueue>()
+            .expect("planet terrain producer must be initialized first")
+            .clone();
+        queue
+            .send(PlanetTerrainCommand::ReplaceChunks {
+                planet: mesh.planet_entity,
+                remove: Vec::new(),
+                insert: vec![PendingTerrainChunk {
+                    key: mesh.key,
+                    node_origin_planet: mesh.node_origin_planet,
+                    vertices: mesh.vertices,
+                    indices: mesh.indices,
+                }],
+            })
+            .expect("planet terrain producer command channel must remain connected");
     }
 }
 
@@ -1254,8 +1216,11 @@ fn submit_replacement(
     completed_state: NodeState,
     additional_transitions: Vec<(NodeKey, NodeState)>,
     keys_to_remove: Vec<NodeKey>,
-    requests: Vec<PlanetMeshRequest>,
+    mut requests: Vec<PlanetMeshRequest>,
 ) {
+    let mut unique_keys = HashSet::with_capacity(requests.len());
+    requests.retain(|request| unique_keys.insert(mesh_request_key(request)));
+
     if requests.is_empty() {
         for key in keys_to_remove {
             apply_change(ctx, &OctreeChanges::RemoveMeshes { key });
@@ -1471,18 +1436,23 @@ fn generate_base_grid_from_min(
     min: Vec3,
     terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> DensityGrid {
+    let local_min = min.as_dvec3() - terrain.planet_position.as_dvec3();
+    let resolution = f64::from(resolution);
     let mut grid = Vec::with_capacity(nx as usize);
     for xi in 0..nx {
         let mut plane = Vec::with_capacity(ny as usize);
         for yi in 0..ny {
             let mut row = Vec::with_capacity(nz as usize);
             for zi in 0..nz {
-                let position = vec3(
-                    min.x + xi as f32 * resolution,
-                    min.y + yi as f32 * resolution,
-                    min.z + zi as f32 * resolution,
-                );
-                row.push(terrain_sampler::sample_original_density(terrain, position));
+                let position = local_min
+                    + engine::math::dvec3(
+                        f64::from(xi) * resolution,
+                        f64::from(yi) * resolution,
+                        f64::from(zi) * resolution,
+                    );
+                row.push(terrain_sampler::sample_original_density_planet_local(
+                    terrain, position,
+                ));
             }
             plane.push(row);
         }
@@ -1504,20 +1474,25 @@ fn generate_grid_from_base(
         .and_then(|plane| plane.first())
         .map_or(0, Vec::len);
     let mut grid = Vec::with_capacity(nx);
+    let local_min = min.as_dvec3() - terrain.planet_position.as_dvec3();
+    let resolution = f64::from(resolution);
 
     for xi in 0..nx {
         let mut plane = Vec::with_capacity(ny);
         for yi in 0..ny {
             let mut row = Vec::with_capacity(nz);
             for zi in 0..nz {
-                let position = vec3(
-                    min.x + xi as f32 * resolution,
-                    min.y + yi as f32 * resolution,
-                    min.z + zi as f32 * resolution,
-                );
+                let position = local_min
+                    + engine::math::dvec3(
+                        xi as f64 * resolution,
+                        yi as f64 * resolution,
+                        zi as f64 * resolution,
+                    );
                 row.push(
                     base_grid[xi][yi][zi]
-                        + terrain_sampler::sample_terrain_edits_density(terrain, position),
+                        + terrain_sampler::sample_terrain_edits_density_planet_local(
+                            terrain, position,
+                        ),
                 );
             }
             plane.push(row);

@@ -65,6 +65,33 @@ pub fn build_node(
     lod_strength: f32,
     terrain_edits: &PlanetTerrainEdits,
 ) -> OctreeNode {
+    build_node_at_level(
+        min,
+        size,
+        min_size,
+        first,
+        camera_position,
+        planet_center,
+        terrain_config,
+        lod_strength,
+        terrain_edits,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_node_at_level(
+    min: Vec3,
+    size: f32,
+    min_size: f32,
+    first: bool,
+    camera_position: &engine::math::Vec3,
+    planet_center: Vec3,
+    terrain_config: &PlanetTerrainConfig,
+    lod_strength: f32,
+    terrain_edits: &PlanetTerrainEdits,
+    level: i8,
+) -> OctreeNode {
     let density_range = node_density_range(min, size, planet_center, terrain_config, terrain_edits);
     let has_surface = density_range.contains_zero();
     let _is_behind_horizon = is_behind_horizon(
@@ -73,7 +100,7 @@ pub fn build_node(
         planet_center,
     );
     let key = NodeKey {
-        level: 0,
+        level,
         x: min.x as i32,
         y: min.y as i32,
         z: min.z as i32,
@@ -116,8 +143,11 @@ pub fn build_node(
     }
 
     let child_size = size / 2.0;
+    let child_level = level
+        .checked_add(1)
+        .expect("planet octree depth exceeds NodeKey capacity");
     let children = [
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(0.0, 0.0, 0.0),
             child_size,
             min_size,
@@ -127,8 +157,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(child_size, 0.0, 0.0),
             child_size,
             min_size,
@@ -138,8 +169,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(0.0, child_size, 0.0),
             child_size,
             min_size,
@@ -149,8 +181,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(child_size, child_size, 0.0),
             child_size,
             min_size,
@@ -160,8 +193,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(0.0, 0.0, child_size),
             child_size,
             min_size,
@@ -171,8 +205,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(child_size, 0.0, child_size),
             child_size,
             min_size,
@@ -182,8 +217,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(0.0, child_size, child_size),
             child_size,
             min_size,
@@ -193,8 +229,9 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
-        Box::new(build_node(
+        Box::new(build_node_at_level(
             min + vec3(child_size, child_size, child_size),
             child_size,
             min_size,
@@ -204,6 +241,7 @@ pub fn build_node(
             terrain_config,
             lod_strength,
             terrain_edits,
+            child_level,
         )),
     ];
     let density_range = children[1..]
@@ -253,8 +291,10 @@ fn base_density_range(
     planet_center: Vec3,
     terrain_config: &PlanetTerrainConfig,
 ) -> DensityRange {
-    let max = min + Vec3::splat(size);
-    let closest = vec3(
+    let min = min.as_dvec3();
+    let max = min + engine::math::DVec3::splat(f64::from(size));
+    let planet_center = planet_center.as_dvec3();
+    let closest = engine::math::dvec3(
         planet_center.x.clamp(min.x, max.x),
         planet_center.y.clamp(min.y, max.y),
         planet_center.z.clamp(min.z, max.z),
@@ -263,18 +303,18 @@ fn base_density_range(
 
     let local_min = min - planet_center;
     let local_max = max - planet_center;
-    let farthest = vec3(
+    let farthest = engine::math::dvec3(
         local_min.x.abs().max(local_max.x.abs()),
         local_min.y.abs().max(local_max.y.abs()),
         local_min.z.abs().max(local_max.z.abs()),
     );
     let max_radius = farthest.length();
 
-    let radius = terrain_config.radius;
-    let (min_height, max_height) = terrain_height_bounds(radius, None);
+    let radius = f64::from(terrain_config.radius);
+    let (min_height, max_height) = terrain_height_bounds(terrain_config.radius, None);
     DensityRange::new(
-        min_radius - (radius + max_height),
-        max_radius - (radius + min_height),
+        (min_radius - (radius + f64::from(max_height))) as f32,
+        (max_radius - (radius + f64::from(min_height))) as f32,
     )
 }
 

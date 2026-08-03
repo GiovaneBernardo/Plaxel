@@ -5,6 +5,16 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
+struct GpuTerrainFrame {
+    view_projection_rotation: mat4x4<f32>,
+    camera_anchor_planet: vec3<i32>,
+    position_unit: f32,
+    camera_remainder_planet: vec3<f32>,
+    _padding: f32,
+    planet_world_position: vec3<f32>,
+    _planet_padding: f32,
+};
+
 struct ShadowUniform {
     view_proj: mat4x4<f32>,
     light_direction: vec3<f32>,
@@ -30,6 +40,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) mats: u32,
     @location(3) blend_packed: u32,
+    @location(4) chunk_index: u32,
 };
 
 struct VertexOutput {
@@ -41,6 +52,7 @@ struct VertexOutput {
     @location(4) blend: f32,
     @location(5) camera_position: vec3<f32>,
     @location(6) shadow_position: vec4<f32>,
+    @location(7) texture_position: vec3<f32>,
 };
 
 struct GpuPlanetTerrainMaterial {
@@ -54,29 +66,48 @@ struct GpuPlanetTerrainMaterial {
     flags: u32,
 }
 
+struct GpuPlanetChunk {
+    node_origin_planet: vec3<i32>,
+    level: i32,
+};
+
 @vertex
 fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = vec4<f32>(model.position, 1.0);
+    let chunk = terrain_chunks[model.chunk_index];
+    let relative_anchor = chunk.node_origin_planet - terrain_frame.camera_anchor_planet;
+    let camera_relative_position = vec3<f32>(relative_anchor) * terrain_frame.position_unit
+        + model.position
+        - terrain_frame.camera_remainder_planet;
+    let texture_anchor = chunk.node_origin_planet % vec3<i32>(4096);
+    let camera_relative = vec4<f32>(camera_relative_position, 1.0);
 
-    out.world_position = world_pos.xyz;
-    out.clip_position = camera.view_proj * world_pos;
+    out.world_position = camera_relative_position;
+    out.texture_position = vec3<f32>(texture_anchor) * terrain_frame.position_unit + model.position;
+    out.clip_position = terrain_frame.view_projection_rotation * camera_relative;
 
     out.normal = safe_normal(model.normal, model.position);
     out.mat_a = u32(model.mats & 0xFFFFu);
     out.mat_b = u32(model.mats >> 16u);
     out.blend = f32(model.blend_packed & 0xFFu) / 255.0;
-    out.camera_position = camera.position;
-    out.shadow_position = shadow.view_proj * world_pos;
+    out.camera_position = vec3<f32>(0.0);
+    out.shadow_position = shadow.view_proj * camera_relative;
 
     return out;
 }
 
 @vertex
-fn vs_shadow(model: VertexInput) -> @builtin(position) vec4<f32> {
-    return camera.view_proj * vec4<f32>(model.position, 1.0);
+fn vs_shadow(
+    model: VertexInput,
+) -> @builtin(position) vec4<f32> {
+    let chunk = terrain_chunks[model.chunk_index];
+    let relative_anchor = chunk.node_origin_planet - terrain_frame.camera_anchor_planet;
+    let camera_relative_position = vec3<f32>(relative_anchor) * terrain_frame.position_unit
+        + model.position
+        - terrain_frame.camera_remainder_planet;
+    return terrain_frame.view_projection_rotation * vec4<f32>(camera_relative_position, 1.0);
 }
 
 fn safe_normal(normal: vec3<f32>, fallback_position: vec3<f32>) -> vec3<f32> {
@@ -108,6 +139,12 @@ var my_textures: binding_array<texture_2d<f32>, 512>;
 var default_sampler: sampler;
 @group(2) @binding(0)
 var<storage, read> terrain_materials: array<GpuPlanetTerrainMaterial>;
+
+@group(2) @binding(1)
+var<uniform> terrain_frame: GpuTerrainFrame;
+
+@group(2) @binding(2)
+var<storage, read> terrain_chunks: array<GpuPlanetChunk>;
 
 fn triplanar_sample(tex_index: u32, pos: vec3<f32>, normal: vec3<f32>, texture_scale: f32) -> vec4<f32> {
     let n = safe_normal(normal, pos);
@@ -146,7 +183,22 @@ fn sample_terrain_albedo(material_index: u32, pos: vec3<f32>, normal: vec3<f32>)
         material.diffuse_texture_index,
         pos,
         normal,
-        material.texture_scale,
+        0.1,
+    );
+}
+
+fn sample_terrain_normal(
+    material_index: u32,
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+) -> vec3<f32> {
+    let material = terrain_materials[material_index];
+
+    return triplanar_sample_normal(
+        material.normal_texture_index,
+        pos,
+        normal,
+        0.1,
     );
 }
 
@@ -175,16 +227,98 @@ fn shadow_visibility(shadow_position: vec4<f32>) -> f32 {
     return visibility / 9.0;
 }
 
+fn decode_normal_map(sample_value: vec4<f32>) -> vec3<f32> {
+    var tangent_normal = sample_value.xyz * 2.0 - vec3<f32>(1.0);
+
+    // Enable this if the asset uses the opposite green-channel convention.
+    // tangent_normal.y = -tangent_normal.y;
+
+    return safe_normal(tangent_normal, vec3<f32>(0.0, 0.0, 1.0));
+}
+
+fn triplanar_sample_normal(
+    tex_index: u32,
+    pos: vec3<f32>,
+    geometric_normal: vec3<f32>,
+    texture_scale: f32,
+) -> vec3<f32> {
+    let n = safe_normal(geometric_normal, pos);
+    let an = abs(n);
+
+    let weight_sum = max(an.x + an.y + an.z, 0.0001);
+    let weights = an / weight_sum;
+
+    let p = pos * texture_scale;
+
+    let x_sign = select(-1.0, 1.0, n.x >= 0.0);
+    let y_sign = select(-1.0, 1.0, n.y >= 0.0);
+    let z_sign = select(-1.0, 1.0, n.z >= 0.0);
+
+    // These reproduce your existing UV orientations.
+    let x_uv = vec2<f32>(p.z * x_sign, p.y);
+    let y_uv = vec2<f32>(p.x * y_sign, p.z);
+    let z_uv = vec2<f32>(p.x * z_sign, p.y);
+
+    let x_tangent = decode_normal_map(
+        textureSample(my_textures[tex_index], default_sampler, x_uv)
+    );
+
+    let y_tangent = decode_normal_map(
+        textureSample(my_textures[tex_index], default_sampler, y_uv)
+    );
+
+    let z_tangent = decode_normal_map(
+        textureSample(my_textures[tex_index], default_sampler, z_uv)
+    );
+
+    // Convert each tangent-space normal into the same space as
+    // geometric_normal.
+    //
+    // X projection:
+    // U = signed Z, V = Y, outward = signed X
+    let x_normal = vec3<f32>(
+        x_sign * x_tangent.z,
+        x_tangent.y,
+        x_sign * x_tangent.x,
+    );
+
+    // Y projection:
+    // U = signed X, V = Z, outward = signed Y
+    let y_normal = vec3<f32>(
+        y_sign * y_tangent.x,
+        y_sign * y_tangent.z,
+        y_tangent.y,
+    );
+
+    // Z projection:
+    // U = signed X, V = Y, outward = signed Z
+    let z_normal = vec3<f32>(
+        z_sign * z_tangent.x,
+        z_tangent.y,
+        z_sign * z_tangent.z,
+    );
+
+    let blended = x_normal * weights.x +
+        y_normal * weights.y +
+        z_normal * weights.z;
+
+    return safe_normal(blended, n);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = safe_normal(in.normal, in.world_position);
+    let geometric_normal = safe_normal(in.normal, in.world_position);
 
-    let material_a = sample_terrain_albedo(in.mat_a, in.world_position, normal);
-    let material_b = sample_terrain_albedo(in.mat_b, in.world_position, normal);
+    let material_a = sample_terrain_albedo(in.mat_a, in.texture_position, geometric_normal);
+    let material_b = sample_terrain_albedo(in.mat_b, in.texture_position, geometric_normal);
     let albedo = mix(material_a, material_b, in.blend);
 
+    let normal_a = sample_terrain_normal(in.mat_a, in.texture_position, geometric_normal);
+    let normal_b = sample_terrain_normal(in.mat_b, in.texture_position, geometric_normal);
+    let mapped_normal = safe_normal(mix(normal_a, normal_b, in.blend), geometric_normal);
+
     let light_dir = normalize(shadow.light_direction);
-    let diffuse = max(dot(normal, light_dir), 0.0);
+    let diffuse = max(dot(mapped_normal, light_dir), 0.0);
     let visibility = 1.0;//shadow_visibility(in.shadow_position);
     let lighting = 0.35 + 0.95 * diffuse * visibility;
 

@@ -1,34 +1,24 @@
-use engine::MouseButton;
 use engine::core::components::core::{CameraComponent, TransformComponent};
-use engine::core::input::{InputState, KeyCode};
+use engine::core::input::KeyCode;
 use engine::ecs::entity::Entity;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
 
-use engine::assets::material::Material;
 use engine::core::components::physics::RapierColliderHandle;
 use engine::core::physics::physics::Physics;
 use engine::math::Vec3;
 use engine::math::{Quat, vec3};
-use engine::model::Vertex;
-use engine::renderer::Topology;
-use engine::renderer::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupHandle, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferDescriptor, BufferHandle, BufferUsages, CameraData,
-    FrameBindings, PipelineHandle, RenderObjectId, ShaderStages, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSize, TextureUsages,
-};
-use engine::renderer::{CompareFunction, CullMode, DepthState};
-use engine::renderer::{DebugPassNode, GeometryPassNode};
+use engine::renderer::DebugPassNode;
+use engine::renderer::{CameraData, RenderObjectId};
 use game_types::octree::{NodeKey, PlanetLodSettings};
-use game_types::planet::PlanetInstance;
-use game_types::planet::{GpuPlanetTerrainMaterial, Planet, PlanetVertex};
+use game_types::planet::{Planet, PlanetVertex};
 pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use web_time::{Duration, Instant};
 
 pub mod octree;
+pub mod render;
 pub mod sdf;
 mod systems;
 
@@ -52,26 +42,58 @@ struct GameState {
     // NodeKey (different position or size) always gets a clean attempt.
     empty_chunks: HashSet<NodeKey>,
     empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
-    solid_material: Material,
-    solid_pipeline: PipelineHandle,
-    solid_shadow_pipeline: PipelineHandle,
-    terrain_materials_buffer: BufferHandle,
-    terrain_materials_bind_group: BindGroupHandle,
     update_octree: bool,
     terrain_physics_enabled: bool,
     debug_nodes: Vec<(Vec3, f32, u32)>,
     debug_depth: u32,
     max_depth: u32,
     octree_job_in_flight: bool,
-    last_requested_camera_pos: Vec3,
     terrain_brush_radius: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GpuTerrainFrame {
+    /// Projection multiplied by view rotation. Translation is applied after
+    /// integer anchor subtraction in the terrain vertex shader.
+    view_projection_rotation: [[f32; 4]; 4],
+    camera_anchor_planet: [i32; 3],
+    position_unit: f32,
+    camera_remainder_planet: [f32; 3],
+    _padding: f32,
+    planet_world_position: [f32; 3],
+    _planet_padding: f32,
+}
+
+impl GpuTerrainFrame {
+    fn new(
+        view_projection_rotation: engine::math::Mat4,
+        camera_world_position: engine::math::DVec3,
+        planet_world_position: Vec3,
+    ) -> Self {
+        let camera_position_planet = camera_world_position - planet_world_position.as_dvec3();
+        let camera_anchor_planet = camera_position_planet.floor().as_ivec3();
+        let camera_remainder = (camera_position_planet - camera_anchor_planet.as_dvec3()).as_vec3();
+
+        Self {
+            view_projection_rotation: view_projection_rotation.to_cols_array_2d(),
+            camera_anchor_planet: camera_anchor_planet.to_array(),
+            position_unit: 1.0,
+            camera_remainder_planet: camera_remainder.to_array(),
+            _padding: 0.0,
+            planet_world_position: planet_world_position.to_array(),
+            _planet_padding: 0.0,
+        }
+    }
 }
 
 struct GameCamera {
     entity: Entity,
     camera: engine::camera::Camera,
+    world_position: engine::math::DVec3,
     controller: engine::camera::CameraController,
     uniform: engine::camera::CameraUniform,
+    previous_world_position: engine::math::DVec3,
     velocity_sample_pos: Vec3,
     velocity_sample_time: Instant,
     velocity_sample_distance: f32,
@@ -137,36 +159,6 @@ const MAX_CHUNK_WORKER_SPAWNS_PER_FRAME: usize = 12;
 const TERRAIN_PHYSICS_RADIUS: f32 = 384.0;
 const MAX_TERRAIN_PHYSICS_BRICK_SIZE: f32 = 64.0;
 const COARSE_PLANET_BRICK_LEVEL: u8 = 6;
-const GRASS_TERRAIN_TEXTURE_INDEX: u32 = 510;
-const ROCK_TERRAIN_TEXTURE_INDEX: u32 = 511;
-
-fn load_terrain_diffuse_texture(
-    renderer: &mut engine::renderer::Renderer,
-    relative_path: &str,
-    label: &str,
-    texture_index: u32,
-) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../res/terrain_textures")
-        .join(relative_path);
-    renderer.renderer_api.load_texture(
-        &path.to_string_lossy().into_owned(),
-        &TextureDescriptor {
-            label: label.to_string(),
-            format: TextureFormat::Rgba8Srgb,
-            size: TextureSize::Custom {
-                width: 1,
-                height: 1,
-            },
-            dimension: TextureDimension::D2,
-            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
-            mip_levels: 1,
-            sample_count: 1,
-        },
-        Some(texture_index),
-    );
-}
-
 #[unsafe(no_mangle)]
 pub fn initialize_game_state(state: &mut engine::State) {
     let size = state.window.inner_size();
@@ -189,185 +181,11 @@ pub fn initialize_game_state(state: &mut engine::State) {
 
     let mut uniform = engine::camera::CameraUniform::new();
     uniform.update_view_proj(&camera);
-    let initial_camera_pos = camera.position;
     state
         .global_resources
         .renderer
         .render_resources
         .insert(CameraData::from_camera(&camera, uniform));
-
-    let mut solid_material = Material::new("shaders/planet_terrain.wgsl".to_string())
-        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-        .with_cull(CullMode::Back);
-    solid_material.configure_pass(engine::renderer::material_passes::SHADOW, |pass| {
-        pass.pipeline.shader = "shaders/shadow_depth.wgsl".into();
-        pass.vertex_entry = "vs_shadow".into();
-        pass.fragment_entry = None;
-        // Terrain is a closed procedural surface. Make its shadow caster pass two-sided so
-        // winding, steep overhangs, and the light's position around the planet cannot cull
-        // the complete local caster set before depth rasterization.
-        pass.pipeline.cull_mode = CullMode::None;
-        pass.pipeline.depth_state = Some(DepthState {
-            write_enabled: true,
-            compare: CompareFunction::Less,
-        });
-    });
-
-    let line_material = Material::new("shaders/planet_terrain2.wgsl".to_string())
-        .with_vertex_layouts(vec![PlanetVertex::layout(), PlanetInstance::layout()])
-        .with_topology(Topology::LineList)
-        .with_cull(CullMode::Back);
-
-    let camera_layout = state
-        .global_resources
-        .renderer
-        .render_graph
-        .get_node_mut::<GeometryPassNode>(engine::renderer::ids::graph_passes::GEOMETRY)
-        .and_then(|node| node.camera_bind_group_layout)
-        .expect("GeometryPassNode must be compiled before creating planet pipelines");
-    let textures_layout = state
-        .global_resources
-        .renderer
-        .render_resources
-        .get_labeled::<FrameBindings>("frame_bindings")
-        .map(|bindings| bindings.textures_layout)
-        .expect(
-            "Frame material bind group layout must be initialized before creating planet pipelines",
-        );
-    let shadow_bindings = *state
-        .global_resources
-        .renderer
-        .render_resources
-        .get_labeled::<engine::renderer::ShadowBindings>("shadow_bindings")
-        .expect("ShadowPassNode must be compiled before creating planet pipelines");
-
-    load_terrain_diffuse_texture(
-        &mut state.global_resources.renderer,
-        "Grass001_2K-JPG_Color.jpg",
-        "terrain_grass_diffuse",
-        GRASS_TERRAIN_TEXTURE_INDEX,
-    );
-    load_terrain_diffuse_texture(
-        &mut state.global_resources.renderer,
-        "Rock061_2K-JPG_Color.jpg",
-        "terrain_rock_diffuse",
-        ROCK_TERRAIN_TEXTURE_INDEX,
-    );
-
-    // PlanetVertex material IDs address this palette directly: grass = 0, rock = 1.
-    let terrain_materials = [
-        GpuPlanetTerrainMaterial {
-            diffuse_texture_index: GRASS_TERRAIN_TEXTURE_INDEX,
-            normal_texture_index: 0,
-            displacement_texture_index: 0,
-            roughness_texture_index: 0,
-            texture_scale: 1.0,
-            displacement_scale: 0.0,
-            roughness_factor: 0.9,
-            flags: 0,
-        },
-        GpuPlanetTerrainMaterial {
-            diffuse_texture_index: ROCK_TERRAIN_TEXTURE_INDEX,
-            normal_texture_index: 0,
-            displacement_texture_index: 0,
-            roughness_texture_index: 0,
-            texture_scale: 1.0,
-            displacement_scale: 0.0,
-            roughness_factor: 0.75,
-            flags: 0,
-        },
-    ];
-    let terrain_materials_layout = state
-        .global_resources
-        .renderer
-        .renderer_api
-        .create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: "planet_terrain_materials_layout".to_string(),
-            entries: vec![BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::Fragment,
-                entry_type: BindingType::StorageBuffer { read_only: true },
-                count: None,
-            }],
-        });
-    let terrain_materials_buffer =
-        state
-            .global_resources
-            .renderer
-            .renderer_api
-            .create_buffer(&BufferDescriptor {
-                label: "planet_terrain_materials".to_string(),
-                size: std::mem::size_of_val(&terrain_materials) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            });
-    state.global_resources.renderer.renderer_api.write_buffer(
-        terrain_materials_buffer,
-        bytemuck::cast_slice(&terrain_materials),
-    );
-    let terrain_materials_bind_group = state
-        .global_resources
-        .renderer
-        .renderer_api
-        .create_bind_group(&BindGroupDescriptor {
-            label: "planet_terrain_materials_bind_group".to_string(),
-            layout: terrain_materials_layout,
-            entries: vec![(0, BindGroupEntry::Buffer(terrain_materials_buffer))],
-        });
-
-    let geometry_target = {
-        let renderer = &state.global_resources.renderer;
-        let descriptor = GeometryPassNode::pass_descriptor();
-        renderer
-            .renderer_api
-            .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
-    };
-
-    let solid_pipeline = state
-        .global_resources
-        .renderer
-        .renderer_api
-        .create_pipeline(
-            &solid_material,
-            engine::renderer::ids::material_passes::FORWARD_OPAQUE,
-            &[
-                camera_layout,
-                textures_layout,
-                terrain_materials_layout,
-                shadow_bindings.sampling_layout,
-            ],
-            &geometry_target,
-        );
-    let shadow_target = {
-        let renderer = &state.global_resources.renderer;
-        let descriptor = engine::renderer::ShadowPassNode::pass_descriptor();
-        renderer
-            .renderer_api
-            .target_info_for_pass(&descriptor, &renderer.render_graph.resources)
-    };
-    let solid_shadow_pipeline = state
-        .global_resources
-        .renderer
-        .renderer_api
-        .create_pipeline(
-            &solid_material,
-            engine::renderer::material_passes::SHADOW,
-            &[
-                shadow_bindings.view_layout,
-                textures_layout,
-                terrain_materials_layout,
-            ],
-            &shadow_target,
-        );
-    state
-        .global_resources
-        .renderer
-        .renderer_api
-        .create_pipeline(
-            &line_material,
-            engine::renderer::ids::material_passes::FORWARD_OPAQUE,
-            &[camera_layout, textures_layout],
-            &geometry_target,
-        );
 
     let scene = state.active_scene_mut().unwrap();
     let world = scene.world_mut();
@@ -404,9 +222,11 @@ pub fn initialize_game_state(state: &mut engine::State) {
 
     world.insert_resource(GameCamera {
         entity: camera_entity,
+        world_position: velocity_sample_pos.as_dvec3(),
         camera,
         controller: engine::camera::CameraController::new(0.2),
         uniform,
+        previous_world_position: velocity_sample_pos.as_dvec3(),
         velocity_sample_pos,
         velocity_sample_time,
         velocity_sample_distance: 0.0,
@@ -421,18 +241,12 @@ pub fn initialize_game_state(state: &mut engine::State) {
         in_flight: HashSet::new(),
         empty_chunks: HashSet::new(),
         empty_neighbor_signatures: HashMap::new(),
-        solid_material,
-        solid_pipeline,
-        solid_shadow_pipeline,
-        terrain_materials_buffer,
-        terrain_materials_bind_group,
         update_octree: true,
         terrain_physics_enabled: true,
         debug_nodes: Vec::new(),
         debug_depth: 0,
         max_depth: 0,
         octree_job_in_flight: false,
-        last_requested_camera_pos: initial_camera_pos,
         terrain_brush_radius: 10.0,
     });
 }
@@ -449,6 +263,8 @@ fn register_static_schedule_systems(state: &mut engine::State) {
     };
 
     let init_schedule_mut = scene.init_schedule_mut();
+    init_schedule_mut
+        .add_system(render::producers::planet_terrain_producer::planet_terrain_producer_init);
     init_schedule_mut.add_system(hot_planet_system_init);
     init_schedule_mut.add_system(systems::planets::universe_system::universe_system_init);
 
@@ -457,6 +273,8 @@ fn register_static_schedule_systems(state: &mut engine::State) {
     update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
     update_schedule_mut.add_static_system(hot_player_interaction_system);
     update_schedule_mut.add_system(hot_camera_update_system);
+    update_schedule_mut
+        .add_system(render::producers::planet_terrain_producer::planet_terrain_producer_update);
     update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
 }
 
@@ -527,7 +345,6 @@ fn update_impl(state: &mut engine::State) {
 
 fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
     let world = &mut ctx.world;
-    let camera_input = camera_input_from_world(world);
     let Some(mut camera) = world.get_resource_mut::<GameCamera>() else {
         return;
     };
@@ -536,23 +353,13 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
     let camera_transform = world.get::<TransformComponent>(camera_entity).unwrap();
     let camera_component = world.get::<CameraComponent>(camera_entity).unwrap();
 
-    let previous_position = camera.camera.position;
-    let mut controller = std::mem::replace(
-        &mut camera.controller,
-        engine::camera::CameraController::new(0.2),
-    );
-    apply_camera_input(&mut controller, camera_input);
-    controller.update_camera(&mut camera.camera);
-    camera.camera.position = engine::math::vec3(
-        camera_transform.position.x,
-        camera_transform.position.y,
-        camera_transform.position.z,
-    );
+    let previous_position = camera.previous_world_position;
+    camera.camera.position = camera.world_position.as_vec3();
     camera.camera.orientation = camera_transform.rotation;
     camera.camera.fovy = camera_component.fov;
 
-    camera.controller = controller;
     update_camera_velocity_log(&mut camera, previous_position);
+    camera.previous_world_position = camera.world_position;
     let camera_copy = engine::camera::Camera {
         position: camera.camera.position,
         orientation: camera.camera.orientation,
@@ -565,70 +372,9 @@ fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::co
     camera.uniform.update_view_proj(&camera_copy);
 }
 
-#[derive(Clone, Copy, Default)]
-struct CameraInput {
-    forward: bool,
-    backward: bool,
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-    shift: bool,
-    roll_left: bool,
-    roll_right: bool,
-    right_mouse: bool,
-    mouse_delta: (f32, f32),
-    scroll: f32,
-}
-
-fn camera_input_from_world(world: &World) -> CameraInput {
-    let Some(input) = world.get_resource::<InputState>() else {
-        return CameraInput::default();
-    };
-
-    CameraInput {
-        forward: input.pressed.contains(&KeyCode::KeyW)
-            || input.pressed.contains(&KeyCode::ArrowUp),
-        backward: input.pressed.contains(&KeyCode::KeyS)
-            || input.pressed.contains(&KeyCode::ArrowDown),
-        left: input.pressed.contains(&KeyCode::KeyA) || input.pressed.contains(&KeyCode::ArrowLeft),
-        right: input.pressed.contains(&KeyCode::KeyD)
-            || input.pressed.contains(&KeyCode::ArrowRight),
-        up: input.pressed.contains(&KeyCode::Space) || input.pressed.contains(&KeyCode::PageUp),
-        down: input.pressed.contains(&KeyCode::KeyC) || input.pressed.contains(&KeyCode::PageDown),
-        shift: input.pressed.contains(&KeyCode::ShiftLeft),
-        roll_left: input.pressed.contains(&KeyCode::KeyQ),
-        roll_right: input.pressed.contains(&KeyCode::KeyE),
-        right_mouse: input.mouse_pressed.contains(&MouseButton::Right),
-        mouse_delta: input.mouse_delta,
-        scroll: input.scroll,
-    }
-}
-
-fn apply_camera_input(controller: &mut engine::camera::CameraController, input: CameraInput) {
-    controller.handle_key(KeyCode::KeyW, input.forward);
-    controller.handle_key(KeyCode::KeyS, input.backward);
-    controller.handle_key(KeyCode::KeyA, input.left);
-    controller.handle_key(KeyCode::KeyD, input.right);
-    controller.handle_key(KeyCode::Space, input.up);
-    controller.handle_key(KeyCode::KeyC, input.down);
-    controller.handle_key(KeyCode::ShiftLeft, input.shift);
-    controller.handle_key(KeyCode::KeyQ, input.roll_left);
-    controller.handle_key(KeyCode::KeyE, input.roll_right);
-    controller.handle_mouse_click(input.right_mouse);
-
-    if input.mouse_delta.0 != 0.0 || input.mouse_delta.1 != 0.0 {
-        controller.handle_mouse(input.mouse_delta.0, input.mouse_delta.1);
-    }
-
-    if input.scroll != 0.0 {
-        controller.handle_mouse_scroll(engine::MouseScrollDelta::LineDelta(0.0, input.scroll));
-    }
-}
-
-fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: Vec3) {
-    let frame_distance = (camera.camera.position - previous_position).length();
-    camera.velocity_sample_distance += frame_distance;
+fn update_camera_velocity_log(camera: &mut GameCamera, previous_position: engine::math::DVec3) {
+    let frame_distance = (camera.world_position - previous_position).length();
+    camera.velocity_sample_distance += frame_distance as f32;
 
     let now = Instant::now();
     let elapsed = now
@@ -764,9 +510,11 @@ fn handle_key_press_impl(state: &mut engine::State, key_code: KeyCode, pressed: 
 
         if pressed && key_code == KeyCode::PageUp {
             camera_transform.position = engine::math::vec3(0.0, PLANET_SIZE as f32, 0.0);
+            camera.world_position = camera_transform.position.as_dvec3();
         }
         if pressed && key_code == KeyCode::PageDown {
             camera_transform.position = engine::math::vec3(0.0, 0.0, 0.0);
+            camera.world_position = camera_transform.position.as_dvec3();
         }
     }
 

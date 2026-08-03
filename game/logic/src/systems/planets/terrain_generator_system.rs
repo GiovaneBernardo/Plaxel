@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use engine::math::{Vec3, vec3};
+use engine::math::{DVec3, Vec3, dvec3, vec3};
 use game_types::{
     octree::{FaceNeighbor, FaceNeighborKind, OctreeNode},
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
@@ -81,21 +81,24 @@ fn contour_cell_vertex(
         grid[x + 1][y + 1][z + 1],
     ];
 
-    let half_size = resolution * 0.5;
-
     let base_local = vec3(
-        x as f32 * resolution - half_size,
-        y as f32 * resolution - half_size,
-        z as f32 * resolution - half_size,
+        x as f32 * resolution,
+        y as f32 * resolution,
+        z as f32 * resolution,
     );
-    contour_cell_from_corners(corners, base_local, resolution, planet_position)
+    contour_cell_from_corners(
+        corners,
+        base_local,
+        resolution,
+        offset.as_dvec3() - planet_position.as_dvec3(),
+    )
 }
 
 fn contour_cell_from_corners(
     corners: [f32; 8],
     base: Vec3,
     resolution: f32,
-    planet_position: Vec3,
+    position_origin_planet: engine::math::DVec3,
 ) -> Option<PlanetVertex> {
     let has_negative = corners.iter().any(|&density| density < 0.0);
     let has_positive = corners.iter().any(|&density| density > 0.0);
@@ -162,18 +165,18 @@ fn contour_cell_from_corners(
     let dz1 = (corners[6] - corners[2]) * (1.0 - tx) + (corners[7] - corners[3]) * tx;
     let dz = (dz0 * (1.0 - ty) + dz1 * ty) / resolution;
     let gradient = vec3(dx, dy, dz);
-    let normal = if gradient.length_squared() > 1e-12 {
-        gradient.normalize()
-    } else {
-        (average_position - planet_position).normalize()
-    };
-    let average_normal = [normal.x, normal.y, normal.z];
-    let radial = average_position - planet_position;
-    let up = if radial.length_squared() > 1e-6 {
-        radial.normalize()
+    let radial = position_origin_planet + average_position.as_dvec3();
+    let up = if radial.length_squared() > 1e-12 {
+        radial.normalize().as_vec3()
     } else {
         vec3(0.0, 1.0, 0.0)
     };
+    let normal = if gradient.length_squared() > 1e-12 {
+        gradient.normalize()
+    } else {
+        up
+    };
+    let average_normal = [normal.x, normal.y, normal.z];
     let slope = average_normal[0] * up.x + average_normal[1] * up.y + average_normal[2] * up.z;
     //let is_ocean = heightmap
     //    .and_then(|heightmap| heightmap.sample_unit_height(up))
@@ -317,18 +320,18 @@ fn append_z_edge_indices(
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct TransitionCellKey {
-    min: [u32; 3],
-    spacing: u32,
+    min: [u64; 3],
+    spacing: u64,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct TransitionEdgeKey {
-    start: [u32; 3],
+    start: [u64; 3],
     axis: u8,
 }
 
 #[inline]
-fn axis_value(value: Vec3, axis: usize) -> f32 {
+fn axis_value(value: DVec3, axis: usize) -> f64 {
     match axis {
         0 => value.x,
         1 => value.y,
@@ -337,7 +340,7 @@ fn axis_value(value: Vec3, axis: usize) -> f32 {
 }
 
 #[inline]
-fn with_axis(mut value: Vec3, axis: usize, component: f32) -> Vec3 {
+fn with_axis(mut value: DVec3, axis: usize, component: f64) -> DVec3 {
     match axis {
         0 => value.x = component,
         1 => value.y = component,
@@ -347,31 +350,33 @@ fn with_axis(mut value: Vec3, axis: usize, component: f32) -> Vec3 {
 }
 
 fn transition_cell_vertex(
-    probe: Vec3,
+    probe: DVec3,
     face: usize,
-    fine_min: Vec3,
-    fine_size: f32,
-    fine_spacing: f32,
-    coarse: FaceNeighbor,
+    fine_min_planet: DVec3,
+    fine_size: f64,
+    fine_spacing: f64,
+    coarse_min_planet: DVec3,
+    coarse_spacing: f64,
     cache: &mut HashMap<TransitionCellKey, Option<u32>>,
     vertices: &mut Vec<PlanetVertex>,
     terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> Option<u32> {
     let normal_axis = face / 2;
     let positive_face = face % 2 == 1;
-    let plane = axis_value(fine_min, normal_axis) + if positive_face { fine_size } else { 0.0 };
+    let plane =
+        axis_value(fine_min_planet, normal_axis) + if positive_face { fine_size } else { 0.0 };
     let on_fine_side = if positive_face {
         axis_value(probe, normal_axis) < plane
     } else {
         axis_value(probe, normal_axis) > plane
     };
     let (origin, spacing) = if on_fine_side {
-        (fine_min, fine_spacing)
+        (fine_min_planet, fine_spacing)
     } else {
-        (coarse.min, coarse.size / CHUNK_CELL_COUNT as f32)
+        (coarse_min_planet, coarse_spacing)
     };
 
-    let aligned = vec3(
+    let aligned = dvec3(
         origin.x + ((probe.x - origin.x) / spacing).floor() * spacing,
         origin.y + ((probe.y - origin.y) / spacing).floor() * spacing,
         origin.z + ((probe.z - origin.z) / spacing).floor() * spacing,
@@ -390,36 +395,38 @@ fn transition_cell_vertex(
 
     let corners = [
         aligned,
-        aligned + vec3(spacing, 0.0, 0.0),
-        aligned + vec3(0.0, spacing, 0.0),
-        aligned + vec3(spacing, spacing, 0.0),
-        aligned + vec3(0.0, 0.0, spacing),
-        aligned + vec3(spacing, 0.0, spacing),
-        aligned + vec3(0.0, spacing, spacing),
-        aligned + vec3(spacing, spacing, spacing),
+        aligned + dvec3(spacing, 0.0, 0.0),
+        aligned + dvec3(0.0, spacing, 0.0),
+        aligned + dvec3(spacing, spacing, 0.0),
+        aligned + dvec3(0.0, 0.0, spacing),
+        aligned + dvec3(spacing, 0.0, spacing),
+        aligned + dvec3(0.0, spacing, spacing),
+        aligned + dvec3(spacing, spacing, spacing),
     ]
-    .map(|position| terrain_sampler::sample_final_density(terrain, position));
-    let index = contour_cell_from_corners(corners, aligned, spacing, terrain.planet_position).map(
-        |vertex| {
-            let index = vertices.len() as u32;
-            vertices.push(vertex);
-            index
-        },
-    );
+    .map(|position| terrain_sampler::sample_final_density_planet_local(terrain, position));
+    let aligned_fine_local = (aligned - fine_min_planet).as_vec3();
+    let index =
+        contour_cell_from_corners(corners, aligned_fine_local, spacing as f32, fine_min_planet)
+            .map(|vertex| {
+                let index = vertices.len() as u32;
+                vertices.push(vertex);
+                index
+            });
     cache.insert(key, index);
     index
 }
 
 #[allow(clippy::too_many_arguments)]
 fn append_transition_edge(
-    start: Vec3,
+    start: DVec3,
     edge_axis: usize,
     density_at_start: f32,
     face: usize,
-    fine_min: Vec3,
-    fine_size: f32,
-    fine_spacing: f32,
-    coarse: FaceNeighbor,
+    fine_min_planet: DVec3,
+    fine_size: f64,
+    fine_spacing: f64,
+    coarse_min_planet: DVec3,
+    coarse_spacing: f64,
     cache: &mut HashMap<TransitionCellKey, Option<u32>>,
     emitted_edges: &mut HashSet<TransitionEdgeKey>,
     vertices: &mut Vec<PlanetVertex>,
@@ -460,10 +467,11 @@ fn append_transition_edge(
         quadrant_vertices[slot] = transition_cell_vertex(
             probe,
             face,
-            fine_min,
+            fine_min_planet,
             fine_size,
             fine_spacing,
-            coarse,
+            coarse_min_planet,
+            coarse_spacing,
             cache,
             vertices,
             terrain,
@@ -512,6 +520,10 @@ fn append_transition_faces(
     terrain: &PlanetTerrainSamplerContext<'_>,
 ) {
     let cell_count = CHUNK_CELL_COUNT;
+    let planet_position = terrain.planet_position.as_dvec3();
+    let fine_min_planet = fine_min.as_dvec3() - planet_position;
+    let fine_size = f64::from(fine_size);
+    let fine_spacing = f64::from(fine_spacing);
     let mut cache = HashMap::new();
     let mut emitted_edges = HashSet::new();
 
@@ -520,6 +532,8 @@ fn append_transition_faces(
         if coarse.kind != FaceNeighborKind::Coarser {
             continue;
         }
+        let coarse_min_planet = coarse.min.as_dvec3() - planet_position;
+        let coarse_spacing = f64::from(coarse.size) / CHUNK_CELL_COUNT as f64;
         let normal_axis = face / 2;
         let (first_tangent, second_tangent) = match normal_axis {
             0 => (1, 2),
@@ -548,21 +562,22 @@ fn append_transition_faces(
                         continue;
                     }
 
-                    let start = fine_min
-                        + vec3(
-                            sample[0] as f32 * fine_spacing,
-                            sample[1] as f32 * fine_spacing,
-                            sample[2] as f32 * fine_spacing,
+                    let start = fine_min_planet
+                        + dvec3(
+                            sample[0] as f64 * fine_spacing,
+                            sample[1] as f64 * fine_spacing,
+                            sample[2] as f64 * fine_spacing,
                         );
                     append_transition_edge(
                         start,
                         edge_axis,
                         density_at_start,
                         face,
-                        fine_min,
+                        fine_min_planet,
                         fine_size,
                         fine_spacing,
-                        coarse,
+                        coarse_min_planet,
+                        coarse_spacing,
                         &mut cache,
                         &mut emitted_edges,
                         vertices,

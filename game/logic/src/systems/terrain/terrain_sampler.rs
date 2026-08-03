@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use engine::math::Vec3;
+use engine::math::{DVec3, Vec3};
 use game_types::{
     planet::PlanetTerrainEdits,
     terrain::{
@@ -9,7 +9,7 @@ use game_types::{
     },
 };
 
-use crate::sdf::{base_sdf_at_center, sample_terrain_edit};
+use crate::sdf::{base_sdf_planet_local, sample_terrain_edit};
 
 pub struct PlanetTerrainSnapshot {
     pub config: Arc<PlanetTerrainConfig>,
@@ -38,10 +38,19 @@ pub fn sample_original_density(
     terrain: &PlanetTerrainSamplerContext<'_>,
     world_position: Vec3,
 ) -> f32 {
-    base_sdf_at_center(
-        world_position,
-        terrain.planet_position,
-        terrain.config.radius,
+    sample_original_density_planet_local(
+        terrain,
+        world_position.as_dvec3() - terrain.planet_position.as_dvec3(),
+    )
+}
+
+pub fn sample_original_density_planet_local(
+    terrain: &PlanetTerrainSamplerContext<'_>,
+    planet_local_position: DVec3,
+) -> f32 {
+    base_sdf_planet_local(
+        planet_local_position,
+        f64::from(terrain.config.radius),
         None,
     )
 }
@@ -50,15 +59,35 @@ pub fn sample_final_density(
     terrain: &PlanetTerrainSamplerContext<'_>,
     world_position: Vec3,
 ) -> f32 {
-    sample_original_density(terrain, world_position)
-        + sample_terrain_edits_density(terrain, world_position)
+    sample_final_density_planet_local(
+        terrain,
+        world_position.as_dvec3() - terrain.planet_position.as_dvec3(),
+    )
+}
+
+pub fn sample_final_density_planet_local(
+    terrain: &PlanetTerrainSamplerContext<'_>,
+    planet_local_position: DVec3,
+) -> f32 {
+    sample_original_density_planet_local(terrain, planet_local_position)
+        + sample_terrain_edits_density_planet_local(terrain, planet_local_position)
 }
 
 pub fn sample_terrain_edits_density(
     terrain: &PlanetTerrainSamplerContext<'_>,
     world_position: Vec3,
 ) -> f32 {
-    sample_terrain_edit(world_position - terrain.planet_position, terrain.edits)
+    sample_terrain_edits_density_planet_local(
+        terrain,
+        world_position.as_dvec3() - terrain.planet_position.as_dvec3(),
+    )
+}
+
+pub fn sample_terrain_edits_density_planet_local(
+    terrain: &PlanetTerrainSamplerContext<'_>,
+    planet_local_position: DVec3,
+) -> f32 {
+    sample_terrain_edit(planet_local_position.as_vec3(), terrain.edits)
 }
 
 pub fn sample_surface(

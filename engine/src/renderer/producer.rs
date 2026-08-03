@@ -353,15 +353,16 @@ impl RenderProducer for StandardMeshProducer {
             for &(group, binding) in &draw.extra_bind_groups {
                 context.bind_bind_group(group, binding);
             }
-            let vertex = context.get_mesh_vertex_buffer(&draw.mesh);
-            if last_vertex != Some(vertex) {
-                context.bind_vertex_buffer(0, vertex);
-                last_vertex = Some(vertex);
+            let Some(mesh) = context.get_mesh_binding(&draw.mesh) else {
+                continue;
+            };
+            if last_vertex != Some(mesh.vertex_buffer) {
+                context.bind_vertex_buffer(0, mesh.vertex_buffer);
+                last_vertex = Some(mesh.vertex_buffer);
             }
-            let index = context.get_mesh_index_buffer(&draw.mesh);
-            if last_index != Some(index) {
-                context.bind_index_buffer(index);
-                last_index = Some(index);
+            if last_index != Some(mesh.index_buffer) {
+                context.bind_index_buffer(mesh.index_buffer);
+                last_index = Some(mesh.index_buffer);
             }
             context.bind_vertex_buffer_range(
                 1,
@@ -369,7 +370,7 @@ impl RenderProducer for StandardMeshProducer {
                 draw.transform_index as u64 * stride,
                 stride,
             );
-            let range = context.get_mesh_draw_range(&draw.mesh);
+            let range = mesh.draw_range;
             context.draw_indexed(range.first_index, range.index_count, range.base_vertex, 1);
         }
     }

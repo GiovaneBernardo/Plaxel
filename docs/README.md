@@ -8,6 +8,7 @@ They focus on choosing the highest-level path that still gives the feature enoug
 - [ECS systems](ecs-systems.md): components, queries, resources, commands, scheduling, hot reload, and change detection.
 - [Rendering](rendering.md): choosing between `MeshRenderer`, retained render objects, and custom render producers.
 - [Materials, passes, and views](render-passes-and-materials.md): material variants, render flags, extensible IDs, graph routes, and shadow views.
+- [Planet terrain producer](planet-terrain-producer.md): a complete CPU-generated, GPU-uploaded, multi-draw terrain producer design.
 
 ## Which rendering path should I use?
 
@@ -27,4 +28,3 @@ only its high-volume chunk drawing with a producer. Other models can continue us
 Gameplay owns persistent simulation state. Render objects and producers own persistent rendering
 state. A frame should upload only data that changed; it should not rebuild a second copy of the
 entire world every frame.
-

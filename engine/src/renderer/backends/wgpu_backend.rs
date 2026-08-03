@@ -26,13 +26,11 @@ use crate::renderer::{
     GraphPassId, RenderNodeDescriptor, SamplerBorderColor, ShaderStages, TextureDimension,
     TextureFormat, TextureSampleType, TextureUsages,
 };
+use crate::renderer::{gpu::GpuArena, gpu_mesh::GpuMesh};
 use crate::texture;
-use offset_allocator::Allocation;
 use wgpu::IndexFormat;
 use wgpu::PipelineCache;
 use wgpu::PipelineCacheDescriptor;
-use wgpu::util::DeviceExt;
-use wgpu::wgt::TextureDataOrder;
 
 use super::{
     BindGroupLayoutHandle, BufferHandle, PipelineHandle, RenderGraph, RenderNode, TextureHandle,
@@ -412,16 +410,6 @@ impl From<StepMode> for wgpu::VertexStepMode {
     }
 }
 
-pub struct GpuMesh {
-    pub pool: VertexPoolId,
-    pub vertex_alloc: Allocation,
-    pub index_page: u32,
-    pub index_alloc: Allocation,
-    pub index_count: u32,
-    pub first_index: u32,
-    pub base_vertex: i32,
-}
-
 #[derive(Clone)]
 struct ShaderHotReloadData {
     pipeline_descriptor: PipelineDescriptor,
@@ -458,7 +446,8 @@ pub struct WgpuBackend {
     materials_by_uuid: HashMap<Uuid, u32>,
     samplers: HashMap<SamplerHandle, wgpu::Sampler>,
     pool_manager: PoolManager,
-    gpu_meshes: HashMap<Handle<MeshAsset>, GpuMesh>,
+    gpu_meshes: GpuArena<GpuMesh>,
+    asset_gpu_meshes: HashMap<Handle<MeshAsset>, GpuMeshHandle>,
     shaders_hot_reload_data: HashMap<String, Vec<ShaderHotReloadData>>,
     white_texture: Option<TextureHandle>,
     default_sampler: Option<SamplerHandle>,
@@ -511,6 +500,14 @@ impl<'a> RenderContext for WgpuRenderContext<'a> {
     fn draw_indexed_indirect(&mut self, buffer: BufferHandle, offset: u64) {
         self.pass
             .draw_indexed_indirect(self.backend.get_buffer(buffer).unwrap(), offset);
+    }
+
+    fn multi_draw_indexed_indirect(&mut self, buffer: BufferHandle, offset: u64, count: u32) {
+        self.pass.multi_draw_indexed_indirect(
+            self.backend.get_buffer(buffer).unwrap(),
+            offset,
+            count,
+        );
     }
 
     fn bind_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle) {
@@ -569,7 +566,7 @@ impl RendererAPI for WgpuBackend {
             anisotropy_clamp: 16,
             border_color: None,
             compare: None,
-            lod_max_clamp: 0.0,
+            lod_max_clamp: 32.0,
             lod_min_clamp: 0.0,
             mag_filter: FilterMode::default(),
             min_filter: FilterMode::default(),
@@ -813,7 +810,12 @@ impl RendererAPI for WgpuBackend {
         self.default_sampler.unwrap()
     }
 
-    fn load_texture(&mut self, path: &String, descriptor: &TextureDescriptor, index: Option<u32>) {
+    fn load_texture_to_index(
+        &mut self,
+        path: &String,
+        descriptor: &TextureDescriptor,
+        index: Option<u32>,
+    ) -> TextureHandle {
         // Load JPG from disk
         let img = image::open(path)
             .expect("Failed to load texture")
@@ -826,37 +828,64 @@ impl RendererAPI for WgpuBackend {
             _ => 1,
         };
 
-        let data = img.as_raw();
-
         let depth_or_array_layers = match descriptor.dimension {
             TextureDimension::Cube => 6,
             _ => 1,
         };
+        let maximum_mip_levels = u32::BITS - width.max(height).leading_zeros();
+        let mip_level_count = descriptor.mip_levels.clamp(1, maximum_mip_levels);
+        let wgpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(descriptor.label.as_str()),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers,
+            },
+            mip_level_count,
+            sample_count: descriptor.sample_count,
+            dimension: descriptor.dimension.into(),
+            format: descriptor.format.into(),
+            usage: descriptor.usage.into(),
+            view_formats: &[],
+        });
 
-        //let data: [u8; 1] = [32];
-
-        let wgpu_texture = self.device.create_texture_with_data(
-            &self.queue,
-            &wgpu::TextureDescriptor {
-                label: Some(descriptor.label.as_str()),
-                size: wgpu::Extent3d {
-                    width: width,
-                    height: height,
+        for mip_level in 0..mip_level_count {
+            let mip_width = (width >> mip_level).max(1);
+            let mip_height = (height >> mip_level).max(1);
+            let mip = if mip_level == 0 {
+                img.clone()
+            } else {
+                image::imageops::resize(
+                    &img,
+                    mip_width,
+                    mip_height,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            };
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &wgpu_texture,
+                    mip_level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                mip.as_raw(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * mip_width),
+                    rows_per_image: Some(mip_height),
+                },
+                wgpu::Extent3d {
+                    width: mip_width,
+                    height: mip_height,
                     depth_or_array_layers,
                 },
-                mip_level_count: descriptor.mip_levels,
-                sample_count: descriptor.sample_count,
-                dimension: descriptor.dimension.into(),
-                format: descriptor.format.into(),
-                usage: descriptor.usage.into(),
-                view_formats: &[],
-            },
-            TextureDataOrder::LayerMajor,
-            &data,
-        );
+            );
+        }
 
         let handle = self.add_texture(wgpu_texture);
         self.upload_texture(&handle, index);
+        handle
     }
 
     fn load_material(&mut self, header: &crate::assets::manager::AssetHeader) -> Material {
@@ -1102,38 +1131,139 @@ impl RendererAPI for WgpuBackend {
 
     // TODO: UNLOAD TEXTURE FROM uploaded_textures
 
+    fn upload_mesh(&mut self, upload: MeshUpload<'_>) -> Result<GpuMeshHandle, MeshUploadError> {
+        if upload.vertices.is_empty() {
+            return Err(MeshUploadError::EmptyVertices);
+        }
+        if upload.indices.is_empty() {
+            return Err(MeshUploadError::EmptyIndices);
+        }
+
+        let stride_u64 = upload.vertex_layout.stride;
+        let stride = usize::try_from(stride_u64)
+            .ok()
+            .filter(|stride| *stride > 0 && *stride <= u32::MAX as usize)
+            .ok_or(MeshUploadError::InvalidVertexStride(stride_u64))?;
+        if upload.vertices.len() % stride != 0 {
+            return Err(MeshUploadError::MisalignedVertexData {
+                bytes: upload.vertices.len(),
+                stride,
+            });
+        }
+
+        let vertex_count_usize = upload.vertices.len() / stride;
+        let vertex_count = u32::try_from(vertex_count_usize)
+            .map_err(|_| MeshUploadError::TooManyVertices(vertex_count_usize))?;
+        let index_count = u32::try_from(upload.indices.len())
+            .map_err(|_| MeshUploadError::TooManyIndices(upload.indices.len()))?;
+        let stride_u32 = stride as u32;
+
+        let layout_index = self.pool_manager.get_or_create_layout(upload.vertex_layout);
+        let (vertex_page, vertex_allocation) = {
+            let device = &self.device;
+            let buffers = &mut self.buffers;
+            let label = format!("{} vertex pool page", upload.label);
+            let mut create = |capacity: u32| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&label),
+                    size: capacity as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let handle = BufferHandle(buffers.len() as u32);
+                buffers.insert(handle, buffer);
+                handle
+            };
+            self.pool_manager
+                .alloc_vertices(layout_index, vertex_count, stride_u32, &mut create)
+        };
+
+        let (index_page, index_allocation) = {
+            let device = &self.device;
+            let buffers = &mut self.buffers;
+            let label = format!("{} index pool page", upload.label);
+            let mut create = |capacity: u32| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&label),
+                    size: capacity as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let handle = BufferHandle(buffers.len() as u32);
+                buffers.insert(handle, buffer);
+                handle
+            };
+            self.pool_manager.alloc_indices(index_count, &mut create)
+        };
+
+        let pool = VertexPoolId {
+            layout_index,
+            page_index: vertex_page,
+        };
+        let vertex_buffer = self.pool_manager.vertex_buffer(pool);
+        let index_buffer = self.pool_manager.index_buffer(index_page);
+        let vertex_offset = vertex_allocation.offset as u64 * stride_u64;
+        let index_offset = index_allocation.offset as u64 * std::mem::size_of::<u32>() as u64;
+
+        self.queue.write_buffer(
+            self.buffers.get(&vertex_buffer).unwrap(),
+            vertex_offset,
+            upload.vertices,
+        );
+        self.queue.write_buffer(
+            self.buffers.get(&index_buffer).unwrap(),
+            index_offset,
+            bytemuck::cast_slice(upload.indices),
+        );
+
+        Ok(self.gpu_meshes.insert(GpuMesh {
+            pool,
+            vertex_allocation,
+            index_page,
+            index_allocation,
+            draw_range: MeshDrawRange {
+                first_index: index_allocation.offset,
+                index_count,
+                base_vertex: vertex_allocation.offset as i32,
+            },
+        }))
+    }
+
+    fn remove_mesh(&mut self, handle: GpuMeshHandle) -> bool {
+        let Some(mesh) = self.gpu_meshes.remove(handle) else {
+            return false;
+        };
+        self.pool_manager
+            .free_vertices(mesh.pool, mesh.vertex_allocation);
+        self.pool_manager
+            .free_indices(mesh.index_page, mesh.index_allocation);
+        true
+    }
+
+    fn remove_mesh_asset(&mut self, handle: Handle<MeshAsset>) -> bool {
+        let Some(gpu_handle) = self.asset_gpu_meshes.remove(&handle) else {
+            return false;
+        };
+        self.remove_mesh(gpu_handle)
+    }
+
+    fn get_gpu_mesh_binding(&mut self, handle: GpuMeshHandle) -> Option<GpuMeshBinding> {
+        let mesh = self.gpu_meshes.get(handle)?;
+        Some(GpuMeshBinding {
+            vertex_buffer: self.pool_manager.vertex_buffer(mesh.pool),
+            index_buffer: self.pool_manager.index_buffer(mesh.index_page),
+            draw_range: mesh.draw_range,
+        })
+    }
+
     // Get using Uuids
     fn get_pipeline(&mut self, uuid: Uuid) -> Option<PipelineHandle> {
         self.pipelines_by_uuid.get(&uuid).cloned()
     }
 
-    fn get_mesh_vertex_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        let gm = self.gpu_meshes.get(mesh).unwrap();
-        self.pool_manager.vertex_buffer(gm.pool)
-    }
-
-    fn get_mesh_index_buffer(&mut self, mesh: &Handle<MeshAsset>) -> BufferHandle {
-        let gm = self.gpu_meshes.get(mesh).unwrap();
-        self.pool_manager.index_buffer(gm.index_page)
-    }
-    fn get_mesh_index_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
-        self.gpu_meshes.get(mesh).unwrap().index_count
-    }
-
-    fn get_mesh_draw_range(&mut self, mesh: &Handle<MeshAsset>) -> MeshDrawRange {
-        let gm = self.gpu_meshes.get(mesh).unwrap();
-        MeshDrawRange {
-            first_index: gm.first_index,
-            index_count: gm.index_count,
-            base_vertex: gm.base_vertex,
-        }
-    }
-
-    fn get_mesh_instance_count(&mut self, mesh: &Handle<MeshAsset>) -> u32 {
-        self.gpu_meshes.get(mesh).unwrap().index_count
-    }
-    fn get_mesh_instance_buffer(&mut self, _mesh: &Handle<MeshAsset>) -> BufferHandle {
-        BufferHandle(0)
+    fn get_mesh_binding(&mut self, mesh: &Handle<MeshAsset>) -> Option<GpuMeshBinding> {
+        let handle = self.asset_gpu_meshes.get(mesh).copied()?;
+        self.get_gpu_mesh_binding(handle)
     }
 
     fn set_texture(&mut self, texture: &texture::Texture) {
@@ -1153,7 +1283,7 @@ impl RendererAPI for WgpuBackend {
         uvec2(self.surface_config.width, self.surface_config.height)
     }
 
-    fn upload_mesh(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
+    fn upload_mesh_asset(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
         self.load_mesh_with_data(mesh)
     }
 
@@ -1387,96 +1517,18 @@ impl WgpuBackend {
             asset_type: AssetType::Mesh,
             _marker: std::marker::PhantomData,
         };
-
-        let stride = mesh.vertex_layout.stride as u32;
-        assert!(stride > 0, "vertex layout stride must be > 0");
-        assert_eq!(
-            mesh.vertices.len() as u32 % stride,
-            0,
-            "vertex bytes not a multiple of stride"
-        );
-        let vertex_count = mesh.vertices.len() as u32 / stride;
-        let index_count = mesh.indices.len() as u32;
-
-        let layout_idx = self.pool_manager.get_or_create_layout(&mesh.vertex_layout);
-
-        // Allocate vertices. Split-borrow `device`/`buffers` so the closure
-        // doesn't conflict with the `&mut self.pool_manager` call.
-        let (v_page, v_alloc) = {
-            let device = &self.device;
-            let buffers = &mut self.buffers;
-            let mut make_vb = |cap: u32| -> BufferHandle {
-                let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("VertexPoolPage"),
-                    size: cap as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let h = BufferHandle(buffers.len() as u32);
-                buffers.insert(h, buf);
-                h
-            };
-            self.pool_manager
-                .alloc_vertices(layout_idx, vertex_count, stride, &mut make_vb)
-        };
-
-        let (i_page, i_alloc) = {
-            let device = &self.device;
-            let buffers = &mut self.buffers;
-            let mut make_ib = |cap: u32| -> BufferHandle {
-                let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("IndexPoolPage"),
-                    size: cap as u64,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let h = BufferHandle(buffers.len() as u32);
-                buffers.insert(h, buf);
-                h
-            };
-            self.pool_manager.alloc_indices(index_count, &mut make_ib)
-        };
-
-        // Byte offsets come from allocator units × element size.
-        let vertex_byte_offset = v_alloc.offset as u64 * stride as u64;
-        let index_byte_offset = i_alloc.offset as u64 * 4;
-
-        let pool_id = VertexPoolId {
-            layout_index: layout_idx,
-            page_index: v_page,
-        };
-        let v_buffer_handle = self.pool_manager.vertex_buffer(pool_id);
-        let i_buffer_handle = self.pool_manager.index_buffer(i_page);
-
-        let vb = self.buffers.get(&v_buffer_handle).unwrap();
-        self.queue
-            .write_buffer(vb, vertex_byte_offset, &mesh.vertices);
-
-        let index_bytes: &[u8] = bytemuck::cast_slice(&mesh.indices);
-        let ib = self.buffers.get(&i_buffer_handle).unwrap();
-        self.queue.write_buffer(ib, index_byte_offset, index_bytes);
-
-        let gpu_mesh = GpuMesh {
-            pool: pool_id,
-            vertex_alloc: v_alloc,
-            index_page: i_page,
-            index_alloc: i_alloc,
-            index_count,
-            first_index: i_alloc.offset,
-            base_vertex: v_alloc.offset as i32,
-        };
-        self.gpu_meshes.insert(handle, gpu_mesh);
-
-        handle
-    }
-
-    pub fn free_mesh(&mut self, handle: Handle<MeshAsset>) {
-        if let Some(mesh) = self.gpu_meshes.remove(&handle) {
-            self.pool_manager
-                .free_vertices(mesh.pool, mesh.vertex_alloc);
-            self.pool_manager
-                .free_indices(mesh.index_page, mesh.index_alloc);
+        let gpu_handle = self
+            .upload_mesh(MeshUpload {
+                label: &mesh.name,
+                vertices: &mesh.vertices,
+                indices: &mesh.indices,
+                vertex_layout: &mesh.vertex_layout,
+            })
+            .unwrap_or_else(|error| panic!("failed to upload mesh '{}': {error}", mesh.name));
+        if let Some(previous) = self.asset_gpu_meshes.insert(handle, gpu_handle) {
+            self.remove_mesh(previous);
         }
+        handle
     }
 }
 
@@ -1595,9 +1647,13 @@ impl WgpuBackend {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
+        let mut flags = wgpu::InstanceFlags::default();
+        flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
             backends: wgpu::Backends::DX12,
+            flags,
             #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
@@ -1637,8 +1693,13 @@ impl WgpuBackend {
         let wanted_features = wgpu::Features::TEXTURE_BINDING_ARRAY
             | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
             | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            | wgpu::Features::INDIRECT_FIRST_INSTANCE
             | wgpu::Features::PIPELINE_CACHE;
         let enabled_features = wanted_features & supported_features;
+
+        if !supported_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+            anyhow::bail!("the renderer requires INDIRECT_FIRST_INSTANCE for terrain batching");
+        }
 
         let _has_texture_binding_array =
             enabled_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY);
@@ -1743,7 +1804,8 @@ impl WgpuBackend {
                 materials_by_uuid: HashMap::new(),
                 samplers: HashMap::new(),
                 pool_manager: PoolManager::new(),
-                gpu_meshes: HashMap::new(),
+                gpu_meshes: GpuArena::new(),
+                asset_gpu_meshes: HashMap::new(),
                 shaders_hot_reload_data: HashMap::new(),
                 white_texture: None,
                 default_sampler: None,

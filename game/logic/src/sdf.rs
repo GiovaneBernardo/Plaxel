@@ -1,4 +1,4 @@
-use engine::math::{Vec3, vec3};
+use engine::math::{DVec3, Vec3, vec3};
 use game_types::planet::{PlanetTerrainEdits, TerrainBrickKey, TerrainBrickSamples};
 
 const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
@@ -302,19 +302,33 @@ pub fn base_sdf_at_center(
     planet_radius: f32,
     heightmap: Option<&EarthHeightmap>,
 ) -> f32 {
-    let local_p = p - planet_center;
+    base_sdf_planet_local(
+        p.as_dvec3() - planet_center.as_dvec3(),
+        f64::from(planet_radius),
+        heightmap,
+    )
+}
+
+pub fn base_sdf_planet_local(
+    local_p: DVec3,
+    planet_radius: f64,
+    heightmap: Option<&EarthHeightmap>,
+) -> f32 {
     let dist_from_center = local_p.length();
     let dir = if dist_from_center > 1e-6 {
         local_p / dist_from_center
     } else {
-        vec3(0.0, 1.0, 0.0)
+        engine::math::dvec3(0.0, 1.0, 0.0)
     };
 
     let height = heightmap
-        .and_then(|heightmap| heightmap.sample_height(dir, planet_radius))
-        .unwrap_or_else(|| spherical_terrain_height(dir, planet_radius));
-    let terrain = dist_from_center - (planet_radius + height);
-    return terrain;
+        .and_then(|heightmap| {
+            heightmap
+                .sample_height(dir.as_vec3(), planet_radius as f32)
+                .map(f64::from)
+        })
+        .unwrap_or_else(|| spherical_terrain_height_f64(dir, planet_radius));
+    (dist_from_center - (planet_radius + height)) as f32
 
     // let depth_below_surface = -terrain;
     // let fade_zone = planet_r * 0.1;
@@ -391,6 +405,67 @@ pub fn spherical_terrain_height(dir: Vec3, planet_r: f32) -> f32 {
     let mountain_height = mountains * mountain_mask * planet_r * 0.032;
 
     let detail = (fbm(warped_dir * 72.0, 3) - 0.5) * planet_r * 0.004;
+
+    continent_height + mountain_height + detail * mountain_mask
+}
+
+fn smooth_noise_f64(p: DVec3) -> f64 {
+    let ix = p.x.floor() as i32;
+    let iy = p.y.floor() as i32;
+    let iz = p.z.floor() as i32;
+
+    let fx = p.x - f64::from(ix);
+    let fy = p.y - f64::from(iy);
+    let fz = p.z - f64::from(iz);
+
+    let smooth = |value: f64| value * value * (3.0 - 2.0 * value);
+    let ux = smooth(fx);
+    let uy = smooth(fy);
+    let uz = smooth(fz);
+    let sample = |x, y, z| f64::from(hash3i(x, y, z));
+    let interpolate = |a: f64, b: f64, t: f64| a + t * (b - a);
+
+    let x00 = interpolate(sample(ix, iy, iz), sample(ix + 1, iy, iz), ux);
+    let x10 = interpolate(sample(ix, iy + 1, iz), sample(ix + 1, iy + 1, iz), ux);
+    let x01 = interpolate(sample(ix, iy, iz + 1), sample(ix + 1, iy, iz + 1), ux);
+    let x11 = interpolate(
+        sample(ix, iy + 1, iz + 1),
+        sample(ix + 1, iy + 1, iz + 1),
+        ux,
+    );
+
+    interpolate(interpolate(x00, x10, uy), interpolate(x01, x11, uy), uz)
+}
+
+fn fbm_f64(p: DVec3, octaves: u32) -> f64 {
+    let mut value = 0.0;
+    let mut amplitude = 0.5;
+    let mut frequency = 1.0;
+    for _ in 0..octaves {
+        value += amplitude * smooth_noise_f64(p * frequency);
+        frequency *= 2.0;
+        amplitude *= 0.5;
+    }
+    value
+}
+
+fn spherical_terrain_height_f64(dir: DVec3, planet_radius: f64) -> f64 {
+    let warp = engine::math::dvec3(
+        fbm_f64(dir * 3.0 + engine::math::dvec3(17.1, 3.7, 11.5), 4),
+        fbm_f64(dir * 3.0 + engine::math::dvec3(5.3, 19.1, 2.8), 4),
+        fbm_f64(dir * 3.0 + engine::math::dvec3(13.8, 7.4, 23.6), 4),
+    ) * 2.0
+        - DVec3::ONE;
+    let warped_dir = (dir + warp * 0.18).normalize();
+
+    let continent = fbm_f64(warped_dir * 2.2, 5);
+    let continent_height = (continent - 0.45) * planet_radius * 0.018;
+    let mountain_mask = ((continent - 0.38) / 0.34).clamp(0.0, 1.0);
+    let mountain_mask = mountain_mask * mountain_mask * (3.0 - 2.0 * mountain_mask);
+    let mountain_raw = fbm_f64(warped_dir * 18.0, 6);
+    let mountains = (1.0 - (mountain_raw * 2.0 - 1.0).abs()).powf(1.6);
+    let mountain_height = mountains * mountain_mask * planet_radius * 0.032;
+    let detail = (fbm_f64(warped_dir * 72.0, 3) - 0.5) * planet_radius * 0.004;
 
     continent_height + mountain_height + detail * mountain_mask
 }

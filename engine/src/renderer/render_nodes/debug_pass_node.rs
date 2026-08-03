@@ -253,15 +253,15 @@ impl RenderNode for DebugPassNode {
                 .unwrap();
             ctx.bind_pipeline(pipeline);
 
-            let vertex_buffer = ctx.get_mesh_vertex_buffer(&self.sphere_mesh);
-            ctx.bind_vertex_buffer(0, vertex_buffer);
-
-            let index_buffer = ctx.get_mesh_index_buffer(&self.sphere_mesh);
-            ctx.bind_index_buffer(index_buffer);
+            let Some(mesh) = ctx.get_mesh_binding(&self.sphere_mesh) else {
+                return;
+            };
+            ctx.bind_vertex_buffer(0, mesh.vertex_buffer);
+            ctx.bind_index_buffer(mesh.index_buffer);
 
             ctx.bind_vertex_buffer(1, self.sphere_instance_buffer.unwrap());
 
-            let range = ctx.get_mesh_draw_range(&self.sphere_mesh);
+            let range = mesh.draw_range;
             ctx.draw_indexed(
                 range.first_index,
                 range.index_count,
@@ -282,15 +282,15 @@ impl RenderNode for DebugPassNode {
                 .unwrap();
             ctx.bind_pipeline(pipeline);
 
-            let vertex_buffer = ctx.get_mesh_vertex_buffer(&self.cube_mesh);
-            ctx.bind_vertex_buffer(0, vertex_buffer);
-
-            let index_buffer = ctx.get_mesh_index_buffer(&self.cube_mesh);
-            ctx.bind_index_buffer(index_buffer);
+            let Some(mesh) = ctx.get_mesh_binding(&self.cube_mesh) else {
+                return;
+            };
+            ctx.bind_vertex_buffer(0, mesh.vertex_buffer);
+            ctx.bind_index_buffer(mesh.index_buffer);
 
             ctx.bind_vertex_buffer(1, self.cube_instance_buffer.unwrap());
 
-            let range = ctx.get_mesh_draw_range(&self.cube_mesh);
+            let range = mesh.draw_range;
             ctx.draw_indexed(
                 range.first_index,
                 range.index_count,
@@ -311,15 +311,15 @@ impl RenderNode for DebugPassNode {
                 .unwrap();
             ctx.bind_pipeline(pipeline);
 
-            let vertex_buffer = ctx.get_mesh_vertex_buffer(&self.wire_cube_mesh);
-            ctx.bind_vertex_buffer(0, vertex_buffer);
-
-            let index_buffer = ctx.get_mesh_index_buffer(&self.wire_cube_mesh);
-            ctx.bind_index_buffer(index_buffer);
+            let Some(mesh) = ctx.get_mesh_binding(&self.wire_cube_mesh) else {
+                return;
+            };
+            ctx.bind_vertex_buffer(0, mesh.vertex_buffer);
+            ctx.bind_index_buffer(mesh.index_buffer);
 
             ctx.bind_vertex_buffer(1, self.wire_cube_instance_buffer.unwrap());
 
-            let range = ctx.get_mesh_draw_range(&self.wire_cube_mesh);
+            let range = mesh.draw_range;
             ctx.draw_indexed(
                 range.first_index,
                 range.index_count,

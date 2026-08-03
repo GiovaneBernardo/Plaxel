@@ -99,7 +99,9 @@ pub struct GeneratedReplacement {
 
 #[derive(Debug, Clone)]
 pub struct GeneratedMesh {
+    pub planet_entity: Entity,
     pub key: NodeKey,
+    pub node_origin_planet: [i32; 3],
     pub version: u64,
     pub urgent: bool,
     pub vertices: Vec<PlanetVertex>,

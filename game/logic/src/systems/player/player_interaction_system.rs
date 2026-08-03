@@ -341,10 +341,8 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
         return;
     };
 
-    let forward = camera.camera.forward();
-    let right = camera.camera.right();
-    let up = camera.camera.up();
-    let camera_position = camera.camera.position;
+    let mut camera_world_position = camera.world_position;
+    let mut camera_position = camera_world_position.as_vec3();
     let camera_aspect = camera.camera.aspect;
     let camera_near_plane = camera.camera.znear;
     let camera_far_plane = camera.camera.zfar;
@@ -384,11 +382,35 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
         drop(camera_component);
 
         if sprint {
-            let distance = camera_transform.position.length();
+            let distance = camera_world_position.length() as f32;
             final_speed *= distance.sqrt() * 0.1;
         }
 
-        let mut movement = Vec3::new(0.0, 0.0, 0.0);
+        if right_mouse_pressed
+            && (mouse_delta.0.abs() > f32::EPSILON || mouse_delta.1.abs() > f32::EPSILON)
+        {
+            let sensitivity = 0.1;
+            let yaw = Quat::from_axis_angle(Vec3::Y, -(mouse_delta.0 * sensitivity).to_radians());
+            let pitch = Quat::from_axis_angle(Vec3::X, -(mouse_delta.1 * sensitivity).to_radians());
+            camera_transform.rotation = (camera_transform.rotation * yaw * pitch).normalize();
+        }
+
+        let mut roll_amount = 0.0;
+        if roll_left {
+            roll_amount -= 1.0;
+        }
+        if roll_right {
+            roll_amount += 1.0;
+        }
+        if roll_amount != 0.0 {
+            let roll = Quat::from_axis_angle(-Vec3::Z, roll_amount * 0.02);
+            camera_transform.rotation = (camera_transform.rotation * roll).normalize();
+        }
+
+        let forward = camera_transform.rotation * -Vec3::Z;
+        let right = camera_transform.rotation * Vec3::X;
+        let up = camera_transform.rotation * Vec3::Y;
+        let mut movement = Vec3::ZERO;
         if walk_forward {
             movement += forward;
         }
@@ -408,29 +430,13 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
             movement -= up;
         }
         if movement.length_squared() > f32::EPSILON {
-            camera_transform.position += movement.normalize() * final_speed;
-        }
-
-        if right_mouse_pressed
-            && (mouse_delta.0.abs() > f32::EPSILON || mouse_delta.1.abs() > f32::EPSILON)
-        {
-            let sensitivity = 0.1;
-            let yaw = Quat::from_axis_angle(Vec3::Y, -(mouse_delta.0 * sensitivity).to_radians());
-            let pitch = Quat::from_axis_angle(Vec3::X, -(mouse_delta.1 * sensitivity).to_radians());
-            camera_transform.rotation = (camera_transform.rotation * yaw * pitch).normalize();
-        }
-
-        // Roll (Q/E): rotate around local forward (-Z).
-        let mut roll_amount = 0.0f32;
-        if roll_left {
-            roll_amount -= 1.0;
-        }
-        if roll_right {
-            roll_amount += 1.0;
-        }
-        if roll_amount != 0.0 {
-            let roll = Quat::from_axis_angle(-Vec3::Z, roll_amount * 0.02);
-            camera_transform.rotation = (camera_transform.rotation * roll).normalize();
+            camera_world_position += (movement.normalize() * final_speed).as_dvec3();
+            camera_position = camera_world_position.as_vec3();
+            camera_transform.position = camera_position;
+            world
+                .get_resource_mut::<GameCamera>()
+                .unwrap()
+                .world_position = camera_world_position;
         }
 
         let terrain_ok = run_terrain_edit_phase(|| {
@@ -599,7 +605,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                                             1.0 - normalized_distance;
                                                         let smooth_influence = brush_influence
                                                             * brush_influence
-                                                            * (3.0 - 2.0 * brush_influence);
+                                                            * (2.2 - 2.0 * brush_influence);
 
                                                         brick[sample_x][sample_y][sample_z] +=
                                                             brush_strength * smooth_influence;
@@ -870,7 +876,7 @@ fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Han
         }
     };
 
-    let mesh_handle = globals.renderer.renderer_api.upload_mesh(&mesh);
+    let mesh_handle = globals.renderer.renderer_api.upload_mesh_asset(&mesh);
     globals
         .asset_manager
         .paths
