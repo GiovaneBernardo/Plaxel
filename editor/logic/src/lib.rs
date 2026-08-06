@@ -2,6 +2,7 @@ pub mod editor;
 pub mod editor_ui;
 pub mod egui_node;
 pub mod hierarchy;
+pub mod terrain_editor;
 pub mod viewport_context_menu;
 
 use egui_node::EguiRenderNode;

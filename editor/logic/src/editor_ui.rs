@@ -1,6 +1,6 @@
-use egui::{Color32, InputState, RichText, Ui, WidgetText};
+use crate::terrain_editor::{TerrainEditorState, draw_terrain_editor};
+use egui::{Color32, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
-use engine::engine_info;
 use engine::math::vec3;
 use engine::{
     assets::{
@@ -25,7 +25,7 @@ use std::{
 };
 
 const EDITOR_LAYOUT_PATH: &str = "editor_layout.ron";
-const EDITOR_LAYOUT_VERSION: u32 = 3;
+const EDITOR_LAYOUT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 enum EditorTab {
@@ -39,6 +39,7 @@ enum EditorTab {
     Profiler,
     Timeline,
     Physics,
+    Terrain,
 }
 
 pub struct EditorUi {
@@ -53,6 +54,7 @@ pub struct EditorUi {
     last_layout_text: Option<String>,
     last_layout_save_time: f64,
     assets: AssetEditorState,
+    terrain: TerrainEditorState,
 }
 
 impl EditorUi {
@@ -70,6 +72,9 @@ impl EditorUi {
                         .dock_state
                         .push_to_focused_leaf(EditorTab::RenderGraph);
                 }
+                if !dock_has_tab(&layout.dock_state, EditorTab::Terrain) {
+                    layout.dock_state.push_to_focused_leaf(EditorTab::Terrain);
+                }
                 layout.version = EDITOR_LAYOUT_VERSION;
             }
             let last_layout_text = layout.to_ron();
@@ -85,6 +90,7 @@ impl EditorUi {
                 last_layout_text,
                 last_layout_save_time: 0.0,
                 assets: AssetEditorState::new(),
+                terrain: TerrainEditorState::new(),
             };
         }
 
@@ -105,6 +111,7 @@ impl EditorUi {
                 EditorTab::Profiler,
                 EditorTab::Timeline,
                 EditorTab::Physics,
+                EditorTab::Terrain,
             ],
         );
 
@@ -124,6 +131,7 @@ impl EditorUi {
             last_layout_text: None,
             last_layout_save_time: 0.0,
             assets: AssetEditorState::new(),
+            terrain: TerrainEditorState::new(),
         }
     }
 
@@ -184,6 +192,7 @@ impl EditorUi {
                         selected_render_node: &mut self.selected_render_node,
                         show_puffin_profiler: &mut self.show_puffin_profiler,
                         assets: &mut self.assets,
+                        terrain: &mut self.terrain,
                     };
                     let style = Style::from_egui(ui.style().as_ref());
                     DockArea::new(&mut self.dock_state)
@@ -273,6 +282,7 @@ impl EditorUi {
                 EditorTab::Profiler,
                 EditorTab::Timeline,
                 EditorTab::Physics,
+                EditorTab::Terrain,
             ] {
                 let is_open = self.has_tab(tab);
                 if ui
@@ -458,6 +468,7 @@ impl EditorTab {
             EditorTab::Profiler => "Profiler",
             EditorTab::Timeline => "Timeline",
             EditorTab::Physics => "Physics",
+            EditorTab::Terrain => "Terrain",
         }
     }
 }
@@ -604,6 +615,7 @@ struct EditorTabViewer<'a> {
     selected_render_node: &'a mut Option<engine::renderer::ids::GraphPassId>,
     show_puffin_profiler: &'a mut bool,
     assets: &'a mut AssetEditorState,
+    terrain: &'a mut TerrainEditorState,
 }
 
 impl TabViewer for EditorTabViewer<'_> {
@@ -665,6 +677,10 @@ impl TabViewer for EditorTabViewer<'_> {
                 let mut draw = subsecond::HotFn::current(draw_physics);
                 draw.call((ui,));
             }
+            EditorTab::Terrain => {
+                engine::profile_scope!("editor.ui.tab.terrain");
+                draw_terrain_editor(ui, &mut *self.terrain);
+            }
         }
     }
 
@@ -673,7 +689,7 @@ impl TabViewer for EditorTabViewer<'_> {
     }
 
     fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
-        if matches!(tab, EditorTab::Viewport) {
+        if matches!(tab, EditorTab::Viewport | EditorTab::Terrain) {
             [false, false]
         } else {
             [true, true]
