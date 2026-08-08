@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 use egui::{Color32, RichText, TextureHandle, TextureOptions, Ui};
 use engine::{
+    core::components::core::{CameraComponent, TransformComponent},
     ecs::{entity::Entity, query::Query},
     math::{DVec3, dvec3},
 };
@@ -13,6 +14,14 @@ use game_types::terrain::terrain_field::{
 };
 
 const HISTORY_LIMIT: usize = 96;
+
+#[derive(Clone, Copy, Debug)]
+struct TerrainCameraLocation {
+    direction: DVec3,
+    altitude: f64,
+    preview_surface_height: f64,
+    runtime_surface_height: Option<f64>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewMode {
@@ -319,6 +328,7 @@ pub fn draw_terrain_editor(
     engine_state: &mut engine::State,
     selected_entity: Option<Entity>,
 ) {
+    let camera_location = terrain_camera_location(engine_state, selected_entity, &state.graph);
     let time = ui.input(|input| input.time);
     let command = ui.input(|input| input.modifiers.command);
     if command && ui.input(|input| input.key_pressed(egui::Key::S)) {
@@ -390,7 +400,7 @@ pub fn draw_terrain_editor(
         });
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        draw_preview(ui, state);
+        draw_preview(ui, state, camera_location);
     });
 
     if state.dirty_preview
@@ -399,6 +409,59 @@ pub fn draw_terrain_editor(
     {
         state.rebuild_preview(ui.ctx());
     }
+}
+
+fn terrain_camera_location(
+    engine_state: &mut engine::State,
+    selected_entity: Option<Entity>,
+    graph: &TerrainFieldGraph,
+) -> Option<TerrainCameraLocation> {
+    let scene = engine_state.active_scene_mut()?;
+    let world = scene.world_mut();
+    let mut target = selected_entity.filter(|entity| world.get::<Planet>(*entity).is_some());
+    if target.is_none() {
+        let mut query = Query::<(&Planet,)>::new(world);
+        query.for_each(|entity, _| {
+            if target.is_none() {
+                target = Some(entity);
+            }
+        });
+    }
+    let target = target?;
+    let planet_position = world.get::<Planet>(target)?.position.as_dvec3();
+    let (radius, runtime_graph) = world
+        .get::<std::sync::Arc<game_types::terrain::PlanetTerrainConfig>>(target)
+        .map_or((0.0, None), |config| {
+            (f64::from(config.radius), config.field_graph.clone())
+        });
+
+    let mut camera_position = None;
+    let mut query = Query::<(&CameraComponent, &TransformComponent)>::new(world);
+    query.for_each(|_, (_, transform)| {
+        if camera_position.is_none() {
+            camera_position = Some(transform.position.as_dvec3());
+        }
+    });
+
+    let radial = camera_position? - planet_position;
+    let distance = radial.length();
+    if !distance.is_finite() || distance <= f64::EPSILON {
+        return None;
+    }
+    let direction = radial / distance;
+    let sample = graph.evaluate_direction(direction);
+    let runtime_surface_height = runtime_graph.map(|graph| {
+        let sample = graph.evaluate_direction(direction);
+        sample.channels[TerrainFieldChannel::Height.index()]
+            - sample.channels[TerrainFieldChannel::Density.index()]
+    });
+    Some(TerrainCameraLocation {
+        direction,
+        altitude: distance - radius,
+        preview_surface_height: sample.channels[TerrainFieldChannel::Height.index()]
+            - sample.channels[TerrainFieldChannel::Density.index()],
+        runtime_surface_height,
+    })
 }
 
 fn apply_to_planet(
@@ -677,7 +740,11 @@ fn draw_noise(ui: &mut Ui, noise: &mut TerrainNoiseNode) {
     });
 }
 
-fn draw_preview(ui: &mut Ui, state: &mut TerrainEditorState) {
+fn draw_preview(
+    ui: &mut Ui,
+    state: &mut TerrainEditorState,
+    camera_location: Option<TerrainCameraLocation>,
+) {
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("terrain_preview_channel")
             .selected_text(state.preview_channel.name())
@@ -720,6 +787,30 @@ fn draw_preview(ui: &mut Ui, state: &mut TerrainEditorState) {
             state.preview_minimum, state.preview_maximum
         ));
     });
+    if let Some(camera) = camera_location {
+        let (longitude, latitude) = angles_from_direction(camera.direction);
+        let runtime = camera
+            .runtime_surface_height
+            .map_or("not applied".to_string(), |height| {
+                format!("{height:+.1} m")
+            });
+        let agl = camera
+            .runtime_surface_height
+            .map_or("unknown".to_string(), |height| {
+                format!("{:.1} m", camera.altitude - height)
+            });
+        ui.colored_label(
+            Color32::from_rgb(255, 220, 70),
+            format!(
+                "Camera {:.2}° {:.2}° | AGL {agl} | preview {:+.1} m | runtime {runtime}",
+                longitude.to_degrees(),
+                latitude.to_degrees(),
+                camera.preview_surface_height,
+            ),
+        );
+    } else {
+        ui.weak("Camera position unavailable");
+    }
     if state.preview_mode == PreviewMode::Globe {
         ui.horizontal(|ui| {
             if ui
@@ -752,14 +843,19 @@ fn draw_preview(ui: &mut Ui, state: &mut TerrainEditorState) {
             ui.add(egui::Image::new((texture.id(), size)).sense(egui::Sense::click()))
         }),
     };
-    if let Some(response) = response
-        && response.clicked()
-        && state.preview_mode == PreviewMode::Map
-        && let Some(position) = response.interact_pointer_pos()
-    {
-        let uv = (position - response.rect.min) / response.rect.size();
-        state.probe_longitude = -std::f64::consts::PI + std::f64::consts::TAU * f64::from(uv.x);
-        state.probe_latitude = std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * f64::from(uv.y);
+    if let Some(response) = response {
+        if response.clicked()
+            && state.preview_mode == PreviewMode::Map
+            && let Some(position) = response.interact_pointer_pos()
+        {
+            let uv = (position - response.rect.min) / response.rect.size();
+            state.probe_longitude = -std::f64::consts::PI + std::f64::consts::TAU * f64::from(uv.x);
+            state.probe_latitude =
+                std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * f64::from(uv.y);
+        }
+        if let Some(camera) = camera_location {
+            draw_camera_marker(ui, response.rect, state, camera.direction);
+        }
     }
     ui.separator();
     draw_probe(ui, state);
@@ -784,6 +880,39 @@ fn draw_preview(ui: &mut Ui, state: &mut TerrainEditorState) {
     if let Some(status) = &state.status {
         ui.label(status);
     }
+}
+
+fn draw_camera_marker(ui: &Ui, rect: egui::Rect, state: &TerrainEditorState, direction: DVec3) {
+    let position = match state.preview_mode {
+        PreviewMode::Map => {
+            let (longitude, latitude) = angles_from_direction(direction);
+            let u = ((longitude + std::f64::consts::PI) / std::f64::consts::TAU) as f32;
+            let v = ((std::f64::consts::FRAC_PI_2 - latitude) / std::f64::consts::PI) as f32;
+            rect.min + egui::vec2(rect.width() * u, rect.height() * v)
+        }
+        PreviewMode::Globe => {
+            let forward = direction_from_angles(state.globe_yaw, state.globe_pitch);
+            if direction.dot(forward) < 0.0 {
+                return;
+            }
+            let right = forward.cross(DVec3::Y).normalize_or_zero();
+            let right = if right.length_squared() < 1e-8 {
+                DVec3::X
+            } else {
+                right
+            };
+            let up = right.cross(forward).normalize();
+            rect.center()
+                + egui::vec2(
+                    direction.dot(right) as f32 * rect.width() * 0.5,
+                    -direction.dot(up) as f32 * rect.height() * 0.5,
+                )
+        }
+    };
+    let painter = ui.painter();
+    painter.circle_filled(position, 8.0, Color32::from_black_alpha(220));
+    painter.circle_filled(position, 5.0, Color32::from_rgb(255, 220, 40));
+    painter.circle_stroke(position, 8.0, egui::Stroke::new(1.5, Color32::WHITE));
 }
 
 fn draw_probe(ui: &mut Ui, state: &TerrainEditorState) {

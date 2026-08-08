@@ -45,6 +45,7 @@ pub enum OctreeChanges {
         request: PlanetMeshRequest,
     },
     RemoveMeshes {
+        planet_entity: Entity,
         key: NodeKey,
     },
 }
@@ -93,6 +94,9 @@ pub struct QueuedMeshRequest {
 #[derive(Debug, Clone)]
 pub struct GeneratedReplacement {
     pub cancelled: bool,
+    /// Replace every uploaded chunk for this planet after the new batch has
+    /// uploaded successfully, including stale chunks absent from the octree.
+    pub replace_all_chunks: bool,
     pub generation: u64,
     pub replacement_id: u64,
     pub planet_entity: Entity,

@@ -9,8 +9,8 @@ use engine::core::physics::physics::Physics;
 use engine::game_info;
 use engine::math::Vec3;
 use engine::math::{Quat, vec3};
+use engine::renderer::CameraData;
 use engine::renderer::DebugPassNode;
-use engine::renderer::{CameraData, RenderObjectId};
 use game_types::octree::{NodeKey, PlanetLodSettings};
 use game_types::planet::{Planet, PlanetVertex};
 pub use game_types::render_graph;
@@ -31,9 +31,11 @@ use crate::sdf::EarthHeightmap;
 use crate::systems::planets::planet_debug;
 
 struct GameState {
+    /// When enabled, newly spawned planets use TerrainFieldGraph::default()
+    /// immediately and never enqueue meshes from the legacy generator.
+    start_with_earth_like_terrain: bool,
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
     current_leaves: HashMap<NodeKey, ChunkInfo>,
-    planets_meshes: HashMap<NodeKey, RenderObjectId>,
     mesh_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     terrain_colliders: HashMap<NodeKey, RapierColliderHandle>,
     in_flight: HashSet<NodeKey>,
@@ -234,9 +236,9 @@ pub fn initialize_game_state(state: &mut engine::State) {
     });
 
     world.insert_resource(GameState {
+        start_with_earth_like_terrain: true,
         previous_leaves: HashMap::new(),
         current_leaves: HashMap::new(),
-        planets_meshes: HashMap::new(),
         mesh_neighbor_signatures: HashMap::new(),
         terrain_colliders: HashMap::new(),
         in_flight: HashSet::new(),

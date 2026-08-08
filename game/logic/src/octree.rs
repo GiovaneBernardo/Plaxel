@@ -842,14 +842,18 @@ pub fn create_children(
 }
 
 pub fn collect_child_mesh_removals(
+    planet_entity: Entity,
     children: &[Box<OctreeNode>; 8],
     changes: &mut Vec<OctreeChanges>,
 ) {
     for child in children {
         if let Some(grandchildren) = child.children.as_ref() {
-            collect_child_mesh_removals(grandchildren, changes);
+            collect_child_mesh_removals(planet_entity, grandchildren, changes);
         } else {
-            changes.push(OctreeChanges::RemoveMeshes { key: child.key });
+            changes.push(OctreeChanges::RemoveMeshes {
+                planet_entity,
+                key: child.key,
+            });
         }
     }
 }

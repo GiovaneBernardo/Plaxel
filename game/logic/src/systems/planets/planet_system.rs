@@ -27,7 +27,8 @@ use game_types::{
     planet::{Planet, PlanetTerrainEdits},
     terrain::{
         BiomeConfig, ClimateConfig, FeatureConfig, GeologyConfig, LandformConfig,
-        PlanetTerrainConfig, terrain_field::TerrainGraphApplyQueue,
+        PlanetTerrainConfig,
+        terrain_field::{TerrainFieldGraph, TerrainGraphApplyQueue},
     },
     universe::StarSystemComponent,
 };
@@ -50,6 +51,13 @@ use crossbeam_channel::{Receiver, Sender};
 
 type DensityGrid = Vec<Vec<Vec<f32>>>;
 const CHUNK_GRID_SAMPLE_COUNT: u32 = CHUNK_CELL_COUNT as u32 + 2;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BaseGridCacheKey {
+    planet_entity: Entity,
+    generation: u64,
+    node_key: NodeKey,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -106,7 +114,7 @@ pub struct MeshJobResults {
     pub in_flight_counts: HashMap<NodeKey, usize>,
     pub versions: HashMap<NodeKey, u64>,
     pub pending_requests: HashMap<NodeKey, PendingMeshRequest>,
-    pub base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    pub base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
     pub ready_meshes: Vec<GeneratedMesh>,
     pub replacement_sender: Sender<GeneratedReplacement>,
     pub replacement_receiver: Receiver<GeneratedReplacement>,
@@ -177,6 +185,16 @@ pub fn default_planet_terrain_config() -> PlanetTerrainConfig {
             overhang_strength: 0.0,
         },
     }
+}
+
+pub fn earth_like_planet_terrain_config() -> PlanetTerrainConfig {
+    let graph = TerrainFieldGraph::default();
+    let mut config = default_planet_terrain_config();
+    config.seed = graph.seed;
+    config.radius = graph.radius as f32;
+    config.sea_level = graph.sea_level as f32;
+    config.field_graph = Some(graph);
+    config
 }
 
 struct CameraAltitudeLogState {
@@ -343,7 +361,14 @@ pub fn create_planet(
         .unwrap()
         .position;
 
-    let terrain_config = Arc::new(default_planet_terrain_config());
+    let start_with_earth_like_terrain = world
+        .get_resource::<GameState>()
+        .is_some_and(|state| state.start_with_earth_like_terrain);
+    let terrain_config = Arc::new(if start_with_earth_like_terrain {
+        earth_like_planet_terrain_config()
+    } else {
+        default_planet_terrain_config()
+    });
     let chunk_size = 32;
     let min_planet_distance = terrain_config.radius * 2.1;
     let mut rng = rand::thread_rng();
@@ -476,12 +501,17 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
 
     let update_octree = ctx.world.get_resource::<GameState>().unwrap().update_octree;
 
-    let camera_pos = ctx
+    let mut camera_pos = ctx
         .world
         .get::<TransformComponent>(camera_entity)
         .unwrap()
         .position;
     apply_pending_terrain_graphs(ctx, camera_pos);
+    camera_pos = ctx
+        .world
+        .get::<TransformComponent>(camera_entity)
+        .unwrap()
+        .position;
     log_camera_altitude(ctx, camera_pos);
     //let heightmap = ctx
     //    .world
@@ -720,6 +750,18 @@ fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
         if let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() {
             *mesh_jobs.generations.entry(planet_entity).or_insert(0) += 1;
             let old_key_set = old_keys.iter().copied().collect::<HashSet<_>>();
+            for job in &mut mesh_jobs.prioritized_jobs {
+                if job
+                    .requests
+                    .iter()
+                    .any(|request| request.planet_entity == planet_entity)
+                {
+                    job.cancelled.store(true, Ordering::Release);
+                    // Wake queued jobs so they observe cancellation immediately instead of
+                    // leaving a stale full-planet rebuild ahead of the newly applied graph.
+                    job.handle.set(u32::MAX);
+                }
+            }
             mesh_jobs.wanted.retain(|key| !old_key_set.contains(key));
             mesh_jobs
                 .pending_requests
@@ -736,7 +778,7 @@ fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
                     .any(|request| request.planet_entity == planet_entity)
             });
             if let Ok(mut cache) = mesh_jobs.base_grid_cache.lock() {
-                cache.retain(|key, _| !old_key_set.contains(key));
+                cache.retain(|key, _| key.planet_entity != planet_entity);
             }
         }
 
@@ -752,6 +794,7 @@ fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
             Vec::new(),
             old_keys,
             mesh_requests,
+            true,
         );
     }
 }
@@ -775,7 +818,7 @@ pub fn build_requested_mesh(
     version: u64,
     urgent: bool,
     terrain: &PlanetTerrainSamplerContext<'_>,
-    base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
 ) -> GeneratedMesh {
     try_build_requested_mesh(
         request,
@@ -795,7 +838,7 @@ fn try_build_requested_mesh(
     version: u64,
     urgent: bool,
     terrain: &PlanetTerrainSamplerContext<'_>,
-    base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
     cancelled: Option<&AtomicBool>,
 ) -> Option<GeneratedMesh> {
     if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
@@ -816,7 +859,11 @@ fn try_build_requested_mesh(
         level: request.node_key.level,
     };
     let base_grid = get_or_build_base_grid(
-        key,
+        BaseGridCacheKey {
+            planet_entity: request.planet_entity,
+            generation,
+            node_key: key,
+        },
         CHUNK_GRID_SAMPLE_COUNT,
         CHUNK_GRID_SAMPLE_COUNT,
         CHUNK_GRID_SAMPLE_COUNT,
@@ -1028,7 +1075,7 @@ fn start_mesh_job(
     generation: u64,
     version: u64,
     urgent: bool,
-    base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
 ) {
     //let heightmap = ctx
     //    .world
@@ -1296,6 +1343,7 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
         queue
             .send(PlanetTerrainCommand::ReplaceChunks {
                 planet: planet_entity,
+                remove_all: replacement.replace_all_chunks,
                 remove: replacement.keys_to_remove,
                 insert: replacement
                     .meshes
@@ -1355,6 +1403,7 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
         queue
             .send(PlanetTerrainCommand::ReplaceChunks {
                 planet: mesh.planet_entity,
+                remove_all: false,
                 remove: Vec::new(),
                 insert: vec![PendingTerrainChunk {
                     key: mesh.key,
@@ -1388,26 +1437,28 @@ pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
                 additional_transitions.clone(),
                 keys_to_remove.clone(),
                 requests.clone(),
+                false,
             );
         }
         OctreeChanges::AddMesh { request } => {
             submit_requested_mesh(ctx, *request);
         }
-        OctreeChanges::RemoveMeshes { key } => {
+        OctreeChanges::RemoveMeshes { planet_entity, key } => {
             if let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() {
                 mesh_jobs.wanted.remove(key);
                 mesh_jobs.pending_requests.remove(key);
             }
 
-            let removed = ctx
-                .world
-                .get_resource_mut::<GameState>()
-                .unwrap()
-                .planets_meshes
-                .remove(key);
-            if let Some(object) = removed {
-                ctx.globals.renderer.objects().remove(object);
-            }
+            ctx.world
+                .get_resource::<PlanetTerrainRenderQueue>()
+                .expect("planet terrain producer must be initialized first")
+                .send(PlanetTerrainCommand::ReplaceChunks {
+                    planet: *planet_entity,
+                    remove_all: false,
+                    remove: vec![*key],
+                    insert: Vec::new(),
+                })
+                .expect("planet terrain producer command channel must remain connected");
         }
     }
 }
@@ -1420,13 +1471,27 @@ fn submit_replacement(
     additional_transitions: Vec<(NodeKey, NodeState)>,
     keys_to_remove: Vec<NodeKey>,
     mut requests: Vec<PlanetMeshRequest>,
+    replace_all_chunks: bool,
 ) {
     let mut unique_keys = HashSet::with_capacity(requests.len());
     requests.retain(|request| unique_keys.insert(mesh_request_key(request)));
 
     if requests.is_empty() {
-        for key in keys_to_remove {
-            apply_change(ctx, &OctreeChanges::RemoveMeshes { key });
+        if replace_all_chunks {
+            ctx.world
+                .get_resource::<PlanetTerrainRenderQueue>()
+                .expect("planet terrain producer must be initialized first")
+                .send(PlanetTerrainCommand::ReplaceChunks {
+                    planet: planet_entity,
+                    remove_all: true,
+                    remove: Vec::new(),
+                    insert: Vec::new(),
+                })
+                .expect("planet terrain producer command channel must remain connected");
+        } else {
+            for key in keys_to_remove {
+                apply_change(ctx, &OctreeChanges::RemoveMeshes { planet_entity, key });
+            }
         }
         complete_replacement_transition(ctx, planet_entity, transition_key, completed_state);
         for (transition_key, completed_state) in additional_transitions {
@@ -1521,6 +1586,7 @@ fn submit_replacement(
 
         let _ = sender.send(GeneratedReplacement {
             cancelled: job_cancelled.load(Ordering::Acquire),
+            replace_all_chunks,
             generation,
             replacement_id,
             planet_entity,
@@ -1647,14 +1713,14 @@ fn set_octree_node_state(node: &mut OctreeNode, key: NodeKey, state: NodeState) 
 }
 
 fn get_or_build_base_grid(
-    key: NodeKey,
+    key: BaseGridCacheKey,
     nx: u32,
     ny: u32,
     nz: u32,
     resolution: f32,
     min: Vec3,
     terrain: &PlanetTerrainSamplerContext<'_>,
-    base_grid_cache: &Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    base_grid_cache: &Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
     cancelled: Option<&AtomicBool>,
 ) -> Option<Arc<DensityGrid>> {
     if let Some(grid) = base_grid_cache
@@ -1762,4 +1828,217 @@ fn generate_grid_from_base(
     }
 
     grid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use game_types::{
+        planet::PlanetTerrainEdits,
+        terrain::terrain_field::{TerrainFieldChannel, TerrainFieldGraph},
+    };
+
+    fn empty_edits() -> PlanetTerrainEdits {
+        PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn base_grid_cache_isolated_by_planet_and_generation() {
+        let mut world = engine::ecs::world::World::new();
+        let first_planet = world.spawn();
+        let second_planet = world.spawn();
+        let node_key = NodeKey {
+            x: 15,
+            y: 0,
+            z: 0,
+            level: 0,
+        };
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let edits = empty_edits();
+
+        let mut first_config = default_planet_terrain_config();
+        first_config.radius = 10.0;
+        let mut first_graph = TerrainFieldGraph::default();
+        first_graph.radius = 10.0;
+        first_graph.layers.clear();
+        first_config.field_graph = Some(first_graph);
+        let first_terrain = PlanetTerrainSamplerContext {
+            config: &first_config,
+            edits: &edits,
+            planet_position: Vec3::ZERO,
+        };
+
+        let first = get_or_build_base_grid(
+            BaseGridCacheKey {
+                planet_entity: first_planet,
+                generation: 0,
+                node_key,
+            },
+            1,
+            1,
+            1,
+            1.0,
+            vec3(15.0, 0.0, 0.0),
+            &first_terrain,
+            &cache,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first[0][0][0], 5.0);
+
+        let mut second_config = first_config.clone();
+        second_config.radius = 20.0;
+        second_config.field_graph.as_mut().unwrap().radius = 20.0;
+        let second_terrain = PlanetTerrainSamplerContext {
+            config: &second_config,
+            edits: &edits,
+            planet_position: Vec3::ZERO,
+        };
+        let next_generation = get_or_build_base_grid(
+            BaseGridCacheKey {
+                planet_entity: first_planet,
+                generation: 1,
+                node_key,
+            },
+            1,
+            1,
+            1,
+            1.0,
+            vec3(15.0, 0.0, 0.0),
+            &second_terrain,
+            &cache,
+            None,
+        )
+        .unwrap();
+        let other_planet = get_or_build_base_grid(
+            BaseGridCacheKey {
+                planet_entity: second_planet,
+                generation: 0,
+                node_key,
+            },
+            1,
+            1,
+            1,
+            1.0,
+            vec3(15.0, 0.0, 0.0),
+            &second_terrain,
+            &cache,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(next_generation[0][0][0], -5.0);
+        assert_eq!(other_planet[0][0][0], -5.0);
+        assert_eq!(cache.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn earth_like_graph_survives_octree_density_and_meshing_pipeline() {
+        let config = earth_like_planet_terrain_config();
+        let graph = config.field_graph.as_ref().unwrap();
+        let longitude = 27.39_f64.to_radians();
+        let latitude = -7.01_f64.to_radians();
+        let direction = engine::math::dvec3(
+            latitude.cos() * longitude.cos(),
+            latitude.sin(),
+            latitude.cos() * longitude.sin(),
+        );
+        let expected_height =
+            graph.evaluate_direction(direction).channels[TerrainFieldChannel::Height.index()];
+        let surface_point = direction * (f64::from(config.radius) + expected_height);
+        let camera = (surface_point + direction * 256.0).as_vec3();
+        let edits = empty_edits();
+        let root = Planet::create_octree(
+            Vec3::ZERO,
+            &camera,
+            &config,
+            CHUNK_CELL_COUNT as u32,
+            1.0,
+            &edits,
+        );
+        let mut leaves = Vec::new();
+        octree::collect_leaf_nodes(&root, &mut leaves);
+        let leaf = leaves
+            .into_iter()
+            .min_by(|a, b| {
+                let distance = |leaf: &&OctreeNode| {
+                    let minimum = leaf.min.as_dvec3();
+                    let maximum = minimum + engine::math::DVec3::splat(f64::from(leaf.size));
+                    let closest = engine::math::dvec3(
+                        surface_point.x.clamp(minimum.x, maximum.x),
+                        surface_point.y.clamp(minimum.y, maximum.y),
+                        surface_point.z.clamp(minimum.z, maximum.z),
+                    );
+                    closest.distance_squared(surface_point)
+                };
+                distance(a).total_cmp(&distance(b))
+            })
+            .unwrap();
+        let mut request = PlanetMeshRequest {
+            planet_entity: Entity::PLACEHOLDER,
+            node_key: leaf.key,
+            planet_position: Vec3::ZERO,
+            node_min_corner: leaf.min,
+            node_size: leaf.size,
+            face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+        };
+        octree::annotate_mesh_request(&root, &mut request);
+        let terrain = PlanetTerrainSamplerContext {
+            config: &config,
+            edits: &edits,
+            planet_position: Vec3::ZERO,
+        };
+        let mesh = build_requested_mesh(
+            request,
+            0,
+            0,
+            false,
+            &terrain,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        assert!(!mesh.vertices.is_empty());
+
+        let node_origin = engine::math::dvec3(
+            f64::from(mesh.node_origin_planet[0]),
+            f64::from(mesh.node_origin_planet[1]),
+            f64::from(mesh.node_origin_planet[2]),
+        );
+        let closest_vertex = mesh
+            .vertices
+            .iter()
+            .min_by(|a, b| {
+                let position = |vertex: &&game_types::planet::PlanetVertex| {
+                    node_origin
+                        + engine::math::dvec3(
+                            f64::from(vertex.position[0]),
+                            f64::from(vertex.position[1]),
+                            f64::from(vertex.position[2]),
+                        )
+                };
+                let angular_error = |position: engine::math::DVec3| {
+                    1.0 - position.normalize_or_zero().dot(direction)
+                };
+                angular_error(position(a)).total_cmp(&angular_error(position(b)))
+            })
+            .unwrap();
+        let vertex_position = node_origin
+            + engine::math::dvec3(
+                f64::from(closest_vertex.position[0]),
+                f64::from(closest_vertex.position[1]),
+                f64::from(closest_vertex.position[2]),
+            );
+        let vertex_direction = vertex_position.normalize();
+        let graph_height = graph.evaluate_direction(vertex_direction).channels
+            [TerrainFieldChannel::Height.index()];
+        let mesh_height = vertex_position.length() - f64::from(config.radius);
+        let cell_size = f64::from(request.node_size) / CHUNK_CELL_COUNT as f64;
+
+        assert!(
+            (mesh_height - graph_height).abs() <= cell_size * 2.0 + 2.0,
+            "graph height {graph_height:.2} m became mesh height {mesh_height:.2} m at cell size {cell_size:.2} m"
+        );
+    }
 }

@@ -366,7 +366,7 @@ impl PlanetTerrainProducer {
 
         PlanetTerrainProducer::load_terrain_diffuse_texture(
             renderer,
-            "Ice002_2K-JPG_Color.jpg",
+            "blue_plaster_wall_2k/textures/blue_plaster_wall_diff_2k.jpg",
             "terrain_water_diffuse",
             WATER_TERRAIN_TEXTURE_INDEX,
         );
@@ -548,6 +548,7 @@ impl PlanetTerrainProducer {
         &mut self,
         api: &mut dyn RendererAPI,
         planet: Entity,
+        remove_all: bool,
         remove: Vec<NodeKey>,
         insert: Vec<PendingTerrainChunk>,
     ) {
@@ -580,14 +581,20 @@ impl PlanetTerrainProducer {
         }
 
         let state = self.planets.get_mut(&planet).unwrap();
-        let mut keys = remove;
-        keys.extend(insert.iter().map(|chunk| chunk.key));
-        keys.sort_unstable();
-        keys.dedup();
-
-        for key in keys {
-            if let Some(old) = state.chunks.remove(&key) {
+        if remove_all {
+            for old in state.chunks.drain().map(|(_, chunk)| chunk) {
                 api.remove_mesh(old.mesh);
+            }
+        } else {
+            let mut keys = remove;
+            keys.extend(insert.iter().map(|chunk| chunk.key));
+            keys.sort_unstable();
+            keys.dedup();
+
+            for key in keys {
+                if let Some(old) = state.chunks.remove(&key) {
+                    api.remove_mesh(old.mesh);
+                }
             }
         }
         for (key, node_origin_planet, mesh) in uploaded {
@@ -729,9 +736,10 @@ impl RenderProducer for PlanetTerrainProducer {
                 | PlanetTerrainCommand::UpdatePlanetFrame { .. } => {}
                 PlanetTerrainCommand::ReplaceChunks {
                     planet,
+                    remove_all,
                     remove,
                     insert,
-                } => self.replace_chunks(ctx.api, planet, remove, insert),
+                } => self.replace_chunks(ctx.api, planet, remove_all, remove, insert),
                 PlanetTerrainCommand::RemovePlanet { planet } => {
                     self.remove_planet(ctx.api, planet);
                 }
@@ -794,6 +802,7 @@ pub(crate) enum PlanetTerrainCommand {
     },
     ReplaceChunks {
         planet: Entity,
+        remove_all: bool,
         remove: Vec<NodeKey>,
         insert: Vec<PendingTerrainChunk>,
     },
