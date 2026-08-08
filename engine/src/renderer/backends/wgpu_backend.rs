@@ -832,7 +832,7 @@ impl RendererAPI for WgpuBackend {
     ) -> TextureHandle {
         // Load JPG from disk
         let img = image::open(path)
-            .expect("Failed to load texture")
+            .unwrap_or_else(|_| panic!("Failed to load texture: {}", path))
             .to_rgba8();
 
         let (width, height) = img.dimensions();

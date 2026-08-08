@@ -48,11 +48,7 @@ pub fn sample_original_density_planet_local(
     terrain: &PlanetTerrainSamplerContext<'_>,
     planet_local_position: DVec3,
 ) -> f32 {
-    base_sdf_planet_local(
-        planet_local_position,
-        f64::from(terrain.config.radius),
-        None,
-    )
+    base_sdf_planet_local(planet_local_position, terrain.config, None)
 }
 
 pub fn sample_final_density(
@@ -152,6 +148,11 @@ mod tests {
     fn configured_radius_is_used_directly() {
         let mut config = default_planet_terrain_config();
         config.radius = 100.0;
+        config.landforms.continent_height = 0.0;
+        config.landforms.mountain_height = 0.0;
+        config.features.overhang_strength = 0.0;
+        config.features.cave_frequency = 0.0;
+        config.features.cave_size = 0.0;
         let edits = empty_edits();
         let terrain = PlanetTerrainSamplerContext {
             config: &config,

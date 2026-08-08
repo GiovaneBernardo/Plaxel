@@ -679,7 +679,12 @@ impl TabViewer for EditorTabViewer<'_> {
             }
             EditorTab::Terrain => {
                 engine::profile_scope!("editor.ui.tab.terrain");
-                draw_terrain_editor(ui, &mut *self.terrain);
+                draw_terrain_editor(
+                    ui,
+                    &mut *self.terrain,
+                    &mut *self.state,
+                    *self.selected_entity,
+                );
             }
         }
     }

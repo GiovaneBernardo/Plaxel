@@ -311,7 +311,7 @@ fn base_density_range(
     let max_radius = farthest.length();
 
     let radius = f64::from(terrain_config.radius);
-    let (min_height, max_height) = terrain_height_bounds(terrain_config.radius, None);
+    let (min_height, max_height) = terrain_height_bounds(terrain_config, None);
     DensityRange::new(
         (min_radius - (radius + f64::from(max_height))) as f32,
         (max_radius - (radius + f64::from(min_height))) as f32,
@@ -644,6 +644,22 @@ pub fn update(
     changes: &mut Vec<OctreeChanges>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
+    const MIN_NODE_SIZE: f32 = 32.0;
+
+    if has_pending_transition(node) {
+        // Merges discard their old child topology, so let those short atomic
+        // transitions finish. Splits retain the rendered ancestor and can be
+        // rolled back safely when the camera asks for a different target.
+        if has_pending_merge(node)
+            || !topology_target_changed(node, camera_pos, MIN_NODE_SIZE, lod_strength, true)
+        {
+            return;
+        }
+
+        rollback_pending_splits(node);
+        changes.push(OctreeChanges::CancelPlanetReplacements { planet_entity });
+    }
+
     update_node(
         node,
         camera_pos,
@@ -655,6 +671,54 @@ pub fn update(
         terrain_edits,
         true,
     );
+}
+
+fn has_pending_merge(node: &OctreeNode) -> bool {
+    matches!(node.state, NodeState::Merging)
+        || node
+            .children
+            .as_ref()
+            .is_some_and(|children| children.iter().any(|child| has_pending_merge(child)))
+}
+
+fn topology_target_changed(
+    node: &OctreeNode,
+    camera_pos: Vec3,
+    min_node_size: f32,
+    lod_strength: f32,
+    is_root_node: bool,
+) -> bool {
+    if matches!(node.state, NodeState::Merging) {
+        return false;
+    }
+
+    match node.children.as_ref() {
+        None => {
+            (is_root_node && node.has_surface)
+                || should_split(node, camera_pos, min_node_size, lod_strength)
+        }
+        Some(children) => {
+            if !is_root_node && should_merge(node, camera_pos, min_node_size, lod_strength) {
+                return true;
+            }
+            children.iter().any(|child| {
+                topology_target_changed(child, camera_pos, min_node_size, lod_strength, false)
+            })
+        }
+    }
+}
+
+fn rollback_pending_splits(node: &mut OctreeNode) {
+    if matches!(node.state, NodeState::Splitting) {
+        node.state = NodeState::Leaf;
+        node.children = None;
+        return;
+    }
+    if let Some(children) = node.children.as_mut() {
+        for child in children {
+            rollback_pending_splits(child);
+        }
+    }
 }
 
 fn update_node(
@@ -680,6 +744,9 @@ fn update_node(
     if is_root_node && node.children.is_none() {
         split_node(
             node,
+            camera_pos,
+            min_node_size,
+            lod_strength,
             changes,
             planet_entity,
             planet_position,
@@ -692,6 +759,9 @@ fn update_node(
     if should_split(node, camera_pos, min_node_size, lod_strength) {
         split_node(
             node,
+            camera_pos,
+            min_node_size,
+            lod_strength,
             changes,
             planet_entity,
             planet_position,
@@ -910,19 +980,30 @@ fn mesh_request(
 
 fn split_node(
     node: &mut OctreeNode,
+    camera_pos: Vec3,
+    min_node_size: f32,
+    lod_strength: f32,
     changes: &mut Vec<OctreeChanges>,
     planet_entity: Entity,
     planet_position: Vec3,
     terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    let children = create_children(node, planet_position, terrain_config, terrain_edits);
+    let mut children = create_children(node, planet_position, terrain_config, terrain_edits);
+    for child in &mut children {
+        refine_new_subtree(
+            child,
+            camera_pos,
+            min_node_size,
+            lod_strength,
+            planet_position,
+            terrain_config,
+            terrain_edits,
+        );
+    }
 
-    let requests = children
-        .iter()
-        .filter(|child| child.has_surface)
-        .map(|child| mesh_request(child, planet_entity, planet_position))
-        .collect();
+    let mut requests = Vec::new();
+    collect_surface_leaf_requests(&children, planet_entity, planet_position, &mut requests);
 
     changes.push(OctreeChanges::ReplaceMeshes {
         planet_entity,
@@ -935,6 +1016,54 @@ fn split_node(
 
     node.state = NodeState::Splitting;
     node.children = Some(children);
+}
+
+/// Builds directly to the LOD required by the current camera position. Only
+/// the root of this newly built subtree is marked as a pending transition, so
+/// its currently rendered ancestor remains visible until all final leaf meshes
+/// can replace it atomically.
+fn refine_new_subtree(
+    node: &mut OctreeNode,
+    camera_pos: Vec3,
+    min_node_size: f32,
+    lod_strength: f32,
+    planet_position: Vec3,
+    terrain_config: &PlanetTerrainConfig,
+    terrain_edits: &PlanetTerrainEdits,
+) {
+    if !should_split(node, camera_pos, min_node_size, lod_strength) {
+        return;
+    }
+
+    let mut children = create_children(node, planet_position, terrain_config, terrain_edits);
+    for child in &mut children {
+        refine_new_subtree(
+            child,
+            camera_pos,
+            min_node_size,
+            lod_strength,
+            planet_position,
+            terrain_config,
+            terrain_edits,
+        );
+    }
+    node.state = NodeState::Internal;
+    node.children = Some(children);
+}
+
+fn collect_surface_leaf_requests(
+    children: &[Box<OctreeNode>; 8],
+    planet_entity: Entity,
+    planet_position: Vec3,
+    requests: &mut Vec<PlanetMeshRequest>,
+) {
+    for child in children {
+        if let Some(grandchildren) = child.children.as_ref() {
+            collect_surface_leaf_requests(grandchildren, planet_entity, planet_position, requests);
+        } else if child.has_surface {
+            requests.push(mesh_request(child, planet_entity, planet_position));
+        }
+    }
 }
 
 fn merge_node(
@@ -1072,5 +1201,100 @@ pub fn traverse_octree(
 
     for (child, _) in children {
         traverse_octree(ray_origin, ray_direction, child, best_t, last_node);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use game_types::planet::PlanetTerrainEdits;
+
+    use super::*;
+    use crate::systems::planets::planet_system::default_planet_terrain_config;
+
+    #[test]
+    fn refinement_skips_intermediate_lod_replacements() {
+        let config = default_planet_terrain_config();
+        let planet_position = Vec3::ZERO;
+        let size = 4_096.0;
+        let min = vec3(config.radius - size * 0.5, -size * 0.5, -size * 0.5);
+        let density_range = node_density_range(
+            min,
+            size,
+            planet_position,
+            &config,
+            &PlanetTerrainEdits {
+                modified_chunks: HashMap::new(),
+                modified_ranges: HashMap::new(),
+            },
+        );
+        let mut node = OctreeNode {
+            key: NodeKey {
+                level: 8,
+                x: min.x as i32,
+                y: min.y as i32,
+                z: min.z as i32,
+            },
+            min,
+            size,
+            children: None,
+            vertex: None,
+            density_range,
+            has_surface: density_range.contains_zero(),
+            state: NodeState::Leaf,
+        };
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        let mut changes = Vec::new();
+
+        update(
+            &mut node,
+            vec3(config.radius, 0.0, 0.0),
+            Entity::PLACEHOLDER,
+            planet_position,
+            &config,
+            1.0,
+            &mut changes,
+            &edits,
+        );
+
+        let [OctreeChanges::ReplaceMeshes { requests, .. }] = changes.as_slice() else {
+            panic!("refinement should be submitted as one atomic replacement");
+        };
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.node_key.level >= node.key.level + 3),
+            "the replacement should target the required deep LOD directly"
+        );
+
+        changes.clear();
+        update(
+            &mut node,
+            vec3(-config.radius, 0.0, 0.0),
+            Entity::PLACEHOLDER,
+            planet_position,
+            &config,
+            1.0,
+            &mut changes,
+            &edits,
+        );
+
+        assert!(matches!(
+            changes.first(),
+            Some(OctreeChanges::CancelPlanetReplacements { .. })
+        ));
+        let Some(OctreeChanges::ReplaceMeshes { requests, .. }) = changes.get(1) else {
+            panic!("moving away should replace the obsolete pending LOD target");
+        };
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.node_key.level == node.key.level + 1),
+            "the replacement should be rebuilt for the latest camera position"
+        );
     }
 }

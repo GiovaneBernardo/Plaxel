@@ -27,6 +27,11 @@ pub enum NodeState {
 
 #[derive(Debug, Clone)]
 pub enum OctreeChanges {
+    /// Discards an obsolete in-flight topology batch before submitting a new
+    /// camera-driven target for the planet.
+    CancelPlanetReplacements {
+        planet_entity: Entity,
+    },
     // Always prefer ReplaceMesh over Add and Remove, as the later can first remove to only in a few frames add the mesh, making it flicker
     ReplaceMeshes {
         planet_entity: Entity,
@@ -87,6 +92,8 @@ pub struct QueuedMeshRequest {
 
 #[derive(Debug, Clone)]
 pub struct GeneratedReplacement {
+    pub cancelled: bool,
+    pub generation: u64,
     pub replacement_id: u64,
     pub planet_entity: Entity,
     pub transition_key: NodeKey,
@@ -99,6 +106,7 @@ pub struct GeneratedReplacement {
 
 #[derive(Debug, Clone)]
 pub struct GeneratedMesh {
+    pub generation: u64,
     pub planet_entity: Entity,
     pub key: NodeKey,
     pub node_origin_planet: [i32; 3],

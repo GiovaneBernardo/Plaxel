@@ -260,13 +260,6 @@ impl RenderNode for AtmospherePassNode {
         let atmosphere_radius =
             (planet_radius + self.settings.atmosphere_height).max(planet_radius + 1.0);
 
-        let scatter_r =
-            (400.0 / self.settings.wave_lengths[0]).powf(4.0) * self.settings.scattering_strength;
-        let scatter_g =
-            (400.0 / self.settings.wave_lengths[1]).powf(4.0) * self.settings.scattering_strength;
-        let scatter_b =
-            (400.0 / self.settings.wave_lengths[2]).powf(4.0) * self.settings.scattering_strength;
-
         let uniform = AtmosphereUniform {
             camera_position: [
                 camera_data.uniform.position[0],
@@ -289,16 +282,22 @@ impl RenderNode for AtmospherePassNode {
             params: [
                 planet_radius,
                 atmosphere_radius,
-                self.settings.skybox_exposure.max(0.0),
-                1.0,
+                self.settings.mie_anisotropy.clamp(-0.999, 0.999),
+                self.settings.sun_intensity.max(0.0),
             ],
             screen_size: [surface_size.x as f32, surface_size.y as f32],
-            _screen_padding: [0.0, 0.0],
-            scattering_coefficients: [scatter_r, scatter_g, scatter_b],
-            density_falloff: self.settings.density_fallof,
-            num_in_scattering_points: self.settings.num_in_scattering_points,
-            num_optical_depth_points: self.settings.num_optical_depth_points,
-            _matrix_padding: [0.0, 0.0],
+            num_in_scattering_points: self.settings.num_in_scattering_points.max(1),
+            num_optical_depth_points: self.settings.num_optical_depth_points.max(1),
+            rayleigh_scattering: self
+                .settings
+                .rayleigh_scattering_per_megameter
+                .map(|value| value.max(0.0) * 1.0e-6),
+            rayleigh_scale_height: self.settings.rayleigh_scale_height.max(1.0),
+            mie_scattering: self
+                .settings
+                .mie_scattering_per_megameter
+                .map(|value| value.max(0.0) * 1.0e-6),
+            mie_scale_height: self.settings.mie_scale_height.max(1.0),
             inverse_projection: camera_data.inverse_projection,
             inverse_view: camera_data.inverse_view,
         };
@@ -340,28 +339,64 @@ pub struct AtmosphereSettings {
     pub planet_center: [f32; 3],
     pub planet_radius: f32,
     pub atmosphere_height: f32,
-    pub scattering_strength: f32,
-    pub wave_lengths: [f32; 3],
-    pub density_fallof: f32,
-    pub skybox_exposure: f32,
+    pub rayleigh_scattering_per_megameter: [f32; 3],
+    pub rayleigh_scale_height: f32,
+    pub mie_scattering_per_megameter: [f32; 3],
+    pub mie_scale_height: f32,
+    pub mie_anisotropy: f32,
+    pub sun_intensity: f32,
     pub num_in_scattering_points: i32,
     pub num_optical_depth_points: i32,
 }
 
+impl AtmosphereSettings {
+    /// Updates the active planet while preserving an Earth-like atmosphere when
+    /// a generated planet uses a different world-space radius.
+    pub fn set_planet(&mut self, center: [f32; 3], radius: f32) {
+        let radius = radius.max(1.0);
+        let previous_radius = self.planet_radius.max(1.0);
+
+        if radius != previous_radius {
+            let length_scale = radius / previous_radius;
+            self.atmosphere_height *= length_scale;
+            self.rayleigh_scale_height *= length_scale;
+            self.mie_scale_height *= length_scale;
+
+            // Coefficients are inverse lengths. Scaling them inversely keeps the
+            // optical depth Earth-like when the whole planet is scaled.
+            for coefficient in &mut self.rayleigh_scattering_per_megameter {
+                *coefficient /= length_scale;
+            }
+            for coefficient in &mut self.mie_scattering_per_megameter {
+                *coefficient /= length_scale;
+            }
+        }
+
+        self.planet_center = center;
+        self.planet_radius = radius;
+    }
+}
+
 impl Default for AtmosphereSettings {
     fn default() -> Self {
-        let terrain_radius = 390000.0; //65536.0 / 8.0;
+        // Earth reference atmosphere in meters. `set_planet` scales the length
+        // and inverse-length quantities for generated planets of other sizes.
+        let earth_radius = 6_371_000.0;
         Self {
             sun_direction: [0.3, 0.6, 0.4],
             planet_center: [0.0, 0.0, 0.0],
-            planet_radius: terrain_radius * 1.0,
-            atmosphere_height: 83000.0, //500.0,
-            scattering_strength: 4.0,
-            wave_lengths: [700.0, 530.0, 460.0],
-            density_fallof: 3.74,
-            skybox_exposure: 8.0,
-            num_in_scattering_points: 10,
-            num_optical_depth_points: 10,
+            planet_radius: earth_radius,
+            atmosphere_height: 100_000.0,
+            // Inverse megameters keep the small SI coefficients editable in the
+            // render-graph inspector, which displays three decimal places.
+            rayleigh_scattering_per_megameter: [5.802, 13.558, 33.1],
+            rayleigh_scale_height: 8_000.0,
+            mie_scattering_per_megameter: [21.0; 3],
+            mie_scale_height: 1_200.0,
+            mie_anisotropy: 0.76,
+            sun_intensity: 20.0,
+            num_in_scattering_points: 16,
+            num_optical_depth_points: 8,
         }
     }
 }
@@ -374,12 +409,12 @@ pub struct AtmosphereUniform {
     pub planet_center: [f32; 4],
     pub params: [f32; 4],
     pub screen_size: [f32; 2],
-    pub _screen_padding: [f32; 2],
-    pub scattering_coefficients: [f32; 3],
-    pub density_falloff: f32,
     pub num_in_scattering_points: i32,
     pub num_optical_depth_points: i32,
-    pub _matrix_padding: [f32; 2],
+    pub rayleigh_scattering: [f32; 3],
+    pub rayleigh_scale_height: f32,
+    pub mie_scattering: [f32; 3],
+    pub mie_scale_height: f32,
     pub inverse_projection: [[f32; 4]; 4],
     pub inverse_view: [[f32; 4]; 4],
 }

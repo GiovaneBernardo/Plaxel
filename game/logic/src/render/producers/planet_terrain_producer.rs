@@ -17,6 +17,7 @@ use engine::{
 use game_types::{
     octree::NodeKey,
     planet::{GpuPlanetTerrainMaterial, PlanetVertex},
+    terrain::terrain_materials::MATERIAL_COUNT,
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -325,7 +326,11 @@ impl PlanetTerrainProducer {
 
     fn create_terrain_palette(
         renderer: &mut engine::renderer::Renderer,
-    ) -> [GpuPlanetTerrainMaterial; 2] {
+    ) -> [GpuPlanetTerrainMaterial; MATERIAL_COUNT] {
+        const WATER_TERRAIN_TEXTURE_INDEX: u32 = 504;
+        const WATER_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 505;
+        const SNOW_TERRAIN_TEXTURE_INDEX: u32 = 506;
+        const SNOW_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 507;
         const GRASS_TERRAIN_TEXTURE_INDEX: u32 = 508;
         const GRASS_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 509;
         const ROCK_TERRAIN_TEXTURE_INDEX: u32 = 510;
@@ -359,7 +364,33 @@ impl PlanetTerrainProducer {
             ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
         );
 
-        // PlanetVertex material IDs address this palette directly: grass = 0, rock = 1.
+        PlanetTerrainProducer::load_terrain_diffuse_texture(
+            renderer,
+            "Ice002_2K-JPG_Color.jpg",
+            "terrain_water_diffuse",
+            WATER_TERRAIN_TEXTURE_INDEX,
+        );
+        PlanetTerrainProducer::load_terrain_normal_texture(
+            renderer,
+            "Ice002_2K-JPG_NormalDX.jpg",
+            "terrain_water_normal",
+            WATER_TERRAIN_NORMAL_TEXTURE_INDEX,
+        );
+        PlanetTerrainProducer::load_terrain_diffuse_texture(
+            renderer,
+            "Snow014_2K-JPG_Color.jpg",
+            "terrain_snow_diffuse",
+            SNOW_TERRAIN_TEXTURE_INDEX,
+        );
+        PlanetTerrainProducer::load_terrain_normal_texture(
+            renderer,
+            "Snow014_2K-JPG_NormalDX.jpg",
+            "terrain_snow_normal",
+            SNOW_TERRAIN_NORMAL_TEXTURE_INDEX,
+        );
+
+        // PlanetVertex material IDs address this palette directly. The order is
+        // defined by game_types::terrain::terrain_materials.
         let terrain_materials = [
             GpuPlanetTerrainMaterial {
                 diffuse_texture_index: GRASS_TERRAIN_TEXTURE_INDEX,
@@ -379,6 +410,26 @@ impl PlanetTerrainProducer {
                 texture_scale: 1.0,
                 displacement_scale: 0.0,
                 roughness_factor: 0.75,
+                flags: 0,
+            },
+            GpuPlanetTerrainMaterial {
+                diffuse_texture_index: WATER_TERRAIN_TEXTURE_INDEX,
+                normal_texture_index: WATER_TERRAIN_NORMAL_TEXTURE_INDEX,
+                displacement_texture_index: 0,
+                roughness_texture_index: 0,
+                texture_scale: 1.0,
+                displacement_scale: 0.0,
+                roughness_factor: 0.15,
+                flags: 0,
+            },
+            GpuPlanetTerrainMaterial {
+                diffuse_texture_index: SNOW_TERRAIN_TEXTURE_INDEX,
+                normal_texture_index: SNOW_TERRAIN_NORMAL_TEXTURE_INDEX,
+                displacement_texture_index: 0,
+                roughness_texture_index: 0,
+                texture_scale: 1.0,
+                displacement_scale: 0.0,
+                roughness_factor: 0.85,
                 flags: 0,
             },
         ];

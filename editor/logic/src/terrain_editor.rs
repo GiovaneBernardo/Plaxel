@@ -1,11 +1,15 @@
 use std::{fs, path::PathBuf};
 
 use egui::{Color32, RichText, TextureHandle, TextureOptions, Ui};
-use engine::math::{DVec3, dvec3};
+use engine::{
+    ecs::{entity::Entity, query::Query},
+    math::{DVec3, dvec3},
+};
+use game_types::planet::Planet;
 use game_types::terrain::terrain_field::{
     TerrainFieldChannel, TerrainFieldGraph, TerrainFieldLayer, TerrainFieldMask,
-    TerrainFieldOperation, TerrainFieldSource, TerrainNoiseDomain, TerrainNoiseKind,
-    TerrainNoiseNode,
+    TerrainFieldOperation, TerrainFieldSource, TerrainGraphApplyQueue, TerrainGraphApplyRequest,
+    TerrainNoiseDomain, TerrainNoiseKind, TerrainNoiseNode,
 };
 
 const HISTORY_LIMIT: usize = 96;
@@ -309,7 +313,12 @@ impl TerrainEditorState {
     }
 }
 
-pub fn draw_terrain_editor(ui: &mut Ui, state: &mut TerrainEditorState) {
+pub fn draw_terrain_editor(
+    ui: &mut Ui,
+    state: &mut TerrainEditorState,
+    engine_state: &mut engine::State,
+    selected_entity: Option<Entity>,
+) {
     let time = ui.input(|input| input.time);
     let command = ui.input(|input| input.modifiers.command);
     if command && ui.input(|input| input.key_pressed(egui::Key::S)) {
@@ -353,6 +362,9 @@ pub fn draw_terrain_editor(ui: &mut Ui, state: &mut TerrainEditorState) {
             state.dirty_preview = true;
             state.last_edit_time = 0.0;
         }
+        if ui.button("Apply to Planet").clicked() {
+            apply_to_planet(state, engine_state, selected_entity);
+        }
         ui.checkbox(&mut state.auto_preview, "Auto");
         if state.dirty_document {
             ui.colored_label(Color32::from_rgb(240, 190, 80), "Modified");
@@ -387,6 +399,47 @@ pub fn draw_terrain_editor(ui: &mut Ui, state: &mut TerrainEditorState) {
     {
         state.rebuild_preview(ui.ctx());
     }
+}
+
+fn apply_to_planet(
+    state: &mut TerrainEditorState,
+    engine_state: &mut engine::State,
+    selected_entity: Option<Entity>,
+) {
+    let errors = state.graph.validate();
+    if let Some(error) = errors.first() {
+        state.status = Some(format!("Apply failed: {}", error.message));
+        return;
+    }
+    let Some(scene) = engine_state.active_scene_mut() else {
+        state.status = Some("Apply failed: no active scene".to_string());
+        return;
+    };
+    let world = scene.world_mut();
+    let mut target = selected_entity.filter(|entity| world.get::<Planet>(*entity).is_some());
+    if target.is_none() {
+        let mut query = Query::<(&Planet,)>::new(world);
+        query.for_each(|entity, _| {
+            if target.is_none() {
+                target = Some(entity);
+            }
+        });
+    }
+    let Some(target) = target else {
+        state.status = Some("Apply failed: no planet in the active scene".to_string());
+        return;
+    };
+    if world.get_resource::<TerrainGraphApplyQueue>().is_none() {
+        world.insert_resource(TerrainGraphApplyQueue::default());
+    }
+    let mut queue = world
+        .get_resource_mut::<TerrainGraphApplyQueue>()
+        .expect("terrain graph apply queue must exist");
+    queue.requests.push(TerrainGraphApplyRequest {
+        target,
+        graph: state.graph.clone(),
+    });
+    state.status = Some("Graph queued for live planet rebuild".to_string());
 }
 
 fn draw_document_settings(ui: &mut Ui, state: &mut TerrainEditorState) {

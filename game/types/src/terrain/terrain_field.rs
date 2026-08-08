@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use engine::ecs::entity::Entity;
 use engine::math::{DVec3, dvec3};
 use serde::{Deserialize, Serialize};
 
@@ -123,6 +124,23 @@ pub struct TerrainFieldContext {
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainFieldSample {
     pub channels: [f64; TERRAIN_CHANNEL_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainValueRange {
+    pub minimum: f64,
+    pub maximum: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TerrainGraphApplyRequest {
+    pub target: Entity,
+    pub graph: TerrainFieldGraph,
+}
+
+#[derive(Default)]
+pub struct TerrainGraphApplyQueue {
+    pub requests: Vec<TerrainGraphApplyRequest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,6 +271,26 @@ impl TerrainFieldGraph {
         })
     }
 
+    pub fn channel_range(&self, channel: TerrainFieldChannel) -> TerrainValueRange {
+        let mut channels = [TerrainValueRange::ZERO; TERRAIN_CHANNEL_COUNT];
+        for layer in self.layers.iter().filter(|layer| layer.enabled) {
+            let mut value = layer.source.range(&channels);
+            if layer.mask.is_some() {
+                value = value.multiply(TerrainValueRange::UNIT);
+            }
+            let target = channels[layer.target.index()];
+            channels[layer.target.index()] = match layer.operation {
+                TerrainFieldOperation::Add => target.add(value),
+                TerrainFieldOperation::Subtract => target.subtract(value),
+                TerrainFieldOperation::Multiply => target.multiply(value),
+                TerrainFieldOperation::Minimum => target.minimum(value),
+                TerrainFieldOperation::Maximum => target.maximum(value),
+                TerrainFieldOperation::Replace => value,
+            };
+        }
+        channels[channel.index()]
+    }
+
     pub fn validate(&self) -> Vec<TerrainFieldValidationError> {
         let mut errors = Vec::new();
         if self.version > TERRAIN_FIELD_GRAPH_VERSION {
@@ -271,6 +309,12 @@ impl TerrainFieldGraph {
             errors.push(TerrainFieldValidationError {
                 layer_id: None,
                 message: "radius must be finite and positive".to_string(),
+            });
+        }
+        if !self.sea_level.is_finite() {
+            errors.push(TerrainFieldValidationError {
+                layer_id: None,
+                message: "sea level must be finite".to_string(),
             });
         }
         let mut ids = HashSet::new();
@@ -380,6 +424,30 @@ impl TerrainFieldSource {
             _ => {}
         }
     }
+
+    fn range(&self, _channels: &[TerrainValueRange; TERRAIN_CHANNEL_COUNT]) -> TerrainValueRange {
+        match self {
+            Self::Constant { value } => TerrainValueRange::new(*value, *value),
+            Self::Latitude {
+                amplitude,
+                bias,
+                absolute,
+            } => {
+                let input = if *absolute {
+                    TerrainValueRange::UNIT
+                } else {
+                    TerrainValueRange::new(-1.0, 1.0)
+                };
+                input.scale(*amplitude).offset(*bias)
+            }
+            Self::Channel {
+                output_min,
+                output_max,
+                ..
+            } => TerrainValueRange::new(*output_min, *output_max),
+            Self::Noise(node) => node.range(),
+        }
+    }
 }
 
 impl TerrainNoiseNode {
@@ -476,6 +544,77 @@ impl TerrainNoiseNode {
                 break;
             }
         }
+    }
+
+    fn range(&self) -> TerrainValueRange {
+        let base = match self.kind {
+            TerrainNoiseKind::Ridged => TerrainValueRange::UNIT,
+            TerrainNoiseKind::Fbm | TerrainNoiseKind::Billow | TerrainNoiseKind::Cellular => {
+                TerrainValueRange::new(-1.0, 1.0)
+            }
+        };
+        base.scale(self.amplitude).offset(self.bias)
+    }
+}
+
+impl TerrainValueRange {
+    pub const ZERO: Self = Self {
+        minimum: 0.0,
+        maximum: 0.0,
+    };
+    pub const UNIT: Self = Self {
+        minimum: 0.0,
+        maximum: 1.0,
+    };
+
+    pub fn new(a: f64, b: f64) -> Self {
+        Self {
+            minimum: a.min(b),
+            maximum: a.max(b),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self::new(self.minimum + other.minimum, self.maximum + other.maximum)
+    }
+
+    fn subtract(self, other: Self) -> Self {
+        Self::new(self.minimum - other.maximum, self.maximum - other.minimum)
+    }
+
+    fn multiply(self, other: Self) -> Self {
+        let products = [
+            self.minimum * other.minimum,
+            self.minimum * other.maximum,
+            self.maximum * other.minimum,
+            self.maximum * other.maximum,
+        ];
+        Self::new(
+            products.into_iter().fold(f64::INFINITY, f64::min),
+            products.into_iter().fold(f64::NEG_INFINITY, f64::max),
+        )
+    }
+
+    fn minimum(self, other: Self) -> Self {
+        Self::new(
+            self.minimum.min(other.minimum),
+            self.maximum.min(other.maximum),
+        )
+    }
+
+    fn maximum(self, other: Self) -> Self {
+        Self::new(
+            self.minimum.max(other.minimum),
+            self.maximum.max(other.maximum),
+        )
+    }
+
+    fn scale(self, factor: f64) -> Self {
+        Self::new(self.minimum * factor, self.maximum * factor)
+    }
+
+    fn offset(self, value: f64) -> Self {
+        Self::new(self.minimum + value, self.maximum + value)
     }
 }
 
@@ -784,5 +923,21 @@ mod tests {
             node.scale = 0.0;
         }
         assert!(graph.validate().len() >= 2);
+    }
+
+    #[test]
+    fn channel_ranges_contain_sampled_values() {
+        let graph = TerrainFieldGraph::default();
+        for channel in TerrainFieldChannel::ALL {
+            let range = graph.channel_range(channel);
+            for index in 0..1024 {
+                let y = 1.0 - (2.0 * index as f64 + 1.0) / 1024.0;
+                let radial = (1.0 - y * y).sqrt();
+                let angle = index as f64 * 2.399_963_229_728_653;
+                let direction = dvec3(radial * angle.cos(), y, radial * angle.sin());
+                let value = graph.evaluate_direction(direction).channels[channel.index()];
+                assert!(value >= range.minimum && value <= range.maximum);
+            }
+        }
     }
 }

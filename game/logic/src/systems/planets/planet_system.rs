@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -24,7 +27,7 @@ use game_types::{
     planet::{Planet, PlanetTerrainEdits},
     terrain::{
         BiomeConfig, ClimateConfig, FeatureConfig, GeologyConfig, LandformConfig,
-        PlanetTerrainConfig,
+        PlanetTerrainConfig, terrain_field::TerrainGraphApplyQueue,
     },
     universe::StarSystemComponent,
 };
@@ -110,11 +113,13 @@ pub struct MeshJobResults {
     pub ready_replacements: Vec<GeneratedReplacement>,
     pub next_replacement_id: u64,
     pub prioritized_jobs: Vec<PrioritizedMeshJob>,
+    pub generations: HashMap<Entity, u64>,
 }
 
 pub struct PrioritizedMeshJob {
     pub handle: JobPriorityHandle,
     pub target: MeshPriorityTarget,
+    pub cancelled: Arc<AtomicBool>,
     pub requests: Vec<PlanetMeshRequest>,
 }
 
@@ -145,6 +150,7 @@ pub fn default_planet_terrain_config() -> PlanetTerrainConfig {
         radius: 6_430_000.0,
         sea_level: 10.0,
         rotation_axis: vec3(0.0, 0.3987, 0.9171),
+        field_graph: None,
         geology: GeologyConfig {
             definitions: Vec::new(),
             province_scale: 1.0,
@@ -254,6 +260,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         ready_replacements: Vec::new(),
         next_replacement_id: 0,
         prioritized_jobs: Vec::new(),
+        generations: HashMap::new(),
     });
     world.insert_resource(CameraAltitudeLogState { last_log: None });
 }
@@ -474,6 +481,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         .get::<TransformComponent>(camera_entity)
         .unwrap()
         .position;
+    apply_pending_terrain_graphs(ctx, camera_pos);
     log_camera_altitude(ctx, camera_pos);
     //let heightmap = ctx
     //    .world
@@ -492,10 +500,7 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         );
         query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
             let change_start = changes.len();
-            // Keep one atomic topology generation in flight per planet. A
-            // second generation could otherwise invalidate a shared boundary
-            // mesh while leaving the first generation's nodes transitional.
-            if update_octree && !octree::has_pending_transition(&planet.octree_root) {
+            if update_octree {
                 octree::update(
                     &mut planet.octree_root,
                     camera_pos,
@@ -584,13 +589,13 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
             }
 
             if atmosphere_planet.is_none() {
-                atmosphere_planet = Some(planet.clone());
+                atmosphere_planet = Some((planet.clone(), terrain_config.radius));
             }
         });
     }
 
     if atmosphere_planet.is_some() {
-        let plan = atmosphere_planet.unwrap();
+        let (plan, planet_radius) = atmosphere_planet.unwrap();
         let planet_position = plan.position;
         let sun_position = ctx
             .world
@@ -598,13 +603,15 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
             .unwrap()
             .position;
 
-        ctx.globals
+        let settings = &mut ctx
+            .globals
             .renderer
             .render_graph
             .get_node_mut::<AtmospherePassNode>(engine::renderer::ids::graph_passes::ATMOSPHERE)
             .unwrap()
-            .settings
-            .sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
+            .settings;
+        settings.set_planet(planet_position.into(), planet_radius);
+        settings.sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
             - vec3(planet_position.x, planet_position.y, planet_position.z))
         .normalize()
         .into();
@@ -626,8 +633,132 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
     reprioritize_mesh_jobs(ctx, camera_pos);
 }
 
+fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
+    let requests = ctx
+        .world
+        .get_resource_mut::<TerrainGraphApplyQueue>()
+        .map(|mut queue| std::mem::take(&mut queue.requests))
+        .unwrap_or_default();
+    let mut latest = HashMap::new();
+    for request in requests {
+        latest.insert(request.target, request.graph);
+    }
+
+    for (planet_entity, graph) in latest {
+        if !graph.validate().is_empty()
+            || graph.radius > f64::from(f32::MAX)
+            || !graph.sea_level.is_finite()
+            || graph.sea_level.abs() > f64::from(f32::MAX)
+        {
+            continue;
+        }
+
+        let Some(planet) = ctx
+            .world
+            .get::<Planet>(planet_entity)
+            .map(|planet| (*planet).clone())
+        else {
+            continue;
+        };
+        let Some(terrain_edits) = ctx
+            .world
+            .get::<PlanetTerrainEdits>(planet_entity)
+            .map(|terrain_edits| (*terrain_edits).clone())
+        else {
+            continue;
+        };
+        let Some(existing_config) = ctx
+            .world
+            .get::<Arc<PlanetTerrainConfig>>(planet_entity)
+            .map(|terrain_config| Arc::clone(&terrain_config))
+        else {
+            continue;
+        };
+
+        let old_keys = {
+            let mut leaves = Vec::new();
+            octree::collect_leaf_nodes(&planet.octree_root, &mut leaves);
+            leaves.into_iter().map(|leaf| leaf.key).collect::<Vec<_>>()
+        };
+
+        let mut terrain_config = existing_config.as_ref().clone();
+        terrain_config.seed = graph.seed;
+        terrain_config.radius = graph.radius as f32;
+        terrain_config.sea_level = graph.sea_level as f32;
+        terrain_config.field_graph = Some(graph);
+        let terrain_config = Arc::new(terrain_config);
+        let lod_strength = ctx
+            .world
+            .get_resource::<PlanetLodSettings>()
+            .map_or(1.0, |settings| settings.strength);
+        let octree_root = Planet::create_octree(
+            planet.position,
+            &camera_pos,
+            terrain_config.as_ref(),
+            32,
+            lod_strength,
+            &terrain_edits,
+        );
+        let transition_key = octree_root.key;
+        let completed_state = octree_root.state;
+        let mut leaves = Vec::new();
+        octree::collect_leaf_nodes(&octree_root, &mut leaves);
+        let mut mesh_requests = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            let mut request = PlanetMeshRequest {
+                planet_entity,
+                node_key: leaf.key,
+                planet_position: planet.position,
+                node_min_corner: leaf.min,
+                node_size: leaf.size,
+                face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+            };
+            octree::annotate_mesh_request(&octree_root, &mut request);
+            mesh_requests.push(request);
+        }
+
+        if let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() {
+            *mesh_jobs.generations.entry(planet_entity).or_insert(0) += 1;
+            let old_key_set = old_keys.iter().copied().collect::<HashSet<_>>();
+            mesh_jobs.wanted.retain(|key| !old_key_set.contains(key));
+            mesh_jobs
+                .pending_requests
+                .retain(|_, pending| pending.request.planet_entity != planet_entity);
+            mesh_jobs
+                .ready_meshes
+                .retain(|mesh| mesh.planet_entity != planet_entity);
+            mesh_jobs
+                .ready_replacements
+                .retain(|replacement| replacement.planet_entity != planet_entity);
+            mesh_jobs.prioritized_jobs.retain(|job| {
+                !job.requests
+                    .iter()
+                    .any(|request| request.planet_entity == planet_entity)
+            });
+            if let Ok(mut cache) = mesh_jobs.base_grid_cache.lock() {
+                cache.retain(|key, _| !old_key_set.contains(key));
+            }
+        }
+
+        ctx.world.insert(planet_entity, terrain_config);
+        if let Some(mut live_planet) = ctx.world.get_mut::<Planet>(planet_entity) {
+            live_planet.octree_root = octree_root;
+        }
+        submit_replacement(
+            ctx,
+            planet_entity,
+            transition_key,
+            completed_state,
+            Vec::new(),
+            old_keys,
+            mesh_requests,
+        );
+    }
+}
+
 fn change_node_size(change: &OctreeChanges) -> f32 {
     match change {
+        OctreeChanges::CancelPlanetReplacements { .. } => 0.0,
         OctreeChanges::ReplaceMeshes { requests, .. } => requests
             .first()
             .map_or(f32::MAX, |request| request.node_size),
@@ -640,11 +771,36 @@ fn change_node_size(change: &OctreeChanges) -> f32 {
 
 pub fn build_requested_mesh(
     request: PlanetMeshRequest,
+    generation: u64,
     version: u64,
     urgent: bool,
     terrain: &PlanetTerrainSamplerContext<'_>,
     base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
 ) -> GeneratedMesh {
+    try_build_requested_mesh(
+        request,
+        generation,
+        version,
+        urgent,
+        terrain,
+        base_grid_cache,
+        None,
+    )
+    .expect("uncancellable terrain mesh generation must complete")
+}
+
+fn try_build_requested_mesh(
+    request: PlanetMeshRequest,
+    generation: u64,
+    version: u64,
+    urgent: bool,
+    terrain: &PlanetTerrainSamplerContext<'_>,
+    base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
+    cancelled: Option<&AtomicBool>,
+) -> Option<GeneratedMesh> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return None;
+    }
     let size = request.node_size;
     let min_corner = vec3(
         request.node_min_corner.x,
@@ -668,7 +824,11 @@ pub fn build_requested_mesh(
         min_corner,
         terrain,
         &base_grid_cache,
-    );
+        cancelled,
+    )?;
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return None;
+    }
     let grid;
     let grid_ref = if terrain_sampler::is_terrain_edits_empty(terrain) {
         base_grid.as_ref()
@@ -683,8 +843,12 @@ pub fn build_requested_mesh(
         terrain,
         &request.face_neighbors,
     );
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return None;
+    }
 
-    GeneratedMesh {
+    Some(GeneratedMesh {
+        generation,
         planet_entity: request.planet_entity,
         key,
         node_origin_planet: (engine::math::IVec3::new(key.x, key.y, key.z)
@@ -694,7 +858,7 @@ pub fn build_requested_mesh(
         urgent,
         vertices,
         indices,
-    }
+    })
 }
 
 fn edits_for_mesh_request(
@@ -798,7 +962,7 @@ fn submit_requested_mesh_internal(
 ) {
     let key = mesh_request_key(&request);
 
-    let (sender, version, base_grid_cache) = {
+    let (sender, generation, version, base_grid_cache) = {
         let Some(mut mesh_jobs) = ctx.world.get_resource_mut::<MeshJobResults>() else {
             return;
         };
@@ -837,18 +1001,31 @@ fn submit_requested_mesh_internal(
 
         (
             mesh_jobs.sender.clone(),
+            *mesh_jobs
+                .generations
+                .entry(request.planet_entity)
+                .or_insert(0),
             version,
             Arc::clone(&mesh_jobs.base_grid_cache),
         )
     };
 
-    start_mesh_job(ctx, sender, request, version, urgent, base_grid_cache);
+    start_mesh_job(
+        ctx,
+        sender,
+        request,
+        generation,
+        version,
+        urgent,
+        base_grid_cache,
+    );
 }
 
 fn start_mesh_job(
     ctx: &mut SystemContext,
     sender: Sender<GeneratedMesh>,
     request: PlanetMeshRequest,
+    generation: u64,
     version: u64,
     urgent: bool,
     base_grid_cache: Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
@@ -882,7 +1059,14 @@ fn start_mesh_job(
 
     let job = move || {
         let sampler = terrain.sampler_context();
-        let mesh = build_requested_mesh(request, version, urgent, &sampler, base_grid_cache);
+        let mesh = build_requested_mesh(
+            request,
+            generation,
+            version,
+            urgent,
+            &sampler,
+            base_grid_cache,
+        );
         let _ = sender.send(mesh);
     };
 
@@ -900,6 +1084,7 @@ fn start_mesh_job(
                     key: mesh_request_key(&request),
                     version,
                 },
+                cancelled: Arc::new(AtomicBool::new(false)),
                 requests: vec![request],
             });
         }
@@ -922,19 +1107,32 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
         mesh_jobs.prioritized_jobs.retain(|job| {
             job.target != MeshPriorityTarget::Replacement(replacement.replacement_id)
         });
-        for mesh in &replacement.meshes {
+        for request in &replacement.requests {
+            let key = mesh_request_key(request);
             let remaining = mesh_jobs
                 .in_flight_counts
-                .get_mut(&mesh.key)
+                .get_mut(&key)
                 .map(|count| {
                     *count = count.saturating_sub(1);
                     *count
                 })
                 .unwrap_or(0);
             if remaining == 0 {
-                mesh_jobs.in_flight_counts.remove(&mesh.key);
-                mesh_jobs.in_flight.remove(&mesh.key);
+                mesh_jobs.in_flight_counts.remove(&key);
+                mesh_jobs.in_flight.remove(&key);
             }
+        }
+
+        if replacement.cancelled {
+            continue;
+        }
+
+        let current_generation = *mesh_jobs
+            .generations
+            .entry(replacement.planet_entity)
+            .or_insert(0);
+        if replacement.generation != current_generation {
+            continue;
         }
 
         let still_current = replacement.meshes.iter().all(|mesh| {
@@ -945,16 +1143,8 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
                     .is_some_and(|version| *version == mesh.version)
         });
         if !still_current {
-            let retry = (
-                replacement.planet_entity,
-                replacement.transition_key,
-                replacement.completed_state,
-                replacement.additional_transitions.clone(),
-                replacement.keys_to_remove.clone(),
-                replacement.requests.clone(),
-            );
-            drop(mesh_jobs);
-            submit_replacement(ctx, retry.0, retry.1, retry.2, retry.3, retry.4, retry.5);
+            // A newer request/version has superseded this atomic replacement.
+            // Retrying it would put obsolete terrain work back into the queue.
             continue;
         }
         mesh_jobs.ready_replacements.push(replacement);
@@ -998,6 +1188,7 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             }
 
             let still_wanted = mesh_jobs.wanted.contains(&mesh.key)
+                && mesh.generation == *mesh_jobs.generations.entry(mesh.planet_entity).or_insert(0)
                 && mesh_jobs
                     .versions
                     .get(&mesh.key)
@@ -1018,6 +1209,10 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
                         Some((
                             mesh_jobs.sender.clone(),
                             pending.request,
+                            *mesh_jobs
+                                .generations
+                                .entry(pending.request.planet_entity)
+                                .or_insert(0),
                             version,
                             pending.urgent,
                             Arc::clone(&mesh_jobs.base_grid_cache),
@@ -1030,8 +1225,17 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             (still_wanted, next_request)
         };
 
-        if let Some((sender, request, version, urgent, base_grid_cache)) = next_request {
-            start_mesh_job(ctx, sender, request, version, urgent, base_grid_cache);
+        if let Some((sender, request, generation, version, urgent, base_grid_cache)) = next_request
+        {
+            start_mesh_job(
+                ctx,
+                sender,
+                request,
+                generation,
+                version,
+                urgent,
+                base_grid_cache,
+            );
         }
 
         if still_wanted {
@@ -1062,7 +1266,12 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
         let still_current = {
             let mesh_jobs = ctx.world.get_resource::<MeshJobResults>().unwrap();
             replacement.meshes.iter().all(|mesh| {
-                mesh_jobs.wanted.contains(&mesh.key)
+                replacement.generation
+                    == *mesh_jobs
+                        .generations
+                        .get(&replacement.planet_entity)
+                        .unwrap_or(&0)
+                    && mesh_jobs.wanted.contains(&mesh.key)
                     && mesh_jobs
                         .versions
                         .get(&mesh.key)
@@ -1070,15 +1279,6 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
             })
         };
         if !still_current {
-            submit_replacement(
-                ctx,
-                replacement.planet_entity,
-                replacement.transition_key,
-                replacement.completed_state,
-                replacement.additional_transitions.clone(),
-                replacement.keys_to_remove.clone(),
-                replacement.requests.clone(),
-            );
             continue;
         }
 
@@ -1169,6 +1369,9 @@ pub fn drain_generated_meshes(ctx: &mut SystemContext) {
 
 pub fn apply_change(ctx: &mut SystemContext, change: &OctreeChanges) {
     match change {
+        OctreeChanges::CancelPlanetReplacements { planet_entity } => {
+            cancel_planet_replacements(ctx, *planet_entity);
+        }
         OctreeChanges::ReplaceMeshes {
             planet_entity,
             transition_key,
@@ -1266,9 +1469,10 @@ fn submit_replacement(
         })
         .collect();
 
-    let (replacement_id, sender, base_grid_cache, versions) = {
+    let (generation, replacement_id, sender, base_grid_cache, versions) = {
         let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
 
+        let generation = *mesh_jobs.generations.entry(planet_entity).or_insert(0);
         mesh_jobs.next_replacement_id += 1;
         let replacement_id = mesh_jobs.next_replacement_id;
         let mut versions = Vec::with_capacity(requests.len());
@@ -1282,6 +1486,7 @@ fn submit_replacement(
             *mesh_jobs.in_flight_counts.entry(key).or_insert(0) += 1;
         }
         (
+            generation,
             replacement_id,
             mesh_jobs.replacement_sender.clone(),
             Arc::clone(&mesh_jobs.base_grid_cache),
@@ -1292,25 +1497,31 @@ fn submit_replacement(
     let priority = mesh_job_priority(ctx, &requests);
     let priority_requests = requests.clone();
     let retry_requests = requests.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let job_cancelled = Arc::clone(&cancelled);
     let job = move || {
         let meshes = prepared
             .into_iter()
             .zip(versions)
             .collect::<Vec<_>>()
             .into_par_iter()
-            .map(|((request, terrain), version)| {
+            .filter_map(|((request, terrain), version)| {
                 let sampler = terrain.sampler_context();
-                build_requested_mesh(
+                try_build_requested_mesh(
                     request,
+                    generation,
                     version,
                     false,
                     &sampler,
                     Arc::clone(&base_grid_cache),
+                    Some(&job_cancelled),
                 )
             })
             .collect();
 
         let _ = sender.send(GeneratedReplacement {
+            cancelled: job_cancelled.load(Ordering::Acquire),
+            generation,
             replacement_id,
             planet_entity,
             transition_key,
@@ -1326,8 +1537,43 @@ fn submit_replacement(
         mesh_jobs.prioritized_jobs.push(PrioritizedMeshJob {
             handle,
             target: MeshPriorityTarget::Replacement(replacement_id),
+            cancelled,
             requests: priority_requests,
         });
+    }
+}
+
+fn cancel_planet_replacements(ctx: &mut SystemContext, planet_entity: Entity) {
+    let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
+    let mut obsolete_keys = Vec::new();
+
+    for job in &mut mesh_jobs.prioritized_jobs {
+        if !matches!(job.target, MeshPriorityTarget::Replacement(_))
+            || !job
+                .requests
+                .iter()
+                .any(|request| request.planet_entity == planet_entity)
+        {
+            continue;
+        }
+        job.cancelled.store(true, Ordering::Release);
+        // A queued cancelled job is made runnable immediately so it can send
+        // its completion message and release in-flight bookkeeping cheaply.
+        job.handle.set(u32::MAX);
+        obsolete_keys.extend(job.requests.iter().map(mesh_request_key));
+    }
+
+    mesh_jobs.ready_replacements.retain(|replacement| {
+        let superseded = replacement.planet_entity == planet_entity;
+        if superseded {
+            obsolete_keys.extend(replacement.requests.iter().map(mesh_request_key));
+        }
+        !superseded
+    });
+
+    for key in obsolete_keys {
+        mesh_jobs.wanted.remove(&key);
+        mesh_jobs.pending_requests.remove(&key);
     }
 }
 
@@ -1346,8 +1592,12 @@ fn reprioritize_mesh_jobs(ctx: &mut SystemContext, camera_pos: Vec3) {
         return;
     };
     for job in &mesh_jobs.prioritized_jobs {
-        job.handle
-            .set(priority_for_requests(&job.requests, camera_pos));
+        if job.cancelled.load(Ordering::Acquire) {
+            job.handle.set(u32::MAX);
+        } else {
+            job.handle
+                .set(priority_for_requests(&job.requests, camera_pos));
+        }
     }
 }
 
@@ -1405,26 +1655,33 @@ fn get_or_build_base_grid(
     min: Vec3,
     terrain: &PlanetTerrainSamplerContext<'_>,
     base_grid_cache: &Arc<Mutex<HashMap<NodeKey, Arc<DensityGrid>>>>,
-) -> Arc<DensityGrid> {
+    cancelled: Option<&AtomicBool>,
+) -> Option<Arc<DensityGrid>> {
     if let Some(grid) = base_grid_cache
         .lock()
         .ok()
         .and_then(|cache| cache.get(&key).cloned())
     {
-        return grid;
+        return Some(grid);
     }
 
     let grid = Arc::new(generate_base_grid_from_min(
-        nx, ny, nz, resolution, min, terrain,
-    ));
+        nx, ny, nz, resolution, min, terrain, cancelled,
+    )?);
+
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return None;
+    }
 
     if let Ok(mut cache) = base_grid_cache.lock() {
-        cache
-            .entry(key)
-            .or_insert_with(|| Arc::clone(&grid))
-            .clone()
+        Some(
+            cache
+                .entry(key)
+                .or_insert_with(|| Arc::clone(&grid))
+                .clone(),
+        )
     } else {
-        grid
+        Some(grid)
     }
 }
 
@@ -1435,11 +1692,15 @@ fn generate_base_grid_from_min(
     resolution: f32,
     min: Vec3,
     terrain: &PlanetTerrainSamplerContext<'_>,
-) -> DensityGrid {
+    cancelled: Option<&AtomicBool>,
+) -> Option<DensityGrid> {
     let local_min = min.as_dvec3() - terrain.planet_position.as_dvec3();
     let resolution = f64::from(resolution);
     let mut grid = Vec::with_capacity(nx as usize);
     for xi in 0..nx {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return None;
+        }
         let mut plane = Vec::with_capacity(ny as usize);
         for yi in 0..ny {
             let mut row = Vec::with_capacity(nz as usize);
@@ -1458,7 +1719,7 @@ fn generate_base_grid_from_min(
         }
         grid.push(plane);
     }
-    grid
+    Some(grid)
 }
 
 fn generate_grid_from_base(

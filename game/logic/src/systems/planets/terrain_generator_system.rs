@@ -4,7 +4,7 @@ use engine::math::{DVec3, Vec3, dvec3, vec3};
 use game_types::{
     octree::{FaceNeighbor, FaceNeighborKind, OctreeNode},
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
-    terrain::PlanetTerrainConfig,
+    terrain::{PlanetTerrainConfig, terrain_materials},
 };
 
 use crate::{
@@ -69,6 +69,7 @@ fn contour_cell_vertex(
     offset: Vec3,
     resolution: f32,
     planet_position: Vec3,
+    terrain_config: &PlanetTerrainConfig,
 ) -> Option<PlanetVertex> {
     let corners = [
         grid[x][y][z],
@@ -91,6 +92,7 @@ fn contour_cell_vertex(
         base_local,
         resolution,
         offset.as_dvec3() - planet_position.as_dvec3(),
+        terrain_config,
     )
 }
 
@@ -99,6 +101,7 @@ fn contour_cell_from_corners(
     base: Vec3,
     resolution: f32,
     position_origin_planet: engine::math::DVec3,
+    terrain_config: &PlanetTerrainConfig,
 ) -> Option<PlanetVertex> {
     let has_negative = corners.iter().any(|&density| density < 0.0);
     let has_positive = corners.iter().any(|&density| density > 0.0);
@@ -177,23 +180,7 @@ fn contour_cell_from_corners(
         up
     };
     let average_normal = [normal.x, normal.y, normal.z];
-    let slope = average_normal[0] * up.x + average_normal[1] * up.y + average_normal[2] * up.z;
-    //let is_ocean = heightmap
-    //    .and_then(|heightmap| heightmap.sample_unit_height(up))
-    //    .is_some_and(|height| height == 0.0);
-    let is_ocean = false;
-
-    // Define material
-    let (mat_a, mat_b, blend) = if is_ocean {
-        (3u16, 3u16, 0u8)
-    } else if slope > 0.7 {
-        (0u16, 1u16, 0u8)
-    } else if slope > 0.4 {
-        let blend = ((0.7 - slope) / 0.3 * 255.0) as u8;
-        (0u16, 1u16, blend)
-    } else {
-        (1u16, 1u16, 0u8)
-    };
+    let (mat_a, mat_b, blend) = select_surface_materials(terrain_config, radial, normal, up);
 
     Some(PlanetVertex {
         position: [average_position.x, average_position.y, average_position.z],
@@ -203,6 +190,54 @@ fn contour_cell_from_corners(
         blend,
         _pad: [0, 0, 0],
     })
+}
+
+fn select_surface_materials(
+    config: &PlanetTerrainConfig,
+    radial_position: DVec3,
+    normal: Vec3,
+    up: Vec3,
+) -> (u16, u16, u8) {
+    let altitude = radial_position.length() as f32 - config.radius;
+    if altitude <= config.sea_level {
+        return (terrain_materials::WATER.0, terrain_materials::WATER.0, 0);
+    }
+
+    let slope = normal.dot(up).clamp(-1.0, 1.0);
+    let (base_a, base_b, base_blend) = if slope > 0.7 {
+        (terrain_materials::GRASS.0, terrain_materials::ROCK.0, 0)
+    } else if slope > 0.4 {
+        (
+            terrain_materials::GRASS.0,
+            terrain_materials::ROCK.0,
+            ((0.7 - slope) / 0.3 * 255.0) as u8,
+        )
+    } else {
+        (terrain_materials::ROCK.0, terrain_materials::ROCK.0, 0)
+    };
+
+    let axis = config.rotation_axis.normalize_or_zero();
+    let axis = if axis.length_squared() > 1e-12 {
+        axis
+    } else {
+        Vec3::Y
+    };
+    let latitude = up.dot(axis).abs().clamp(0.0, 1.0);
+    let climate = config.climate;
+    let temperature = climate.equator_temperature
+        + (climate.pole_temperature - climate.equator_temperature) * latitude
+        - ((altitude - config.sea_level).max(0.0) / 1_000.0) * climate.altitude_cooling;
+    let snow_blend = ((2.0 - temperature) / 4.0).clamp(0.0, 1.0);
+    if snow_blend <= 0.0 {
+        return (base_a, base_b, base_blend);
+    }
+
+    let base = if base_blend >= 128 { base_b } else { base_a };
+    (
+        base,
+        terrain_materials::SNOW.0,
+        (snow_blend * 255.0).round() as u8,
+    )
 }
 
 #[inline(never)]
@@ -405,13 +440,18 @@ fn transition_cell_vertex(
     ]
     .map(|position| terrain_sampler::sample_final_density_planet_local(terrain, position));
     let aligned_fine_local = (aligned - fine_min_planet).as_vec3();
-    let index =
-        contour_cell_from_corners(corners, aligned_fine_local, spacing as f32, fine_min_planet)
-            .map(|vertex| {
-                let index = vertices.len() as u32;
-                vertices.push(vertex);
-                index
-            });
+    let index = contour_cell_from_corners(
+        corners,
+        aligned_fine_local,
+        spacing as f32,
+        fine_min_planet,
+        terrain.config,
+    )
+    .map(|vertex| {
+        let index = vertices.len() as u32;
+        vertices.push(vertex);
+        index
+    });
     cache.insert(key, index);
     index
 }
@@ -618,6 +658,7 @@ impl PlanetExt for Planet {
                         offset,
                         resolution,
                         terrain.planet_position,
+                        terrain.config,
                     ) else {
                         continue;
                     };
@@ -653,7 +694,7 @@ impl PlanetExt for Planet {
         lod_strength: f32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode {
-        let (_, max_height) = terrain_height_bounds(terrain_config.radius, None);
+        let (_, max_height) = terrain_height_bounds(terrain_config, None);
         let required_diameter = (terrain_config.radius + max_height) * 2.0;
         let root_size = (required_diameter.ceil() as u32).next_power_of_two() as f32;
         let half_root_size = root_size * 0.5;
@@ -688,5 +729,36 @@ impl PlanetExt for Planet {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::systems::planets::planet_system::default_planet_terrain_config;
+
+    #[test]
+    fn material_below_sea_level_is_water() {
+        let config = default_planet_terrain_config();
+        let radial = DVec3::X * f64::from(config.radius + config.sea_level - 1.0);
+
+        let materials = select_surface_materials(&config, radial, Vec3::X, Vec3::X);
+
+        assert_eq!(
+            materials,
+            (terrain_materials::WATER.0, terrain_materials::WATER.0, 0)
+        );
+    }
+
+    #[test]
+    fn freezing_surface_blends_fully_to_snow() {
+        let mut config = default_planet_terrain_config();
+        config.rotation_axis = Vec3::Y;
+        let radial = DVec3::Y * f64::from(config.radius + config.sea_level + 1.0);
+
+        let (_, material_b, blend) = select_surface_materials(&config, radial, Vec3::Y, Vec3::Y);
+
+        assert_eq!(material_b, terrain_materials::SNOW.0);
+        assert_eq!(blend, u8::MAX);
     }
 }

@@ -1,9 +1,11 @@
 use engine::math::{DVec3, Vec3, vec3};
 use game_types::planet::{PlanetTerrainEdits, TerrainBrickKey, TerrainBrickSamples};
+use game_types::terrain::PlanetTerrainConfig;
+use game_types::terrain::terrain_field::{TerrainFieldChannel, TerrainFieldContext};
 
 const EARTH_MEAN_RADIUS_METERS: f32 = 6_371_000.0;
 const EARTH_HIGHEST_ALTITUDE_METERS: f32 = 8_848.86;
-const EARTH_HEIGHT_EXAGGERATION: f32 = 16.0; //32.0;
+const EARTH_HEIGHT_EXAGGERATION: f32 = 1.0;
 const EARTH_BROAD_DETAIL_SCALE: f32 = 0.18;
 const EARTH_RIDGE_DETAIL_SCALE: f32 = 0.12;
 const EARTH_FINE_DETAIL_SCALE: f32 = 0.035;
@@ -286,12 +288,12 @@ pub fn sample_terrain_edit(local_p: Vec3, terrain_edits: &PlanetTerrainEdits) ->
 pub fn sdf_at_center(
     p: engine::math::Vec3,
     planet_center: engine::math::Vec3,
-    planet_radius: f32,
+    terrain_config: &PlanetTerrainConfig,
     heightmap: Option<&EarthHeightmap>,
     terrain_edits: &PlanetTerrainEdits,
 ) -> f32 {
     let local_p = p - planet_center;
-    base_sdf_at_center(p, planet_center, planet_radius, heightmap)
+    base_sdf_at_center(p, planet_center, terrain_config, heightmap)
         + sample_terrain_edit(local_p, terrain_edits)
 }
 
@@ -299,21 +301,22 @@ pub fn sdf_at_center(
 pub fn base_sdf_at_center(
     p: engine::math::Vec3,
     planet_center: engine::math::Vec3,
-    planet_radius: f32,
+    terrain_config: &PlanetTerrainConfig,
     heightmap: Option<&EarthHeightmap>,
 ) -> f32 {
     base_sdf_planet_local(
         p.as_dvec3() - planet_center.as_dvec3(),
-        f64::from(planet_radius),
+        terrain_config,
         heightmap,
     )
 }
 
 pub fn base_sdf_planet_local(
     local_p: DVec3,
-    planet_radius: f64,
+    terrain_config: &PlanetTerrainConfig,
     heightmap: Option<&EarthHeightmap>,
 ) -> f32 {
+    let planet_radius = f64::from(terrain_config.radius);
     let dist_from_center = local_p.length();
     let dir = if dist_from_center > 1e-6 {
         local_p / dist_from_center
@@ -321,39 +324,53 @@ pub fn base_sdf_planet_local(
         engine::math::dvec3(0.0, 1.0, 0.0)
     };
 
+    if let Some(graph) = &terrain_config.field_graph {
+        let sample = graph.evaluate(TerrainFieldContext {
+            direction: dir,
+            position: local_p,
+            radius: planet_radius,
+        });
+        let height = sample.channels[TerrainFieldChannel::Height.index()];
+        let density = sample.channels[TerrainFieldChannel::Density.index()];
+        return (dist_from_center - (planet_radius + height) + density) as f32;
+    }
+
     let height = heightmap
         .and_then(|heightmap| {
             heightmap
                 .sample_height(dir.as_vec3(), planet_radius as f32)
                 .map(f64::from)
         })
-        .unwrap_or_else(|| spherical_terrain_height_f64(dir, planet_radius));
+        .unwrap_or_else(|| spherical_terrain_height_f64(dir, terrain_config));
     (dist_from_center - (planet_radius + height)) as f32
-
-    // let depth_below_surface = -terrain;
-    // let fade_zone = planet_r * 0.1;
-    // let cave_blend = (depth_below_surface / fade_zone).clamp(0.0, 1.0);
-    // if cave_blend > 0.0 {
-    //     let cave = cave_sdf(p);
-    //     let carved = terrain.max(-cave);
-    //     terrain + (carved - terrain) * cave_blend
-    // } else {
-    //     terrain
-    // }
 }
 
-pub fn min_terrain_height(planet_radius: f32) -> f32 {
-    -planet_radius * 0.011
+pub fn min_terrain_height(terrain_config: &PlanetTerrainConfig) -> f32 {
+    if let Some(graph) = &terrain_config.field_graph {
+        let height = graph.channel_range(TerrainFieldChannel::Height);
+        let density = graph.channel_range(TerrainFieldChannel::Density);
+        return (height.minimum - density.maximum) as f32;
+    }
+    -terrain_config.radius * 0.011
 }
 
-pub fn max_terrain_height(planet_radius: f32) -> f32 {
-    planet_radius * 0.045
+pub fn max_terrain_height(terrain_config: &PlanetTerrainConfig) -> f32 {
+    if let Some(graph) = &terrain_config.field_graph {
+        let height = graph.channel_range(TerrainFieldChannel::Height);
+        let density = graph.channel_range(TerrainFieldChannel::Density);
+        return (height.maximum - density.minimum) as f32;
+    }
+    terrain_config.radius * 0.045
 }
 
 /// Conservative lower and upper bounds for terrain height above the base
 /// planet radius. Keeping this separate from SDF sampling lets the octree
 /// classify whole regions without evaluating procedural noise.
-pub fn terrain_height_bounds(planet_radius: f32, heightmap: Option<&EarthHeightmap>) -> (f32, f32) {
+pub fn terrain_height_bounds(
+    terrain_config: &PlanetTerrainConfig,
+    heightmap: Option<&EarthHeightmap>,
+) -> (f32, f32) {
+    let planet_radius = terrain_config.radius;
     let Some(heightmap) = heightmap.filter(|heightmap| {
         heightmap.width > 0
             && heightmap.height > 0
@@ -362,8 +379,8 @@ pub fn terrain_height_bounds(planet_radius: f32, heightmap: Option<&EarthHeightm
             && heightmap.max_height.is_finite()
     }) else {
         return (
-            min_terrain_height(planet_radius),
-            max_terrain_height(planet_radius),
+            min_terrain_height(terrain_config),
+            max_terrain_height(terrain_config),
         );
     };
 
@@ -386,7 +403,12 @@ pub fn terrain_height_bounds(planet_radius: f32, heightmap: Option<&EarthHeightm
     )
 }
 
-pub fn spherical_terrain_height(dir: Vec3, planet_r: f32) -> f32 {
+pub fn spherical_terrain_height(dir: Vec3, terrain_config: &PlanetTerrainConfig) -> f32 {
+    if let Some(graph) = &terrain_config.field_graph {
+        return graph.evaluate_direction(dir.as_dvec3()).channels
+            [TerrainFieldChannel::Height.index()] as f32;
+    }
+    let planet_r = terrain_config.radius;
     let warp = vec3(
         fbm(dir * 3.0 + vec3(17.1, 3.7, 11.5), 4),
         fbm(dir * 3.0 + vec3(5.3, 19.1, 2.8), 4),
@@ -449,7 +471,11 @@ fn fbm_f64(p: DVec3, octaves: u32) -> f64 {
     value
 }
 
-fn spherical_terrain_height_f64(dir: DVec3, planet_radius: f64) -> f64 {
+fn spherical_terrain_height_f64(dir: DVec3, terrain_config: &PlanetTerrainConfig) -> f64 {
+    if let Some(graph) = &terrain_config.field_graph {
+        return graph.evaluate_direction(dir).channels[TerrainFieldChannel::Height.index()];
+    }
+    let planet_radius = f64::from(terrain_config.radius);
     let warp = engine::math::dvec3(
         fbm_f64(dir * 3.0 + engine::math::dvec3(17.1, 3.7, 11.5), 4),
         fbm_f64(dir * 3.0 + engine::math::dvec3(5.3, 19.1, 2.8), 4),
@@ -474,6 +500,7 @@ fn spherical_terrain_height_f64(dir: DVec3, planet_radius: f64) -> f64 {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use crate::systems::planets::planet_system::default_planet_terrain_config;
     use game_types::{
         octree::DensityRange,
         planet::{PlanetTerrainEdits, TerrainBrickKey},
@@ -520,5 +547,91 @@ mod tests {
             let sampled = sample_terrain_edit(vec3(x, 1.0, 1.0), &edits);
             assert!((sampled - x).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn procedural_height_bounds_are_metric_and_conservative() {
+        let config = default_planet_terrain_config();
+        let (minimum, maximum) = terrain_height_bounds(&config, None);
+
+        assert_eq!(minimum, min_terrain_height(&config));
+        assert_eq!(maximum, max_terrain_height(&config));
+        assert!(minimum < -1_000.0 && maximum > 4_000.0);
+
+        // Cover the sphere with a deterministic Fibonacci lattice and ensure
+        // the octree's analytic bounds contain the actual terrain field.
+        let golden_angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+        let mut highest_sample = f64::NEG_INFINITY;
+        for index in 0..4096 {
+            let y = 1.0 - (2.0 * index as f64 + 1.0) / 4096.0;
+            let radial = (1.0 - y * y).sqrt();
+            let angle = golden_angle * index as f64;
+            let direction = engine::math::dvec3(radial * angle.cos(), y, radial * angle.sin());
+            let height = spherical_terrain_height_f64(direction, &config);
+            highest_sample = highest_sample.max(height);
+            assert!(
+                height >= f64::from(minimum) && height <= f64::from(maximum),
+                "height {height} escaped [{minimum}, {maximum}]"
+            );
+        }
+        assert!(
+            highest_sample > 1_000.0,
+            "configured mountain field only reached {highest_sample} m"
+        );
+    }
+
+    #[test]
+    fn random_access_sdf_is_bitwise_deterministic() {
+        let config = default_planet_terrain_config();
+        let direction = engine::math::dvec3(0.37, 0.81, -0.45).normalize();
+        let position = direction * (f64::from(config.radius) + 75.0);
+
+        let first = base_sdf_planet_local(position, &config, None);
+        for _ in 0..16 {
+            assert_eq!(
+                first.to_bits(),
+                base_sdf_planet_local(position, &config, None).to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn graph_height_and_density_drive_random_access_sdf() {
+        use game_types::terrain::terrain_field::{
+            TerrainFieldGraph, TerrainFieldLayer, TerrainFieldOperation, TerrainFieldSource,
+        };
+
+        let mut config = default_planet_terrain_config();
+        let mut graph = TerrainFieldGraph::default();
+        graph.layers = vec![
+            TerrainFieldLayer {
+                id: 1,
+                name: "Height".to_string(),
+                enabled: true,
+                target: TerrainFieldChannel::Height,
+                operation: TerrainFieldOperation::Replace,
+                source: TerrainFieldSource::Constant { value: 120.0 },
+                mask: None,
+            },
+            TerrainFieldLayer {
+                id: 2,
+                name: "Density".to_string(),
+                enabled: true,
+                target: TerrainFieldChannel::Density,
+                operation: TerrainFieldOperation::Replace,
+                source: TerrainFieldSource::Constant { value: -20.0 },
+                mask: None,
+            },
+        ];
+        config.field_graph = Some(graph);
+        let position = DVec3::X * (f64::from(config.radius) + 100.0);
+        let first = base_sdf_planet_local(position, &config, None);
+
+        assert_eq!(first, -40.0);
+        assert_eq!(
+            first.to_bits(),
+            base_sdf_planet_local(position, &config, None).to_bits()
+        );
+        assert_eq!(terrain_height_bounds(&config, None), (140.0, 140.0));
     }
 }

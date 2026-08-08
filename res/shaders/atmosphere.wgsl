@@ -2,12 +2,14 @@ struct AtmosphereUniform {
     camera_position: vec4<f32>,
     sun_direction: vec4<f32>,
     planet_center: vec4<f32>,
-    params: vec4<f32>, // x: planet_radius, y: atmosphere_radius, z: sun_intensity, w: unused
+    params: vec4<f32>, // x: planet radius, y: atmosphere radius, z: Mie g, w: sun intensity
     screen_size: vec2<f32>,
-    scattering_coefficients: vec3<f32>, // Used here as Rayleigh scattering
-    density_falloff: f32, // Used here as Rayleigh scale height (e.g. 8000.0)
     num_in_scattering_points: i32,
     num_optical_depth_points: i32,
+    rayleigh_scattering: vec3<f32>,
+    rayleigh_scale_height: f32,
+    mie_scattering: vec3<f32>,
+    mie_scale_height: f32,
     inverse_projection: mat4x4<f32>,
     inverse_view: mat4x4<f32>,
 };
@@ -91,11 +93,8 @@ fn ray_sphere(sphere_center: vec3<f32>, sphere_radius: f32, ray_origin: vec3<f32
 // Returns vec2(Rayleigh Density, Mie Density) exponentially scaled by height
 fn densities_at_point(sample_point: vec3<f32>, planet_center: vec3<f32>, planet_radius: f32) -> vec2<f32> {
     let height = length(sample_point - planet_center) - planet_radius;
-    let rayleigh_scale_height = 8000.0; // 8 km
-    let mie_scale_height = 1200.0;       // 1.2 km
-
-    let density_r = exp(-max(0.0, height) / rayleigh_scale_height);
-    let density_m = exp(-max(0.0, height) / mie_scale_height);
+    let density_r = exp(-max(0.0, height) / atmosphere.rayleigh_scale_height);
+    let density_m = exp(-max(0.0, height) / atmosphere.mie_scale_height);
     return vec2<f32>(density_r, density_m);
 }
 
@@ -125,10 +124,8 @@ fn calculate_light(
     let step_size = ray_length / f32(max(1, atmosphere.num_in_scattering_points));
     var sample_point = ray_origin + ray_direction * (step_size * 0.5);
 
-    // Physically reasonable scattering constants
-    let beta_rayleigh = vec3<f32>(5.8e-6, 13.5e-6, 33.1e-6); // Standard Earth scattering coefficients
-    let beta_mie = vec3<f32>(21.0e-6);                         // Haze/aerosol scattering
-    let mie_g = 0.76;                                          // Anisotropy factor for sun glare
+    let beta_rayleigh = atmosphere.rayleigh_scattering;
+    let beta_mie = atmosphere.mie_scattering;
 
     var accum_rayleigh = vec3<f32>(0.0);
     var accum_mie = vec3<f32>(0.0);
@@ -152,9 +149,9 @@ fn calculate_light(
 
     let cos_theta = dot(ray_direction, sun_dir);
     let p_r = phase_rayleigh(cos_theta);
-    let p_m = phase_mie(cos_theta, mie_g);
+    let p_m = phase_mie(cos_theta, atmosphere.params.z);
 
-    let sun_intensity = atmosphere.params.z;
+    let sun_intensity = atmosphere.params.w;
     let in_scattered = sun_intensity * (accum_rayleigh * beta_rayleigh * p_r + accum_mie * beta_mie * p_m);
 
     // Attenuate background scene color by atmospheric extinction

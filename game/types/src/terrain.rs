@@ -1,5 +1,7 @@
 use engine::math::Vec3;
 
+use self::terrain_field::TerrainFieldGraph;
+
 pub mod terrain_biomes;
 pub mod terrain_climate;
 pub mod terrain_density;
@@ -31,6 +33,7 @@ pub struct PlanetTerrainConfig {
     pub radius: f32,
     pub sea_level: f32,
     pub rotation_axis: Vec3,
+    pub field_graph: Option<TerrainFieldGraph>,
 
     pub geology: GeologyConfig,
     pub landforms: LandformConfig,
