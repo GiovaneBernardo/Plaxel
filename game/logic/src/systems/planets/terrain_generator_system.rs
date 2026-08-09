@@ -638,6 +638,7 @@ impl PlanetExt for Planet {
         terrain: &PlanetTerrainSamplerContext<'_>,
         face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
+        engine::profile_scope!("terrain.contour.total");
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
@@ -645,43 +646,55 @@ impl PlanetExt for Planet {
         let size_y = grid[0].len();
         let size_z = grid[0][0].len();
 
-        let mut cell_vertex = vec![vec![vec![None; size_z - 1]; size_y - 1]; size_x - 1];
+        let mut cell_vertex = {
+            engine::profile_scope!("terrain.contour.allocate_cells");
+            vec![vec![vec![None; size_z - 1]; size_y - 1]; size_x - 1]
+        };
 
-        for x in 0..(size_x - 1) {
-            for y in 0..(size_y - 1) {
-                for z in 0..(size_z - 1) {
-                    let Some(vertex) = contour_cell_vertex(
-                        grid,
-                        x,
-                        y,
-                        z,
-                        offset,
-                        resolution,
-                        terrain.planet_position,
-                        terrain.config,
-                    ) else {
-                        continue;
-                    };
-                    let index = vertices.len() as u32;
-                    vertices.push(vertex);
-                    cell_vertex[x][y][z] = Some(index);
+        {
+            engine::profile_scope!("terrain.contour.build_vertices");
+            for x in 0..(size_x - 1) {
+                for y in 0..(size_y - 1) {
+                    for z in 0..(size_z - 1) {
+                        let Some(vertex) = contour_cell_vertex(
+                            grid,
+                            x,
+                            y,
+                            z,
+                            offset,
+                            resolution,
+                            terrain.planet_position,
+                            terrain.config,
+                        ) else {
+                            continue;
+                        };
+                        let index = vertices.len() as u32;
+                        vertices.push(vertex);
+                        cell_vertex[x][y][z] = Some(index);
+                    }
                 }
             }
         }
 
-        append_x_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
-        append_y_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
-        append_z_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
-        append_transition_faces(
-            grid,
-            offset,
-            resolution * CHUNK_CELL_COUNT as f32,
-            resolution,
-            face_neighbors,
-            &mut vertices,
-            &mut indices,
-            terrain,
-        );
+        {
+            engine::profile_scope!("terrain.contour.build_regular_indices");
+            append_x_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
+            append_y_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
+            append_z_edge_indices(grid, &cell_vertex, &mut indices, face_neighbors);
+        }
+        {
+            engine::profile_scope!("terrain.contour.build_transitions");
+            append_transition_faces(
+                grid,
+                offset,
+                resolution * CHUNK_CELL_COUNT as f32,
+                resolution,
+                face_neighbors,
+                &mut vertices,
+                &mut indices,
+                terrain,
+            );
+        }
 
         (vertices, indices)
     }
@@ -694,6 +707,7 @@ impl PlanetExt for Planet {
         lod_strength: f32,
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode {
+        engine::profile_scope!("terrain.octree.create");
         let (_, max_height) = terrain_height_bounds(terrain_config, None);
         let required_diameter = (terrain_config.radius + max_height) * 2.0;
         let root_size = (required_diameter.ceil() as u32).next_power_of_two() as f32;

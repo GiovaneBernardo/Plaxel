@@ -22,7 +22,7 @@ use std::{
 };
 
 const EDITOR_LAYOUT_PATH: &str = "editor_layout.ron";
-const EDITOR_LAYOUT_VERSION: u32 = 5;
+const EDITOR_LAYOUT_VERSION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 enum EditorTab {
@@ -46,6 +46,10 @@ pub struct EditorUi {
     maximize_viewport: bool,
     floating_hierarchy: bool,
     floating_inspector: bool,
+    floating_profiler: bool,
+    performance_expanded: bool,
+    profiler_paused: bool,
+    paused_profiler_snapshot: Option<engine::profiling::ProfileSnapshot>,
     selected_render_node: Option<engine::renderer::ids::GraphPassId>,
     show_puffin_profiler: bool,
     style_applied: bool,
@@ -85,6 +89,10 @@ impl EditorUi {
                 maximize_viewport: layout.maximize_viewport,
                 floating_hierarchy: layout.floating_hierarchy,
                 floating_inspector: layout.floating_inspector,
+                floating_profiler: layout.floating_profiler,
+                performance_expanded: false,
+                profiler_paused: false,
+                paused_profiler_snapshot: None,
                 selected_render_node: None,
                 show_puffin_profiler: false,
                 style_applied: false,
@@ -127,6 +135,10 @@ impl EditorUi {
             maximize_viewport: false,
             floating_hierarchy: true,
             floating_inspector: true,
+            floating_profiler: true,
+            performance_expanded: false,
+            profiler_paused: false,
+            paused_profiler_snapshot: None,
             selected_render_node: None,
             show_puffin_profiler: false,
             style_applied: false,
@@ -175,6 +187,8 @@ impl EditorUi {
                 show_maximized.call((self, ctx, state));
             }
 
+            self.show_performance_overlay(ctx, state);
+
             {
                 engine::profile_scope!("editor.ui.save_layout");
                 let mut save_layout = subsecond::HotFn::current(Self::save_layout_if_changed);
@@ -182,6 +196,8 @@ impl EditorUi {
             }
             return;
         }
+
+        self.show_performance_overlay(ctx, state);
 
         {
             engine::profile_scope!("editor.ui.dock_area");
@@ -193,6 +209,8 @@ impl EditorUi {
                         selected_entity: &mut self.selected_entity,
                         selected_render_node: &mut self.selected_render_node,
                         show_puffin_profiler: &mut self.show_puffin_profiler,
+                        profiler_paused: &mut self.profiler_paused,
+                        paused_profiler_snapshot: &mut self.paused_profiler_snapshot,
                         assets: &mut self.assets,
                         terrain: &mut self.terrain,
                     };
@@ -264,6 +282,7 @@ impl EditorUi {
                         ui.separator();
                     }
                     ui.toggle_value(&mut self.maximize_viewport, "Maximize Game");
+                    ui.toggle_value(&mut self.floating_profiler, "Performance");
                     if self.maximize_viewport {
                         ui.toggle_value(&mut self.floating_hierarchy, "Hierarchy");
                         ui.toggle_value(&mut self.floating_inspector, "Inspector");
@@ -354,6 +373,32 @@ impl EditorUi {
         }
     }
 
+    fn show_performance_overlay(&mut self, ctx: &egui::Context, state: &engine::State) {
+        if !self.floating_profiler {
+            return;
+        }
+        let live_snapshot = state.global_resources.profiler_snapshot.clone();
+        let mut open = self.floating_profiler;
+        let mut expanded = self.performance_expanded;
+        egui::Window::new("Performance")
+            .id(egui::Id::new("floating_performance_profiler"))
+            .open(&mut open)
+            .default_pos(egui::pos2(18.0, 92.0))
+            .default_size(egui::vec2(430.0, 360.0))
+            .resizable(true)
+            .show(ctx, |ui| {
+                draw_performance_hud(
+                    ui,
+                    &live_snapshot,
+                    &mut expanded,
+                    &mut self.profiler_paused,
+                    &mut self.paused_profiler_snapshot,
+                );
+            });
+        self.floating_profiler = open;
+        self.performance_expanded = expanded;
+    }
+
     fn sanitize_selection(&mut self, state: &engine::State) {
         let Some(entity) = self.selected_entity else {
             return;
@@ -381,6 +426,7 @@ impl EditorUi {
             maximize_viewport: self.maximize_viewport,
             floating_hierarchy: self.floating_hierarchy,
             floating_inspector: self.floating_inspector,
+            floating_profiler: self.floating_profiler,
         };
 
         let Some(text) = layout.to_ron() else {
@@ -419,6 +465,7 @@ impl Drop for EditorUi {
             maximize_viewport: self.maximize_viewport,
             floating_hierarchy: self.floating_hierarchy,
             floating_inspector: self.floating_inspector,
+            floating_profiler: self.floating_profiler,
         };
 
         if let Some(text) = layout.to_ron() {
@@ -435,6 +482,12 @@ struct EditorLayout {
     maximize_viewport: bool,
     floating_hierarchy: bool,
     floating_inspector: bool,
+    #[serde(default = "default_true")]
+    floating_profiler: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn dock_has_tab(dock_state: &DockState<EditorTab>, target: EditorTab) -> bool {
@@ -618,6 +671,8 @@ struct EditorTabViewer<'a> {
     selected_entity: &'a mut Option<Entity>,
     selected_render_node: &'a mut Option<engine::renderer::ids::GraphPassId>,
     show_puffin_profiler: &'a mut bool,
+    profiler_paused: &'a mut bool,
+    paused_profiler_snapshot: &'a mut Option<engine::profiling::ProfileSnapshot>,
     assets: &'a mut AssetEditorState,
     terrain: &'a mut TerrainEditorState,
 }
@@ -674,7 +729,13 @@ impl TabViewer for EditorTabViewer<'_> {
             EditorTab::Profiler => {
                 engine::profile_scope!("editor.ui.tab.profiler");
                 let mut draw = subsecond::HotFn::current(draw_profiler);
-                draw.call((ui, &mut *self.state, &mut *self.show_puffin_profiler));
+                draw.call((
+                    ui,
+                    &mut *self.state,
+                    &mut *self.show_puffin_profiler,
+                    &mut *self.profiler_paused,
+                    &mut *self.paused_profiler_snapshot,
+                ));
             }
             EditorTab::Timeline => {
                 engine::profile_scope!("editor.ui.tab.timeline");
@@ -1569,32 +1630,28 @@ fn comma_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
     }
 }
 
-fn draw_profiler(ui: &mut Ui, state: &mut engine::State, _show_puffin_profiler: &mut bool) {
-    let snapshot = state.global_resources.profiler_snapshot.clone();
+fn draw_profiler(
+    ui: &mut Ui,
+    state: &mut engine::State,
+    _show_puffin_profiler: &mut bool,
+    profiler_paused: &mut bool,
+    paused_snapshot: &mut Option<engine::profiling::ProfileSnapshot>,
+) {
+    let live_snapshot = state.global_resources.profiler_snapshot.clone();
 
     ui.horizontal(|ui| {
         ui.label(RichText::new("Profiler").strong());
         ui.separator();
-        if state.global_resources.profiling_enabled {
-            if ui.button("Pause").clicked() {
-                state.global_resources.profiling_enabled = false;
-            }
-        } else if ui.button("Record").clicked() {
-            state.global_resources.profiling_enabled = true;
-        }
+        profiler_pause_button(ui, &live_snapshot, profiler_paused, paused_snapshot);
         if ui.button("Capture GPU Frame").clicked() {
             state.global_resources.frame_capturer.request_capture();
         }
         ui.separator();
-        ui.label(if state.global_resources.profiling_enabled {
-            "recording"
-        } else {
-            "paused"
-        });
+        ui.label(if *profiler_paused { "paused" } else { "live" });
         ui.separator();
         ui.label(format!(
             "Tracy {}",
-            if snapshot.tracy_enabled {
+            if live_snapshot.tracy_enabled {
                 "compiled"
             } else {
                 "off"
@@ -1602,7 +1659,7 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, _show_puffin_profiler: 
         ));
         ui.label(format!(
             "Puffin {}",
-            if snapshot.puffin_enabled {
+            if live_snapshot.puffin_enabled {
                 "compiled"
             } else {
                 "off"
@@ -1618,6 +1675,12 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, _show_puffin_profiler: 
     });
     ui.separator();
 
+    let snapshot = displayed_profiler_snapshot(&live_snapshot, *profiler_paused, paused_snapshot);
+
+    draw_live_cpu_profiler(ui, snapshot);
+    ui.separator();
+    draw_gpu_profiler(ui, &snapshot.gpu, true);
+    ui.separator();
     draw_cpu_profiler(ui, &snapshot.cpu);
     ui.separator();
 
@@ -1699,6 +1762,298 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, _show_puffin_profiler: 
             }
         });
     });
+}
+
+#[derive(Default)]
+struct LiveCoreRow {
+    intervals: Vec<(f64, f64)>,
+    activities: std::collections::HashMap<String, f64>,
+    migrations: u32,
+}
+
+fn live_core_rows(
+    snapshot: &engine::profiling::ProfileSnapshot,
+) -> (f64, std::collections::BTreeMap<u32, LiveCoreRow>) {
+    let Some(frame) = snapshot.latest_frame.as_ref() else {
+        return (0.0, std::collections::BTreeMap::new());
+    };
+    let frame_us = frame.total_us.max(1.0);
+    let mut rows = std::collections::BTreeMap::<u32, LiveCoreRow>::new();
+    for scope in &frame.scopes {
+        let Some(core) = scope.processor_start else {
+            continue;
+        };
+        let row = rows.entry(core).or_default();
+        let start = scope.start_us.clamp(0.0, frame_us);
+        let end = (scope.start_us + scope.duration_us).clamp(start, frame_us);
+        if scope.name != "frame.total" && end > start {
+            row.intervals.push((start, end));
+        }
+        *row.activities.entry(scope.name.clone()).or_default() += scope.duration_us;
+        if scope.processor_end.is_some_and(|end_core| end_core != core) {
+            row.migrations += 1;
+        }
+    }
+    (frame_us, rows)
+}
+
+fn interval_union_us(intervals: &mut [(f64, f64)]) -> f64 {
+    if intervals.is_empty() {
+        return 0.0;
+    }
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut total = 0.0;
+    let (mut start, mut end) = intervals[0];
+    for &(next_start, next_end) in &intervals[1..] {
+        if next_start <= end {
+            end = end.max(next_end);
+        } else {
+            total += end - start;
+            (start, end) = (next_start, next_end);
+        }
+    }
+    total + end - start
+}
+
+fn top_activities(row: &LiveCoreRow, count: usize) -> String {
+    let mut activities = row.activities.iter().collect::<Vec<_>>();
+    activities.sort_by(|a, b| b.1.total_cmp(a.1));
+    let text = activities
+        .into_iter()
+        .filter(|(name, _)| name.as_str() != "frame.total")
+        .take(count)
+        .map(|(name, duration)| format!("{} {:.2}ms", compact_scope_name(name), duration / 1000.0))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if text.is_empty() {
+        "idle / uninstrumented".to_string()
+    } else {
+        text
+    }
+}
+
+fn compact_scope_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn draw_cpu_core_rows(ui: &mut Ui, snapshot: &engine::profiling::ProfileSnapshot, detailed: bool) {
+    let (frame_us, mut rows) = live_core_rows(snapshot);
+    let logical_cores = std::thread::available_parallelism().map_or(1, usize::from);
+    if frame_us <= 0.0 {
+        ui.label("No live CPU frame recorded yet.");
+        return;
+    }
+
+    egui::Grid::new(if detailed {
+        "live_cpu_core_grid"
+    } else {
+        "floating_cpu_core_grid"
+    })
+    .num_columns(3)
+    .spacing(egui::vec2(10.0, 3.0))
+    .striped(true)
+    .show(ui, |ui| {
+        for core in 0..logical_cores {
+            let row = rows.entry(core as u32).or_default();
+            let busy = interval_union_us(&mut row.intervals).min(frame_us);
+            let utilization = (busy / frame_us) as f32;
+            ui.monospace(format!("CPU {core:02}"));
+            ui.add(
+                egui::ProgressBar::new(utilization)
+                    .desired_width(if detailed { 150.0 } else { 100.0 })
+                    .text(format!("{:>5.1}%", utilization * 100.0)),
+            );
+            let activity = top_activities(row, if detailed { 4 } else { 2 });
+            let label = ui.label(activity);
+            if row.migrations > 0 {
+                label.on_hover_text(format!(
+                    "{} scope(s) migrated to another logical CPU before ending",
+                    row.migrations
+                ));
+            }
+            ui.end_row();
+        }
+    });
+}
+
+fn draw_live_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::ProfileSnapshot) {
+    egui::CollapsingHeader::new(RichText::new("Live CPU cores and threads").strong())
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.small(
+                "Updated from the latest frame. Core assignment is observed at scope entry; the OS may migrate threads while a scope runs.",
+            );
+            draw_cpu_core_rows(ui, snapshot, true);
+
+            let Some(frame) = snapshot.latest_frame.as_ref() else {
+                return;
+            };
+            let mut threads = std::collections::BTreeMap::<
+                (String, u64),
+                std::collections::HashMap<String, f64>,
+            >::new();
+            for scope in &frame.scopes {
+                *threads
+                    .entry((scope.thread_name.clone(), scope.thread_id))
+                    .or_default()
+                    .entry(scope.name.clone())
+                    .or_default() += scope.duration_us;
+            }
+            egui::CollapsingHeader::new("Thread work this frame")
+                .default_open(true)
+                .show(ui, |ui| {
+                    for ((thread_name, thread_id), activities) in threads {
+                        let row = LiveCoreRow {
+                            activities,
+                            ..Default::default()
+                        };
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("{thread_name} [{thread_id:08x}]"));
+                            ui.label(top_activities(&row, 5));
+                        });
+                    }
+                });
+        });
+}
+
+fn draw_gpu_profiler(
+    ui: &mut Ui,
+    snapshot: &engine::profiling::gpu::GpuProfileSnapshot,
+    detailed: bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Live GPU passes").strong());
+        ui.separator();
+        ui.label(format!(
+            "timestamps {}",
+            if snapshot.timestamp_supported {
+                "on"
+            } else {
+                "unsupported"
+            }
+        ));
+        ui.label(format!(
+            "pipeline statistics {}",
+            if snapshot.pipeline_statistics_supported {
+                "on"
+            } else {
+                "unsupported"
+            }
+        ));
+    });
+    let Some(frame) = snapshot.latest_frame.as_ref() else {
+        ui.label("Waiting for asynchronous GPU query results.");
+        return;
+    };
+    ui.small(format!(
+        "GPU frame {} · summed pass time {:.3} ms · asynchronous readback",
+        frame.index, frame.summed_pass_ms
+    ));
+
+    egui::Grid::new(if detailed {
+        "gpu_pass_profile_grid"
+    } else {
+        "floating_gpu_pass_profile_grid"
+    })
+    .num_columns(if detailed { 7 } else { 2 })
+    .spacing(egui::vec2(10.0, 3.0))
+    .striped(true)
+    .show(ui, |ui| {
+        ui.label(RichText::new("Pass").strong());
+        ui.label(RichText::new("GPU ms").strong());
+        if detailed {
+            for header in ["Vertex", "Clip in", "Prims out", "Fragment", "Compute"] {
+                ui.label(RichText::new(header).strong());
+            }
+        }
+        ui.end_row();
+        for pass in &frame.passes {
+            ui.label(compact_scope_name(&pass.name))
+                .on_hover_text(&pass.name);
+            ui.monospace(
+                pass.duration_ms
+                    .map(|duration| format!("{duration:.3}"))
+                    .unwrap_or_else(|| "—".to_string()),
+            );
+            if detailed {
+                let statistics = pass.statistics.unwrap_or_default();
+                for value in [
+                    statistics.vertex_shader_invocations,
+                    statistics.clipper_invocations,
+                    statistics.clipper_primitives_out,
+                    statistics.fragment_shader_invocations,
+                    statistics.compute_shader_invocations,
+                ] {
+                    ui.monospace(value.to_string());
+                }
+            }
+            ui.end_row();
+        }
+    });
+}
+
+fn draw_performance_hud(
+    ui: &mut Ui,
+    live_snapshot: &engine::profiling::ProfileSnapshot,
+    expanded: &mut bool,
+    profiler_paused: &mut bool,
+    paused_snapshot: &mut Option<engine::profiling::ProfileSnapshot>,
+) {
+    ui.horizontal(|ui| {
+        profiler_pause_button(ui, live_snapshot, profiler_paused, paused_snapshot);
+        ui.separator();
+        ui.toggle_value(expanded, if *expanded { "Compact" } else { "Expand" });
+        ui.separator();
+        let snapshot =
+            displayed_profiler_snapshot(live_snapshot, *profiler_paused, paused_snapshot);
+        let cpu_ms = snapshot
+            .latest_frame
+            .as_ref()
+            .map_or(0.0, |frame| frame.total_us / 1000.0);
+        let gpu_ms = snapshot
+            .gpu
+            .latest_frame
+            .as_ref()
+            .map_or(0.0, |frame| frame.summed_pass_ms);
+        ui.monospace(format!("CPU {cpu_ms:.2} ms"));
+        ui.monospace(format!("GPU Σ {gpu_ms:.2} ms"));
+    });
+    let snapshot = displayed_profiler_snapshot(live_snapshot, *profiler_paused, paused_snapshot);
+    ui.separator();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label(RichText::new("Logical CPUs").strong());
+        draw_cpu_core_rows(ui, snapshot, *expanded);
+        ui.separator();
+        draw_gpu_profiler(ui, &snapshot.gpu, *expanded);
+    });
+}
+
+fn profiler_pause_button(
+    ui: &mut Ui,
+    live_snapshot: &engine::profiling::ProfileSnapshot,
+    paused: &mut bool,
+    paused_snapshot: &mut Option<engine::profiling::ProfileSnapshot>,
+) {
+    if ui
+        .button(if *paused { "Resume" } else { "Pause" })
+        .clicked()
+    {
+        *paused = !*paused;
+        *paused_snapshot = paused.then(|| live_snapshot.clone());
+    }
+}
+
+fn displayed_profiler_snapshot<'a>(
+    live_snapshot: &'a engine::profiling::ProfileSnapshot,
+    paused: bool,
+    paused_snapshot: &'a mut Option<engine::profiling::ProfileSnapshot>,
+) -> &'a engine::profiling::ProfileSnapshot {
+    if paused {
+        paused_snapshot.get_or_insert_with(|| live_snapshot.clone())
+    } else {
+        *paused_snapshot = None;
+        live_snapshot
+    }
 }
 
 fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileSnapshot) {

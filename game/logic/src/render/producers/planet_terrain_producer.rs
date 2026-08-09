@@ -97,6 +97,7 @@ struct GpuPlanetChunk {
 }
 
 pub fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Commands) {
+    engine::profile_scope!("terrain.render.init");
     if ctx
         .globals
         .renderer
@@ -137,6 +138,7 @@ pub fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Com
 }
 
 pub fn planet_terrain_producer_update(ctx: &mut SystemContext, _commands: &mut Commands) {
+    engine::profile_scope!("terrain.render.queue_frames");
     let Some(queue) = ctx.world.get_resource::<PlanetTerrainRenderQueue>() else {
         return;
     };
@@ -576,6 +578,7 @@ impl PlanetTerrainProducer {
         remove: Vec<NodeKey>,
         insert: Vec<PendingTerrainChunk>,
     ) {
+        engine::profile_scope!("terrain.render.replace_chunks");
         if !self.planets.contains_key(&planet) {
             self.emit_event(PlanetTerrainEvent::ReplacementFailed {
                 planet,
@@ -584,25 +587,29 @@ impl PlanetTerrainProducer {
             return;
         }
 
-        let mut uploaded = Vec::with_capacity(insert.len());
-        for chunk in &insert {
-            if chunk.indices.is_empty() {
-                continue;
-            }
-            match PlanetTerrainProducer::upload_chunk(api, chunk) {
-                Ok(mesh) => uploaded.push((chunk.key, chunk.node_origin_planet, mesh)),
-                Err(error) => {
-                    for (_, _, mesh) in uploaded {
-                        api.remove_mesh(mesh);
+        let uploaded = {
+            engine::profile_scope!("terrain.render.upload_meshes");
+            let mut uploaded = Vec::with_capacity(insert.len());
+            for chunk in &insert {
+                if chunk.indices.is_empty() {
+                    continue;
+                }
+                match PlanetTerrainProducer::upload_chunk(api, chunk) {
+                    Ok(mesh) => uploaded.push((chunk.key, chunk.node_origin_planet, mesh)),
+                    Err(error) => {
+                        for (_, _, mesh) in uploaded {
+                            api.remove_mesh(mesh);
+                        }
+                        self.emit_event(PlanetTerrainEvent::ReplacementFailed {
+                            planet,
+                            reason: error.to_string(),
+                        });
+                        return;
                     }
-                    self.emit_event(PlanetTerrainEvent::ReplacementFailed {
-                        planet,
-                        reason: error.to_string(),
-                    });
-                    return;
                 }
             }
-        }
+            uploaded
+        };
 
         let state = self.planets.get_mut(&planet).unwrap();
         if remove_all {
@@ -656,6 +663,7 @@ impl PlanetTerrainProducer {
     }
 
     fn rebuild_batches(&mut self, api: &mut dyn RendererAPI) {
+        engine::profile_scope!("terrain.render.rebuild_batches");
         let mut grouped = HashMap::<TerrainBatchKey, Vec<DrawIndexedIndirectArgs>>::new();
 
         for (&planet, state) in &self.planets {
@@ -734,6 +742,7 @@ impl RenderProducer for PlanetTerrainProducer {
     }
 
     fn prepare_frame(&mut self, ctx: &mut ProducerPrepareContext<'_>) {
+        engine::profile_scope!("terrain.render.prepare_frame");
         let commands: Vec<_> = self.commands.try_iter().collect();
         self.commands_processed.add(commands.len());
 

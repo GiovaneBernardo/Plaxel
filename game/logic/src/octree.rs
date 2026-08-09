@@ -65,6 +65,7 @@ pub fn build_node(
     lod_strength: f32,
     terrain_edits: &PlanetTerrainEdits,
 ) -> OctreeNode {
+    engine::profile_scope!("terrain.octree.build_nodes");
     build_node_at_level(
         min,
         size,
@@ -846,6 +847,7 @@ pub fn collect_child_mesh_removals(
     children: &[Box<OctreeNode>; 8],
     changes: &mut Vec<OctreeChanges>,
 ) {
+    engine::profile_scope!("terrain.octree.update_topology");
     for child in children {
         if let Some(grandchildren) = child.children.as_ref() {
             collect_child_mesh_removals(planet_entity, grandchildren, changes);

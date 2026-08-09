@@ -14,6 +14,7 @@ struct Worker {
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct QueuedJob {
+    name: String,
     priority: Arc<AtomicU32>,
     sequence: u64,
     job: Job,
@@ -82,14 +83,15 @@ impl JobSystem {
                                 })
                                 .map(|(index, _)| index)
                                 .unwrap();
-                            jobs.swap_remove(best).job
+                            jobs.swap_remove(best)
                         };
 
                         queued.fetch_sub(1, Ordering::Relaxed);
                         running.fetch_add(1, Ordering::Relaxed);
                         {
                             crate::profile_scope!("job.execute");
-                            job();
+                            crate::profile_dynamic_scope!("job.named", job.name.clone());
+                            (job.job)();
                         }
                         running.fetch_sub(1, Ordering::Relaxed);
                         completed.fetch_add(1, Ordering::Relaxed);
@@ -118,11 +120,34 @@ impl JobSystem {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.spawn_prioritized(0, job).map(|_| ())
+        self.spawn_named("job", job)
+    }
+
+    pub fn spawn_named<F>(
+        &self,
+        name: impl Into<String>,
+        job: F,
+    ) -> Result<(), crossbeam_channel::SendError<Job>>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_prioritized_named(name, 0, job).map(|_| ())
     }
 
     pub fn spawn_prioritized<F>(
         &self,
+        priority: u32,
+        job: F,
+    ) -> Result<JobPriorityHandle, crossbeam_channel::SendError<Job>>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_prioritized_named("job", priority, job)
+    }
+
+    pub fn spawn_prioritized_named<F>(
+        &self,
+        name: impl Into<String>,
         priority: u32,
         job: F,
     ) -> Result<JobPriorityHandle, crossbeam_channel::SendError<Job>>
@@ -139,6 +164,7 @@ impl JobSystem {
             priority: Arc::clone(&priority),
         };
         let queued_job = QueuedJob {
+            name: name.into(),
             priority,
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
             job,

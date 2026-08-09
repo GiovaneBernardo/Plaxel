@@ -435,6 +435,239 @@ struct WgpuPipelineKey {
     bind_group_layouts: Vec<BindGroupLayoutHandle>,
 }
 
+const MAX_GPU_PROFILE_PASSES: u32 = 128;
+const TIMESTAMP_VALUES_PER_PASS: u32 = 2;
+const STAT_VALUES_PER_PASS: u32 = 5;
+const TIMESTAMP_READBACK_BYTES: u64 =
+    MAX_GPU_PROFILE_PASSES as u64 * TIMESTAMP_VALUES_PER_PASS as u64 * 8;
+const STAT_READBACK_OFFSET: u64 = TIMESTAMP_READBACK_BYTES;
+const GPU_PROFILE_READBACK_BYTES: u64 =
+    STAT_READBACK_OFFSET + MAX_GPU_PROFILE_PASSES as u64 * STAT_VALUES_PER_PASS as u64 * 8;
+
+struct GpuProfileQueryIndices {
+    timestamp_start: Option<u32>,
+    timestamp_end: Option<u32>,
+    statistics: Option<u32>,
+}
+
+struct GpuProfileReadbackSlot {
+    timestamp_resolve: Option<wgpu::Buffer>,
+    statistics_resolve: Option<wgpu::Buffer>,
+    staging: wgpu::Buffer,
+    receiver: Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    frame_index: u64,
+    pass_names: Vec<String>,
+}
+
+struct WgpuGpuProfiler {
+    timestamp_queries: Option<wgpu::QuerySet>,
+    statistics_queries: Option<wgpu::QuerySet>,
+    slots: Vec<GpuProfileReadbackSlot>,
+    next_slot: usize,
+    frame_index: u64,
+    timestamp_period: f32,
+}
+
+impl WgpuGpuProfiler {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, features: wgpu::Features) -> Self {
+        let timestamps = features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let statistics = features.contains(wgpu::Features::PIPELINE_STATISTICS_QUERY);
+        let timestamp_queries = timestamps.then(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("plaxel_gpu_timestamp_queries"),
+                ty: wgpu::QueryType::Timestamp,
+                count: MAX_GPU_PROFILE_PASSES * TIMESTAMP_VALUES_PER_PASS,
+            })
+        });
+        let statistics_queries = statistics.then(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("plaxel_gpu_pipeline_statistics"),
+                ty: wgpu::QueryType::PipelineStatistics(wgpu::PipelineStatisticsTypes::all()),
+                count: MAX_GPU_PROFILE_PASSES,
+            })
+        });
+
+        let slots = if timestamps || statistics {
+            (0..3)
+                .map(|index| GpuProfileReadbackSlot {
+                    timestamp_resolve: timestamps.then(|| {
+                        device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(&format!("gpu_timestamp_resolve_{index}")),
+                            size: TIMESTAMP_READBACK_BYTES,
+                            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                            mapped_at_creation: false,
+                        })
+                    }),
+                    statistics_resolve: statistics.then(|| {
+                        device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(&format!("gpu_statistics_resolve_{index}")),
+                            size: GPU_PROFILE_READBACK_BYTES - STAT_READBACK_OFFSET,
+                            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                            mapped_at_creation: false,
+                        })
+                    }),
+                    staging: device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("gpu_profile_readback_{index}")),
+                        size: GPU_PROFILE_READBACK_BYTES,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    }),
+                    receiver: None,
+                    frame_index: 0,
+                    pass_names: Vec::new(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        crate::profiling::gpu::configure(timestamps, statistics, 3);
+        Self {
+            timestamp_queries,
+            statistics_queries,
+            slots,
+            next_slot: 0,
+            frame_index: 0,
+            timestamp_period: queue.get_timestamp_period(),
+        }
+    }
+
+    fn begin_frame(&mut self) -> Option<usize> {
+        self.frame_index = self.frame_index.wrapping_add(1);
+        if self.slots.is_empty() {
+            return None;
+        }
+        for offset in 0..self.slots.len() {
+            let index = (self.next_slot + offset) % self.slots.len();
+            if self.slots[index].receiver.is_none() {
+                self.next_slot = (index + 1) % self.slots.len();
+                let slot = &mut self.slots[index];
+                slot.frame_index = self.frame_index;
+                slot.pass_names.clear();
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn register_pass(&mut self, slot: usize, name: &str) -> Option<GpuProfileQueryIndices> {
+        let pass = self.slots[slot].pass_names.len() as u32;
+        if pass >= MAX_GPU_PROFILE_PASSES {
+            return None;
+        }
+        self.slots[slot].pass_names.push(name.to_string());
+        Some(GpuProfileQueryIndices {
+            timestamp_start: self
+                .timestamp_queries
+                .as_ref()
+                .map(|_| pass * TIMESTAMP_VALUES_PER_PASS),
+            timestamp_end: self
+                .timestamp_queries
+                .as_ref()
+                .map(|_| pass * TIMESTAMP_VALUES_PER_PASS + 1),
+            statistics: self.statistics_queries.as_ref().map(|_| pass),
+        })
+    }
+
+    fn resolve(&self, slot: usize, encoder: &mut wgpu::CommandEncoder) {
+        let pass_count = self.slots[slot].pass_names.len() as u32;
+        if pass_count == 0 {
+            return;
+        }
+        let readback = &self.slots[slot];
+        if let (Some(queries), Some(resolve)) =
+            (&self.timestamp_queries, &readback.timestamp_resolve)
+        {
+            let count = pass_count * TIMESTAMP_VALUES_PER_PASS;
+            encoder.resolve_query_set(queries, 0..count, resolve, 0);
+            encoder.copy_buffer_to_buffer(resolve, 0, &readback.staging, 0, count as u64 * 8);
+        }
+        if let (Some(queries), Some(resolve)) =
+            (&self.statistics_queries, &readback.statistics_resolve)
+        {
+            encoder.resolve_query_set(queries, 0..pass_count, resolve, 0);
+            encoder.copy_buffer_to_buffer(
+                resolve,
+                0,
+                &readback.staging,
+                STAT_READBACK_OFFSET,
+                pass_count as u64 * STAT_VALUES_PER_PASS as u64 * 8,
+            );
+        }
+    }
+
+    fn request_readback(&mut self, slot: usize) {
+        if self.slots[slot].pass_names.is_empty() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.slots[slot]
+            .staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        self.slots[slot].receiver = Some(receiver);
+    }
+
+    fn poll(&mut self, device: &wgpu::Device) {
+        let _ = device.poll(wgpu::PollType::Poll);
+        for slot in &mut self.slots {
+            let result = slot
+                .receiver
+                .as_ref()
+                .and_then(|receiver| receiver.try_recv().ok());
+            let Some(result) = result else {
+                continue;
+            };
+            slot.receiver = None;
+            if let Err(error) = result {
+                log::warn!("GPU profiler readback failed: {error}");
+                continue;
+            }
+
+            let mapped = slot.staging.slice(..).get_mapped_range();
+            let mut passes = Vec::with_capacity(slot.pass_names.len());
+            for (index, name) in slot.pass_names.iter().enumerate() {
+                let duration_ms = self.timestamp_queries.as_ref().map(|_| {
+                    let start = read_u64(&mapped, index * 16);
+                    let end = read_u64(&mapped, index * 16 + 8);
+                    end.wrapping_sub(start) as f64 * f64::from(self.timestamp_period) / 1_000_000.0
+                });
+                let statistics = self.statistics_queries.as_ref().map(|_| {
+                    let base = STAT_READBACK_OFFSET as usize + index * 40;
+                    crate::profiling::gpu::GpuPipelineStatistics {
+                        vertex_shader_invocations: read_u64(&mapped, base),
+                        clipper_invocations: read_u64(&mapped, base + 8),
+                        clipper_primitives_out: read_u64(&mapped, base + 16),
+                        fragment_shader_invocations: read_u64(&mapped, base + 24),
+                        compute_shader_invocations: read_u64(&mapped, base + 32),
+                    }
+                });
+                passes.push(crate::profiling::gpu::GpuPassSample {
+                    name: name.clone(),
+                    duration_ms,
+                    statistics,
+                });
+            }
+            let summed_pass_ms = passes.iter().filter_map(|pass| pass.duration_ms).sum();
+            drop(mapped);
+            slot.staging.unmap();
+            crate::profiling::gpu::publish(crate::profiling::gpu::GpuFrameSample {
+                index: slot.frame_index,
+                passes,
+                summed_pass_ms,
+            });
+        }
+    }
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    let mut value = [0; 8];
+    value.copy_from_slice(&bytes[offset..offset + 8]);
+    u64::from_ne_bytes(value)
+}
+
 pub struct WgpuBackend {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -466,6 +699,7 @@ pub struct WgpuBackend {
     uploaded_textures_last_available_index: u32,
     uploaded_materials: Vec<GpuMaterialData>,
     pipeline_cache: Option<PipelineCache>,
+    gpu_profiler: WgpuGpuProfiler,
 }
 
 pub struct WgpuRenderContext<'a> {
@@ -672,6 +906,8 @@ impl RendererAPI for WgpuBackend {
         views: &crate::renderer::RenderViewRegistry,
     ) -> anyhow::Result<()> {
         crate::profile_scope!("wgpu.render");
+        self.gpu_profiler.poll(&self.device);
+        let gpu_profile_slot = self.gpu_profiler.begin_frame();
         //match state.render(&mut self.on_render) {
         //    Ok(_) => {}
         //    // Reconfigure the surface if it's lost or outdated
@@ -730,6 +966,12 @@ impl RendererAPI for WgpuBackend {
                 "render.pass.run",
                 format!("render.pass.run.{}", node.profile_name())
             );
+            let descriptor = node.describe_pass();
+            let has_render_pass =
+                !descriptor.color_attachments.is_empty() || descriptor.depth_attachment.is_some();
+            let gpu_queries = gpu_profile_slot
+                .filter(|_| has_render_pass)
+                .and_then(|slot| self.gpu_profiler.register_pass(slot, node.profile_name()));
             self.render_node(
                 *index,
                 node.as_mut(),
@@ -739,12 +981,20 @@ impl RendererAPI for WgpuBackend {
                 &view,
                 producers,
                 views,
+                gpu_queries,
             );
+        }
+
+        if let Some(slot) = gpu_profile_slot {
+            self.gpu_profiler.resolve(slot, &mut encoder);
         }
 
         {
             crate::profile_scope!("wgpu.submit");
             self.queue.submit(std::iter::once(encoder.finish()));
+        }
+        if let Some(slot) = gpu_profile_slot {
+            self.gpu_profiler.request_readback(slot);
         }
         crate::profile_counter!("render.nodes", render_graph.nodes.len() as f64);
         {
@@ -1723,7 +1973,9 @@ impl WgpuBackend {
             | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
             | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
             | wgpu::Features::INDIRECT_FIRST_INSTANCE
-            | wgpu::Features::PIPELINE_CACHE;
+            | wgpu::Features::PIPELINE_CACHE
+            | wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::PIPELINE_STATISTICS_QUERY;
         let enabled_features = wanted_features & supported_features;
 
         if !supported_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
@@ -1813,6 +2065,8 @@ impl WgpuBackend {
                     })
                 });
 
+            let gpu_profiler = WgpuGpuProfiler::new(&device, &queue, enabled_features);
+
             Ok(Self {
                 window,
                 device,
@@ -1844,6 +2098,7 @@ impl WgpuBackend {
                 uploaded_textures_last_available_index: 0,
                 uploaded_materials: Vec::new(),
                 pipeline_cache,
+                gpu_profiler,
             })
         }
     }
@@ -1858,6 +2113,7 @@ impl WgpuBackend {
         view: &wgpu::TextureView,
         producers: &crate::renderer::RenderProducerRegistry,
         views: &crate::renderer::RenderViewRegistry,
+        gpu_queries: Option<GpuProfileQueryIndices>,
     ) {
         crate::profile_scope!("wgpu.render_node");
         let render_node_descriptor = node.describe_pass();
@@ -1912,14 +2168,30 @@ impl WgpuBackend {
             return;
         }
 
-        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let timestamp_writes = gpu_queries.as_ref().and_then(|indices| {
+            self.gpu_profiler
+                .timestamp_queries
+                .as_ref()
+                .map(|query_set| wgpu::RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: indices.timestamp_start,
+                    end_of_pass_write_index: indices.timestamp_end,
+                })
+        });
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(render_node_descriptor.name),
             color_attachments: &color_attachments,
             depth_stencil_attachment: depth_stencil_attachment,
             occlusion_query_set: None,
-            timestamp_writes: None,
+            timestamp_writes,
             multiview_mask: None,
         });
+
+        if let Some(index) = gpu_queries.as_ref().and_then(|indices| indices.statistics)
+            && let Some(query_set) = &self.gpu_profiler.statistics_queries
+        {
+            render_pass.begin_pipeline_statistics_query(query_set, index);
+        }
 
         let mut ctx = WgpuRenderContext {
             backend: self,
@@ -1927,6 +2199,13 @@ impl WgpuBackend {
         };
         node.run(&mut ctx, render_resources);
         producers.record_pass(graph_pass, views, &mut ctx, render_resources);
+        if gpu_queries
+            .as_ref()
+            .and_then(|indices| indices.statistics)
+            .is_some()
+        {
+            ctx.pass.end_pipeline_statistics_query();
+        }
 
         //for render_data in &node.render_data {
         //    render_pass.set_pipeline(render_data.pipeline);

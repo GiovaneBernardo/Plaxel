@@ -1,20 +1,32 @@
 use std::{
-    collections::VecDeque,
+    cell::Cell,
+    collections::{HashMap, VecDeque},
+    hash::{DefaultHasher, Hash, Hasher},
     sync::{
         LazyLock, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
 pub mod cpu;
+pub mod gpu;
 
 const MAX_FRAMES: usize = 120;
-const MAX_SCOPES_PER_FRAME: usize = 1024;
+// Terrain generation can fan out across many chunk jobs in one frame. Keep
+// enough samples to retain the nested phase scopes instead of silently making
+// late-running workers look uninstrumented.
+const MAX_SCOPES_PER_FRAME: usize = 4096;
 const MAX_COUNTERS_PER_FRAME: usize = 256;
 
 static ENABLED: AtomicBool = AtomicBool::new(cfg!(feature = "profiling"));
 static PROFILER: LazyLock<Mutex<Profiler>> = LazyLock::new(|| Mutex::new(Profiler::new()));
+static CLOCK_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+static NEXT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static SCOPE_DEPTH: Cell<u16> = const { Cell::new(0) };
+}
 
 #[cfg(feature = "tracy")]
 static TRACY_CLIENT: LazyLock<Mutex<Option<tracy_client::Client>>> =
@@ -24,6 +36,12 @@ static TRACY_CLIENT: LazyLock<Mutex<Option<tracy_client::Client>>> =
 pub struct ScopeSample {
     pub name: String,
     pub duration_us: f64,
+    pub start_us: f64,
+    pub depth: u16,
+    pub thread_id: u64,
+    pub thread_name: String,
+    pub processor_start: Option<u32>,
+    pub processor_end: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +77,7 @@ pub struct ProfileSnapshot {
     pub average_frame_us: f64,
     pub max_frame_us: f64,
     pub cpu: cpu::CpuProfileSnapshot,
+    pub gpu: gpu::GpuProfileSnapshot,
 }
 
 impl Default for ProfileSnapshot {
@@ -73,6 +92,7 @@ impl Default for ProfileSnapshot {
             average_frame_us: 0.0,
             max_frame_us: 0.0,
             cpu: cpu::snapshot(),
+            gpu: gpu::snapshot(),
         }
     }
 }
@@ -81,12 +101,23 @@ struct Profiler {
     frames: VecDeque<FrameSample>,
     current: Option<FrameSample>,
     frame_start: Option<Instant>,
+    frame_start_clock_us: u64,
+    active_scopes: HashMap<u64, ActiveScope>,
 }
 
 pub struct Scope {
-    name: String,
-    start: Instant,
+    id: u64,
     enabled: bool,
+}
+
+#[derive(Clone)]
+struct ActiveScope {
+    name: String,
+    start_clock_us: u64,
+    depth: u16,
+    thread_id: u64,
+    thread_name: String,
+    processor_start: Option<u32>,
 }
 
 impl Profiler {
@@ -95,37 +126,75 @@ impl Profiler {
             frames: VecDeque::with_capacity(MAX_FRAMES),
             current: None,
             frame_start: None,
+            frame_start_clock_us: 0,
+            active_scopes: HashMap::new(),
         }
     }
 }
 
 impl Scope {
     pub fn new(name: &'static str) -> Self {
-        let enabled = is_enabled();
-        Self {
-            name: if enabled {
-                name.to_string()
-            } else {
-                String::new()
-            },
-            start: Instant::now(),
-            enabled,
-        }
+        Self::new_owned(name)
     }
 
     pub fn new_owned(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            start: Instant::now(),
-            enabled: is_enabled(),
+        let enabled = is_enabled();
+        if !enabled {
+            return Self {
+                id: 0,
+                enabled: false,
+            };
         }
+
+        let start_clock_us = micros_since_clock(Instant::now());
+        let depth = if enabled {
+            SCOPE_DEPTH.with(|depth| {
+                let current = depth.get();
+                depth.set(current.saturating_add(1));
+                current
+            })
+        } else {
+            0
+        };
+        let thread = std::thread::current();
+        let id = NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
+        PROFILER.lock().unwrap().active_scopes.insert(
+            id,
+            ActiveScope {
+                name: name.into(),
+                start_clock_us,
+                depth,
+                thread_id: thread_id(&thread),
+                thread_name: thread.name().unwrap_or("unnamed").to_string(),
+                processor_start: current_processor(),
+            },
+        );
+        Self { id, enabled }
     }
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
         if self.enabled {
-            record_scope(&self.name, self.start.elapsed());
+            SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+            let end_clock_us = micros_since_clock(Instant::now());
+            let mut profiler = PROFILER.lock().unwrap();
+            if let Some(active) = profiler.active_scopes.remove(&self.id) {
+                let frame_start = profiler.frame_start_clock_us;
+                if let Some(frame) = profiler.current.as_mut()
+                    && frame.scopes.len() < MAX_SCOPES_PER_FRAME
+                    && end_clock_us > frame_start
+                {
+                    let start_clock_us = active.start_clock_us.max(frame_start);
+                    frame.scopes.push(scope_sample(
+                        &active,
+                        start_clock_us,
+                        end_clock_us,
+                        frame_start,
+                        current_processor(),
+                    ));
+                }
+            }
         }
     }
 }
@@ -174,14 +243,16 @@ pub fn begin_frame(index: u64) {
     #[cfg(feature = "puffin")]
     puffin::GlobalProfiler::lock().new_frame();
 
+    let now = Instant::now();
     let mut profiler = PROFILER.lock().unwrap();
+    profiler.frame_start_clock_us = micros_since_clock(now);
     profiler.current = Some(FrameSample {
         index,
         total_us: 0.0,
         scopes: Vec::with_capacity(128),
         counters: Vec::with_capacity(32),
     });
-    profiler.frame_start = Some(Instant::now());
+    profiler.frame_start = Some(now);
 }
 
 pub fn end_frame() {
@@ -198,6 +269,22 @@ pub fn end_frame() {
 
     if let Some(mut frame) = profiler.current.take() {
         frame.total_us = total_us;
+        let frame_end_clock_us = micros_since_clock(Instant::now());
+        for active in profiler.active_scopes.values() {
+            if frame.scopes.len() >= MAX_SCOPES_PER_FRAME {
+                break;
+            }
+            let start_clock_us = active.start_clock_us.max(profiler.frame_start_clock_us);
+            if frame_end_clock_us > start_clock_us {
+                frame.scopes.push(scope_sample(
+                    active,
+                    start_clock_us,
+                    frame_end_clock_us,
+                    profiler.frame_start_clock_us,
+                    None,
+                ));
+            }
+        }
         profiler.frames.push_back(frame);
         while profiler.frames.len() > MAX_FRAMES {
             profiler.frames.pop_front();
@@ -256,19 +343,50 @@ pub fn snapshot() -> ProfileSnapshot {
         average_frame_us,
         max_frame_us,
         cpu: cpu::snapshot(),
+        gpu: gpu::snapshot(),
     }
 }
 
-fn record_scope(name: &str, duration: Duration) {
-    let mut profiler = PROFILER.lock().unwrap();
-    if let Some(frame) = profiler.current.as_mut() {
-        if frame.scopes.len() < MAX_SCOPES_PER_FRAME {
-            frame.scopes.push(ScopeSample {
-                name: name.to_string(),
-                duration_us: duration_us(duration),
-            });
-        }
+fn micros_since_clock(instant: Instant) -> u64 {
+    instant
+        .saturating_duration_since(*CLOCK_START)
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn scope_sample(
+    active: &ActiveScope,
+    start_clock_us: u64,
+    end_clock_us: u64,
+    frame_start_clock_us: u64,
+    processor_end: Option<u32>,
+) -> ScopeSample {
+    ScopeSample {
+        name: active.name.clone(),
+        duration_us: end_clock_us.saturating_sub(start_clock_us) as f64,
+        start_us: start_clock_us.saturating_sub(frame_start_clock_us) as f64,
+        depth: active.depth,
+        thread_id: active.thread_id,
+        thread_name: active.thread_name.clone(),
+        processor_start: active.processor_start,
+        processor_end,
     }
+}
+
+fn thread_id(thread: &std::thread::Thread) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    thread.id().hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(windows)]
+fn current_processor() -> Option<u32> {
+    Some(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessorNumber() })
+}
+
+#[cfg(not(windows))]
+fn current_processor() -> Option<u32> {
+    None
 }
 
 fn summarize_scopes(scopes: &[ScopeSample]) -> Vec<ScopeSummary> {

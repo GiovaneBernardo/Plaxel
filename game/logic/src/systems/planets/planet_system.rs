@@ -13,6 +13,7 @@ use engine::{
     game_info,
     model::{AttributeFormat, StepMode, Vertex, VertexAttribute, VertexLayout},
     multithreading::job_system::JobPriorityHandle,
+    profile_scope,
     renderer::AtmospherePassNode,
 };
 use engine::{
@@ -259,6 +260,7 @@ fn random_planet_position(
 }
 
 pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
+    profile_scope!("terrain.planet.init");
     let world = &mut ctx.world;
     let camera_entity = {
         let Some(camera) = world.get_resource::<GameCamera>() else {
@@ -363,6 +365,7 @@ pub fn create_planet(
     solar_system: Entity,
     forced_position: Option<Vec3>,
 ) -> Option<Entity> {
+    profile_scope!("terrain.planet.create");
     let world = &mut ctx.world;
 
     let camera_entity = {
@@ -456,14 +459,17 @@ pub fn create_planet(
         .get_resource::<PlanetLodSettings>()
         .map_or(1.0, |settings| settings.strength);
 
-    let octree = Planet::create_octree(
-        planet_position,
-        &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
-        terrain_config.as_ref(),
-        chunk_size,
-        lod_strength,
-        &terrain_edits,
-    );
+    let octree = {
+        profile_scope!("terrain.planet.initial_octree");
+        Planet::create_octree(
+            planet_position,
+            &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
+            terrain_config.as_ref(),
+            chunk_size,
+            lod_strength,
+            &terrain_edits,
+        )
+    };
 
     let planet = Planet {
         id: new_planet.index() as u64,
@@ -479,35 +485,42 @@ pub fn create_planet(
         octree_root: octree,
         solar_system,
     };
-    let mut leaf_nodes = Vec::new();
-    octree::collect_leaf_nodes(&planet.octree_root, &mut leaf_nodes);
+    let mesh_requests = {
+        profile_scope!("terrain.planet.prepare_initial_requests");
+        let mut leaf_nodes = Vec::new();
+        octree::collect_leaf_nodes(&planet.octree_root, &mut leaf_nodes);
+        let mut mesh_requests = Vec::with_capacity(leaf_nodes.len());
 
-    let mut mesh_requests = Vec::new();
-
-    for leaf in leaf_nodes {
-        let mut request = PlanetMeshRequest {
-            planet_entity: new_planet,
-            node_key: leaf.key,
-            planet_position: planet.position,
-            node_min_corner: leaf.min,
-            node_size: leaf.size,
-            face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
-        };
-        octree::annotate_mesh_request(&planet.octree_root, &mut request);
-        mesh_requests.push(request);
-    }
+        for leaf in leaf_nodes {
+            let mut request = PlanetMeshRequest {
+                planet_entity: new_planet,
+                node_key: leaf.key,
+                planet_position: planet.position,
+                node_min_corner: leaf.min,
+                node_size: leaf.size,
+                face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+            };
+            octree::annotate_mesh_request(&planet.octree_root, &mut request);
+            mesh_requests.push(request);
+        }
+        mesh_requests
+    };
 
     ctx.world.insert(new_planet, planet);
     ctx.world.insert(new_planet, terrain_edits);
     ctx.world.insert(new_planet, terrain_config);
 
-    for request in mesh_requests {
-        submit_requested_mesh(ctx, request);
+    {
+        profile_scope!("terrain.planet.submit_initial_requests");
+        for request in mesh_requests {
+            submit_requested_mesh(ctx, request);
+        }
     }
     Some(new_planet)
 }
 
 pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
+    profile_scope!("terrain.planet.update");
     let camera_entity = {
         let Some(camera) = ctx.world.get_resource::<GameCamera>() else {
             return;
@@ -547,18 +560,22 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
             let change_start = changes.len();
             if update_octree {
-                octree::update(
-                    &mut planet.octree_root,
-                    camera_pos,
-                    entity,
-                    planet.position,
-                    terrain_config.as_ref(),
-                    lod_strength,
-                    &mut changes,
-                    terrain_edits,
-                );
+                {
+                    profile_scope!("terrain.planet.update_octree");
+                    octree::update(
+                        &mut planet.octree_root,
+                        camera_pos,
+                        entity,
+                        planet.position,
+                        terrain_config.as_ref(),
+                        lod_strength,
+                        &mut changes,
+                        terrain_edits,
+                    );
+                }
             }
 
+            profile_scope!("terrain.planet.prepare_lod_changes");
             let planet_changes: Vec<_> = changes.drain(change_start..).collect();
             let mut transitions = Vec::new();
             let mut keys_to_remove = Vec::new();
@@ -671,15 +688,25 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         size_a.total_cmp(&size_b)
     });
 
-    for change in changes {
-        apply_change(ctx, &change);
+    {
+        profile_scope!("terrain.planet.apply_lod_changes");
+        for change in changes {
+            apply_change(ctx, &change);
+        }
     }
 
-    drain_generated_meshes(ctx);
-    reprioritize_mesh_jobs(ctx, camera_pos);
+    {
+        profile_scope!("terrain.planet.drain_meshes");
+        drain_generated_meshes(ctx);
+    }
+    {
+        profile_scope!("terrain.planet.reprioritize_jobs");
+        reprioritize_mesh_jobs(ctx, camera_pos);
+    }
 }
 
 fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
+    profile_scope!("terrain.planet.apply_graphs");
     let requests = ctx
         .world
         .get_resource_mut::<TerrainGraphApplyQueue>()
@@ -836,6 +863,7 @@ pub fn build_requested_mesh(
     terrain: &PlanetTerrainSamplerContext<'_>,
     base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
 ) -> GeneratedMesh {
+    profile_scope!("game.build_requested_mesh");
     try_build_requested_mesh(
         request,
         generation,
@@ -857,6 +885,7 @@ fn try_build_requested_mesh(
     base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
     cancelled: Option<&AtomicBool>,
 ) -> Option<GeneratedMesh> {
+    profile_scope!("terrain.mesh.build");
     if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         return None;
     }
@@ -874,21 +903,24 @@ fn try_build_requested_mesh(
         z: min_corner.z as i32,
         level: request.node_key.level,
     };
-    let base_grid = get_or_build_base_grid(
-        BaseGridCacheKey {
-            planet_entity: request.planet_entity,
-            generation,
-            node_key: key,
-        },
-        CHUNK_GRID_SAMPLE_COUNT,
-        CHUNK_GRID_SAMPLE_COUNT,
-        CHUNK_GRID_SAMPLE_COUNT,
-        resolution,
-        min_corner,
-        terrain,
-        &base_grid_cache,
-        cancelled,
-    )?;
+    let base_grid = {
+        profile_scope!("terrain.mesh.base_density_grid");
+        get_or_build_base_grid(
+            BaseGridCacheKey {
+                planet_entity: request.planet_entity,
+                generation,
+                node_key: key,
+            },
+            CHUNK_GRID_SAMPLE_COUNT,
+            CHUNK_GRID_SAMPLE_COUNT,
+            CHUNK_GRID_SAMPLE_COUNT,
+            resolution,
+            min_corner,
+            terrain,
+            &base_grid_cache,
+            cancelled,
+        )?
+    };
     if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         return None;
     }
@@ -896,16 +928,22 @@ fn try_build_requested_mesh(
     let grid_ref = if terrain_sampler::is_terrain_edits_empty(terrain) {
         base_grid.as_ref()
     } else {
-        grid = generate_grid_from_base(base_grid.as_ref(), resolution, min_corner, terrain);
+        grid = {
+            profile_scope!("terrain.mesh.apply_density_edits");
+            generate_grid_from_base(base_grid.as_ref(), resolution, min_corner, terrain)
+        };
         &grid
     };
-    let (vertices, indices) = Planet::dual_contour_grid(
-        grid_ref,
-        min_corner,
-        resolution,
-        terrain,
-        &request.face_neighbors,
-    );
+    let (vertices, indices) = {
+        profile_scope!("terrain.mesh.dual_contour");
+        Planet::dual_contour_grid(
+            grid_ref,
+            min_corner,
+            resolution,
+            terrain,
+            &request.face_neighbors,
+        )
+    };
     if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         return None;
     }
@@ -1139,7 +1177,11 @@ fn start_mesh_job(
             .spawn(job);
     } else {
         let priority = mesh_job_priority(ctx, &[request]);
-        if let Ok(handle) = ctx.globals.job_system.spawn_prioritized(priority, job) {
+        if let Ok(handle) = ctx.globals.job_system.spawn_prioritized_named(
+            format!("terrain.mesh.{:?}", request.node_key),
+            priority,
+            job,
+        ) {
             let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
             mesh_jobs.prioritized_jobs.push(PrioritizedMeshJob {
                 handle,
@@ -1155,6 +1197,7 @@ fn start_mesh_job(
 }
 
 pub fn drain_generated_meshes(ctx: &mut SystemContext) {
+    profile_scope!("terrain.mesh.drain_generated");
     loop {
         let replacement = {
             let Some(mesh_jobs) = ctx.world.get_resource::<MeshJobResults>() else {
@@ -1489,6 +1532,7 @@ fn submit_replacement(
     mut requests: Vec<PlanetMeshRequest>,
     replace_all_chunks: bool,
 ) {
+    profile_scope!("terrain.mesh.submit_replacement");
     let mut unique_keys = HashSet::with_capacity(requests.len());
     requests.retain(|request| unique_keys.insert(mesh_request_key(request)));
 
@@ -1614,7 +1658,11 @@ fn submit_replacement(
             meshes,
         });
     };
-    if let Ok(handle) = ctx.globals.job_system.spawn_prioritized(priority, job) {
+    if let Ok(handle) = ctx.globals.job_system.spawn_prioritized_named(
+        format!("terrain.replacement.{replacement_id}"),
+        priority,
+        job,
+    ) {
         let mut mesh_jobs = ctx.world.get_resource_mut::<MeshJobResults>().unwrap();
         mesh_jobs.prioritized_jobs.push(PrioritizedMeshJob {
             handle,
@@ -1739,6 +1787,7 @@ fn get_or_build_base_grid(
     base_grid_cache: &Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
     cancelled: Option<&AtomicBool>,
 ) -> Option<Arc<DensityGrid>> {
+    profile_scope!("terrain.mesh.base_grid_cache");
     if let Some(grid) = base_grid_cache
         .lock()
         .ok()
@@ -1776,6 +1825,7 @@ fn generate_base_grid_from_min(
     terrain: &PlanetTerrainSamplerContext<'_>,
     cancelled: Option<&AtomicBool>,
 ) -> Option<DensityGrid> {
+    profile_scope!("terrain.mesh.sample_base_density");
     let local_min = min.as_dvec3() - terrain.planet_position.as_dvec3();
     let resolution = f64::from(resolution);
     let mut grid = Vec::with_capacity(nx as usize);
@@ -1810,6 +1860,7 @@ fn generate_grid_from_base(
     min: Vec3,
     terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> DensityGrid {
+    profile_scope!("terrain.mesh.sample_edit_density");
     let nx = base_grid.len();
     let ny = base_grid.first().map_or(0, Vec::len);
     let nz = base_grid
