@@ -1,3 +1,5 @@
+pub extern crate bevy_reflect as plaxel_reflect;
+
 use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::input::KeyCode;
 use engine::ecs::entity::Entity;
@@ -15,7 +17,6 @@ use game_types::octree::{NodeKey, PlanetLodSettings};
 use game_types::planet::{Planet, PlanetVertex};
 pub use game_types::render_graph;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use web_time::{Duration, Instant};
 
 pub mod octree;
@@ -30,20 +31,29 @@ use crate::octree::depth_color;
 use crate::sdf::EarthHeightmap;
 use crate::systems::planets::planet_debug;
 
+#[derive(plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 struct GameState {
     /// When enabled, newly spawned planets use TerrainFieldGraph::default()
     /// immediately and never enqueue meshes from the legacy generator.
     start_with_earth_like_terrain: bool,
+    #[reflect(ignore)]
     previous_leaves: HashMap<NodeKey, ChunkInfo>,
+    #[reflect(ignore)]
     current_leaves: HashMap<NodeKey, ChunkInfo>,
+    #[reflect(ignore)]
     mesh_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
+    #[reflect(ignore)]
     terrain_colliders: HashMap<NodeKey, RapierColliderHandle>,
+    #[reflect(ignore)]
     in_flight: HashSet<NodeKey>,
     // Keys whose worker finished but produced zero vertices. Remembered so
     // the scheduler never re-spawns a worker for them on subsequent frames.
     // Pruned by retain() when the key leaves the current octree, so a fresh
     // NodeKey (different position or size) always gets a clean attempt.
+    #[reflect(ignore)]
     empty_chunks: HashSet<NodeKey>,
+    #[reflect(ignore)]
     empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     update_octree: bool,
     terrain_physics_enabled: bool,
@@ -90,14 +100,20 @@ impl GpuTerrainFrame {
     }
 }
 
+#[derive(plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 struct GameCamera {
     entity: Entity,
+    #[reflect(ignore)]
     camera: engine::camera::Camera,
     world_position: engine::math::DVec3,
+    #[reflect(ignore)]
     controller: engine::camera::CameraController,
+    #[reflect(ignore)]
     uniform: engine::camera::CameraUniform,
     previous_world_position: engine::math::DVec3,
     velocity_sample_pos: Vec3,
+    #[reflect(ignore)]
     velocity_sample_time: Instant,
     velocity_sample_distance: f32,
 }
@@ -438,13 +454,13 @@ fn load_earth_heightmap_resource(world: &mut World) {
             (min.min(value), max.max(value))
         });
 
-    world.insert_resource(Arc::new(EarthHeightmap {
+    world.insert_resource(EarthHeightmap {
         width,
         height,
         samples,
         min_height,
         max_height,
-    }));
+    });
 }
 
 fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {

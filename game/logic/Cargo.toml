@@ -24,6 +24,7 @@ web-time = { workspace = true }
 crossbeam-channel = { workspace = true }
 image = { workspace = true }
 subsecond = { workspace = true }
+bevy_reflect = { workspace = true }
 puffin = { workspace = true, optional = true }
 tracy-client = { workspace = true, optional = true }
 

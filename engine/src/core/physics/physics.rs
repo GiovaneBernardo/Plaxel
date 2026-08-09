@@ -12,20 +12,35 @@ use crate::{
     ecs::{commands::Commands, query::Query, system::SystemContext},
 };
 
+#[derive(plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 pub struct Physics {
+    #[reflect(ignore)]
     pub rigid_body_set: RigidBodySet,
+    #[reflect(ignore)]
     pub collider_set: ColliderSet,
-    pub gravity: Vector<Real>,
+    pub gravity: Vec3,
+    #[reflect(ignore)]
     pub integration_parameters: IntegrationParameters,
+    #[reflect(ignore)]
     pub physics_pipeline: PhysicsPipeline,
+    #[reflect(ignore)]
     pub island_manager: IslandManager,
+    #[reflect(ignore)]
     pub broad_phase: DefaultBroadPhase,
+    #[reflect(ignore)]
     pub narrow_phase: NarrowPhase,
+    #[reflect(ignore)]
     pub impulse_joint_set: ImpulseJointSet,
+    #[reflect(ignore)]
     pub multibody_joint_set: MultibodyJointSet,
+    #[reflect(ignore)]
     pub ccd_solver: CCDSolver,
+    #[reflect(ignore)]
     pub physics_hooks: (),
+    #[reflect(ignore)]
     pub event_handler: (),
+    #[reflect(ignore)]
     pub ball_body_handle: Option<RigidBodyHandle>,
 }
 
@@ -34,7 +49,7 @@ impl Physics {
         Self {
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
-            gravity: vector![0.0, -9.81, 0.0],
+            gravity: Vec3::new(0.0, -9.81, 0.0),
             integration_parameters: IntegrationParameters::default(),
             physics_pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
@@ -56,8 +71,9 @@ impl Physics {
     pub fn step(&mut self) {
         crate::profile_counter!("physics.bodies", self.rigid_body_set.len() as f64);
         crate::profile_counter!("physics.colliders", self.collider_set.len() as f64);
+        let gravity = vector![self.gravity.x, self.gravity.y, self.gravity.z];
         self.physics_pipeline.step(
-            &self.gravity,
+            &gravity,
             &self.integration_parameters,
             &mut self.island_manager,
             &mut self.broad_phase,

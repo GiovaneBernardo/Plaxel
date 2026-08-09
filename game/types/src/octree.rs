@@ -3,7 +3,7 @@ use engine::math::Vec3;
 
 use crate::planet::PlanetVertex;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct PlanetLodSettings {
     /// Scales how far from the camera octree nodes split and merge.
     /// Values above 1.0 keep higher-detail nodes farther away.
@@ -16,7 +16,7 @@ impl Default for PlanetLodSettings {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, plaxel_reflect::Reflect)]
 pub enum NodeState {
     Leaf,
     Internal,
@@ -50,7 +50,7 @@ pub enum OctreeChanges {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, plaxel_reflect::Reflect)]
 pub struct PlanetMeshRequest {
     pub planet_entity: Entity,
     pub node_key: NodeKey,
@@ -60,14 +60,14 @@ pub struct PlanetMeshRequest {
     pub face_neighbors: [FaceNeighbor; 6],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, plaxel_reflect::Reflect)]
 pub enum FaceNeighborKind {
     SameOrAbsent,
     Coarser,
     Finer,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, plaxel_reflect::Reflect)]
 pub struct FaceNeighbor {
     pub kind: FaceNeighborKind,
     pub min: Vec3,
@@ -91,7 +91,7 @@ pub struct QueuedMeshRequest {
     pub sequence: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, plaxel_reflect::Reflect)]
 pub struct GeneratedReplacement {
     pub cancelled: bool,
     /// Replace every uploaded chunk for this planet after the new batch has
@@ -108,7 +108,7 @@ pub struct GeneratedReplacement {
     pub meshes: Vec<GeneratedMesh>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, plaxel_reflect::Reflect)]
 pub struct GeneratedMesh {
     pub generation: u64,
     pub planet_entity: Entity,
@@ -116,7 +116,9 @@ pub struct GeneratedMesh {
     pub node_origin_planet: [i32; 3],
     pub version: u64,
     pub urgent: bool,
+    #[reflect(ignore)]
     pub vertices: Vec<PlanetVertex>,
+    #[reflect(ignore)]
     pub indices: Vec<u32>,
 }
 
@@ -161,7 +163,7 @@ pub struct OctreeNode {
     pub state: NodeState,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord, plaxel_reflect::Reflect)]
 pub struct NodeKey {
     pub level: i8,
     pub x: i32,

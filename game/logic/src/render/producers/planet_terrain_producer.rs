@@ -5,6 +5,7 @@ use engine::{
     ecs::{commands::Commands, entity::Entity, query::Query, system::SystemContext},
     math::Mat4,
     model::{AttributeFormat, StepMode, Vertex, VertexAttribute, VertexLayout},
+    reflect::RuntimeCounter,
     renderer::{
         BindGroupDescriptor, BindGroupEntry, BindGroupHandle, BindGroupLayoutHandle,
         BufferDescriptor, BufferHandle, BufferUsages, GpuMeshBinding, GpuMeshHandle, MeshUpload,
@@ -33,6 +34,8 @@ pub struct PlanetTerrainProducer {
     routes: Vec<RenderRoute>,
     commands: Receiver<PlanetTerrainCommand>,
     events: Sender<PlanetTerrainEvent>,
+    commands_processed: RuntimeCounter,
+    events_emitted: RuntimeCounter,
     _material: Material,
     pipelines: PlanetPipelines,
     terrain_layout: BindGroupLayoutHandle,
@@ -105,15 +108,26 @@ pub fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Com
 
     let (command_sender, command_receiver) = crossbeam_channel::unbounded();
     let (event_sender, event_receiver) = crossbeam_channel::unbounded();
+    let commands_sent = RuntimeCounter::default();
+    let commands_processed = RuntimeCounter::default();
+    let events_emitted = RuntimeCounter::default();
 
-    let producer =
-        PlanetTerrainProducer::create(&mut ctx.globals.renderer, command_receiver, event_sender);
+    let producer = PlanetTerrainProducer::create(
+        &mut ctx.globals.renderer,
+        command_receiver,
+        event_sender,
+        commands_processed.clone(),
+        events_emitted.clone(),
+    );
 
     ctx.world.insert_resource(PlanetTerrainRenderQueue {
         sender: command_sender,
+        commands_sent,
+        commands_processed,
     });
     ctx.world.insert_resource(PlanetTerrainEvents {
         receiver: event_receiver,
+        events_emitted,
     });
 
     ctx.globals
@@ -153,6 +167,12 @@ pub fn planet_terrain_producer_update(ctx: &mut SystemContext, _commands: &mut C
 }
 
 impl PlanetTerrainProducer {
+    fn emit_event(&self, event: PlanetTerrainEvent) {
+        if self.events.send(event).is_ok() {
+            self.events_emitted.increment();
+        }
+    }
+
     fn chunk_index_layout() -> VertexLayout {
         VertexLayout {
             stride: std::mem::size_of::<u32>() as u64,
@@ -169,6 +189,8 @@ impl PlanetTerrainProducer {
         renderer: &mut engine::renderer::Renderer,
         commands: Receiver<PlanetTerrainCommand>,
         events: Sender<PlanetTerrainEvent>,
+        commands_processed: RuntimeCounter,
+        events_emitted: RuntimeCounter,
     ) -> Self {
         use engine::{assets::material::Material, model::Vertex, renderer::*};
         use game_types::planet::PlanetVertex;
@@ -305,6 +327,8 @@ impl PlanetTerrainProducer {
             ],
             commands,
             events,
+            commands_processed,
+            events_emitted,
             _material: material,
             pipelines: PlanetPipelines {
                 forward,
@@ -553,7 +577,7 @@ impl PlanetTerrainProducer {
         insert: Vec<PendingTerrainChunk>,
     ) {
         if !self.planets.contains_key(&planet) {
-            let _ = self.events.send(PlanetTerrainEvent::ReplacementFailed {
+            self.emit_event(PlanetTerrainEvent::ReplacementFailed {
                 planet,
                 reason: "planet was not initialized".into(),
             });
@@ -571,7 +595,7 @@ impl PlanetTerrainProducer {
                     for (_, _, mesh) in uploaded {
                         api.remove_mesh(mesh);
                     }
-                    let _ = self.events.send(PlanetTerrainEvent::ReplacementFailed {
+                    self.emit_event(PlanetTerrainEvent::ReplacementFailed {
                         planet,
                         reason: error.to_string(),
                     });
@@ -608,9 +632,7 @@ impl PlanetTerrainProducer {
         }
 
         self.batches_dirty = true;
-        let _ = self
-            .events
-            .send(PlanetTerrainEvent::ReplacementApplied { planet });
+        self.emit_event(PlanetTerrainEvent::ReplacementApplied { planet });
     }
 
     fn remove_planet(&mut self, api: &mut dyn RendererAPI, planet: Entity) {
@@ -713,6 +735,7 @@ impl RenderProducer for PlanetTerrainProducer {
 
     fn prepare_frame(&mut self, ctx: &mut ProducerPrepareContext<'_>) {
         let commands: Vec<_> = self.commands.try_iter().collect();
+        self.commands_processed.add(commands.len());
 
         for command in &commands {
             match *command {
@@ -811,9 +834,13 @@ pub(crate) enum PlanetTerrainCommand {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 pub(crate) struct PlanetTerrainRenderQueue {
+    #[reflect(ignore)]
     sender: Sender<PlanetTerrainCommand>,
+    commands_sent: RuntimeCounter,
+    commands_processed: RuntimeCounter,
 }
 
 impl PlanetTerrainRenderQueue {
@@ -821,7 +848,11 @@ impl PlanetTerrainRenderQueue {
         &self,
         command: PlanetTerrainCommand,
     ) -> Result<(), crossbeam_channel::SendError<PlanetTerrainCommand>> {
-        self.sender.send(command)
+        let result = self.sender.send(command);
+        if result.is_ok() {
+            self.commands_sent.increment();
+        }
+        result
     }
 }
 
@@ -830,8 +861,12 @@ pub(crate) enum PlanetTerrainEvent {
     ReplacementFailed { planet: Entity, reason: String },
 }
 
+#[derive(plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 pub(crate) struct PlanetTerrainEvents {
+    #[reflect(ignore)]
     receiver: crossbeam_channel::Receiver<PlanetTerrainEvent>,
+    events_emitted: RuntimeCounter,
 }
 
 impl PlanetTerrainEvents {

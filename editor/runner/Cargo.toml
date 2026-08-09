@@ -15,7 +15,6 @@ static-game-logic = ["dep:static-game-logic"]
 profiling = [
     "engine/profiling",
     "engine/puffin",
-    "editor-logic/puffin-ui",
     "static-game-logic?/profiling",
     "static-game-logic?/puffin",
 ]
@@ -41,11 +40,11 @@ dioxus-devtools = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 engine = { path = "../../engine" }
-egui-winit = "0.33.3"
+egui-winit = "0.34.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 engine = { path = "../../engine" }
-egui-winit = { version = "0.33.3", default-features = false }
+egui-winit = { version = "0.34.2", default-features = false }
 wasm-bindgen = { workspace = true }
 console_error_panic_hook = { workspace = true }
 console_log = { workspace = true }

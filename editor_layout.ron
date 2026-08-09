@@ -1,5 +1,5 @@
 (
-    version: 4,
+    version: 5,
     dock_state: (
         surfaces: [
             Main((
@@ -30,7 +30,7 @@
                                 y: 1341.3438,
                             ),
                         ),
-                        fraction: 0.34198084,
+                        fraction: 0.58401406,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
@@ -45,7 +45,7 @@
                                 y: 1341.3438,
                             ),
                         ),
-                        fraction: 0.5,
+                        fraction: 0.58324784,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
@@ -57,7 +57,7 @@
                             ),
                             max: (
                                 x: 2109.3333,
-                                y: 487.33334,
+                                y: 801.3333,
                             ),
                         ),
                         viewport: (
@@ -67,7 +67,7 @@
                             ),
                             max: (
                                 x: 2109.3438,
-                                y: 487.34375,
+                                y: 801.34375,
                             ),
                         ),
                         tabs: [
@@ -81,7 +81,7 @@
                         rect: (
                             min: (
                                 x: 0.0,
-                                y: 488.66666,
+                                y: 802.6667,
                             ),
                             max: (
                                 x: 2109.3333,
@@ -100,7 +100,7 @@
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 692.6667,
+                                y: 800.6667,
                             ),
                         ),
                         viewport: (
@@ -110,13 +110,14 @@
                             ),
                             max: (
                                 x: 2560.0,
-                                y: 692.65625,
+                                y: 800.65625,
                             ),
                         ),
                         tabs: [
                             Hierarchy,
+                            Resources,
                         ],
-                        active: (0),
+                        active: (1),
                         scroll: 0.0,
                         collapsed: false,
                     )),
@@ -124,7 +125,7 @@
                         rect: (
                             min: (
                                 x: 2110.6667,
-                                y: 693.3333,
+                                y: 801.3333,
                             ),
                             max: (
                                 x: 2560.0,
@@ -134,7 +135,7 @@
                         viewport: (
                             min: (
                                 x: 2110.6563,
-                                y: 717.34375,
+                                y: 825.34375,
                             ),
                             max: (
                                 x: 2560.0,
@@ -154,7 +155,7 @@
                         rect: (
                             min: (
                                 x: 0.0,
-                                y: 488.66666,
+                                y: 802.6667,
                             ),
                             max: (
                                 x: 1169.3334,
@@ -164,7 +165,7 @@
                         viewport: (
                             min: (
                                 x: 0.0,
-                                y: 512.65625,
+                                y: 826.65625,
                             ),
                             max: (
                                 x: 1169.3438,
@@ -179,7 +180,7 @@
                             Timeline,
                             Profiler,
                         ],
-                        active: (5),
+                        active: (3),
                         scroll: 0.0,
                         collapsed: false,
                     )),
@@ -187,7 +188,7 @@
                         rect: (
                             min: (
                                 x: 1170.0,
-                                y: 488.66666,
+                                y: 802.6667,
                             ),
                             max: (
                                 x: 2109.3333,
@@ -197,7 +198,7 @@
                         viewport: (
                             min: (
                                 x: 1170.0,
-                                y: 512.65625,
+                                y: 826.65625,
                             ),
                             max: (
                                 x: 2109.3438,
@@ -217,7 +218,7 @@
                     Empty,
                     Empty,
                 ],
-                focused_node: Some((10)),
+                focused_node: Some((3)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),

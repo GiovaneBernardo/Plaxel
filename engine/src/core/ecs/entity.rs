@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, plaxel_reflect::Reflect)]
 pub struct Entity {
     index: u32,
     generation: NonZeroU32,

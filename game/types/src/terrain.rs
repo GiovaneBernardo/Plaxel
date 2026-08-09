@@ -27,7 +27,7 @@ pub struct SurfaceSample {
     pub materials: MaterialBlend,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, plaxel_reflect::Reflect)]
 pub struct PlanetTerrainConfig {
     pub seed: u64,
     pub radius: f32,
@@ -42,7 +42,7 @@ pub struct PlanetTerrainConfig {
     pub features: FeatureConfig,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct ClimateConfig {
     pub equator_temperature: f32,
     pub pole_temperature: f32,
@@ -50,7 +50,7 @@ pub struct ClimateConfig {
     pub humidity_scale: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct LandformConfig {
     pub continent_scale: f32,
     pub continent_height: f32,
@@ -58,32 +58,32 @@ pub struct LandformConfig {
     pub mountain_width: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct FeatureConfig {
     pub cave_frequency: f32,
     pub cave_size: f32,
     pub overhang_strength: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, plaxel_reflect::Reflect)]
 pub struct GeologyConfig {
     pub province_scale: f32,
     pub strata_scale: f32,
     pub definitions: Vec<GeologyDefinition>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, plaxel_reflect::Reflect)]
 pub struct BiomeConfig {
     pub definitions: Vec<BiomeDefinition>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, plaxel_reflect::Reflect)]
 pub struct MaterialId(pub u16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GeologyId(pub u16);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, plaxel_reflect::Reflect)]
 pub struct GeologyDefinition {
     pub name: String,
     pub hardness: f32,
@@ -114,7 +114,7 @@ pub struct BiomeGenerator {
     pub definitions: Vec<BiomeDefinition>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct BiomeDefinition {
     pub id: BiomeId,
     pub preferred_temperature: f32,
@@ -125,7 +125,7 @@ pub struct BiomeDefinition {
     pub maximum_elevation: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct BiomeId(pub u16);
 
 pub struct WeightedBiome {

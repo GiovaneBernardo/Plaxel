@@ -8,3 +8,4 @@ pub mod render_graph;
 pub mod terrain;
 pub mod universe;
 pub mod vehicle;
+pub extern crate bevy_reflect as plaxel_reflect;

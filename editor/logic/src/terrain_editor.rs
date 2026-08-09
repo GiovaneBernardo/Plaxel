@@ -124,6 +124,7 @@ impl TerrainEditorState {
         self.status = Some("Created a new graph".to_string());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn open(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Plaxel terrain graph", &["ron", "plxterrain"])
@@ -153,6 +154,12 @@ impl TerrainEditorState {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn open(&mut self) {
+        self.status = Some("Opening terrain files is not available in the web editor".to_string());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn save(&mut self, save_as: bool) {
         let errors = self.graph.validate();
         if !errors.is_empty() {
@@ -185,6 +192,11 @@ impl TerrainEditorState {
             }
             Err(error) => self.status = Some(format!("Save failed: {error}")),
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn save(&mut self, _save_as: bool) {
+        self.status = Some("Saving terrain files is not available in the web editor".to_string());
     }
 
     fn push_undo(&mut self, graph: TerrainFieldGraph) {

@@ -8,11 +8,13 @@ use engine::{
     model::*,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 pub struct Planet {
     pub id: u64,
     pub name: String,
     pub position: Vec3,
+    #[reflect(ignore)]
     pub octree_root: OctreeNode,
     pub solar_system: Entity,
 }
@@ -103,10 +105,13 @@ impl PlanetInstance {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 pub struct PlanetTerrainEdits {
+    #[reflect(ignore)]
     pub modified_chunks: HashMap<TerrainBrickKey, Arc<TerrainBrickSamples>>,
     /// Cached value bounds for each trilinearly sampled edit brick.
+    #[reflect(ignore)]
     pub modified_ranges: HashMap<TerrainBrickKey, DensityRange>,
 }
 

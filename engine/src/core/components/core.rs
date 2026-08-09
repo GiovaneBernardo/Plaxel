@@ -1,3 +1,4 @@
+#[derive(plaxel_reflect::Reflect)]
 #[allow(dead_code)]
 pub struct TransformComponent {
     pub position: crate::math::Vec3,
@@ -6,6 +7,7 @@ pub struct TransformComponent {
     pub velocity: crate::math::Vec3,
 }
 
+#[derive(plaxel_reflect::Reflect)]
 #[allow(dead_code)]
 pub struct CameraComponent {
     pub speed: f32,

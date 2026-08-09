@@ -1,3 +1,4 @@
+#[derive(plaxel_reflect::Reflect)]
 pub struct Time {
     pub delta_seconds: f32,
     pub elapsed_seconds: f64,

@@ -1,8 +1,11 @@
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::Path, sync::Arc};
+
+pub extern crate bevy_reflect as plaxel_reflect;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Duration, Instant};
 
 pub mod assets;
 pub mod core;
@@ -13,6 +16,46 @@ pub mod math;
 pub mod multithreading;
 pub mod profiling;
 pub mod renderer;
+
+/// Stable engine-facing facade for the reflection implementation used by tools.
+pub mod reflect {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    pub use plaxel_reflect::*;
+
+    /// A shared runtime counter that can be surfaced by the editor without
+    /// exposing the synchronization primitive used to update it.
+    #[derive(Clone, plaxel_reflect::Reflect)]
+    #[reflect(opaque)]
+    pub struct RuntimeCounter(Arc<AtomicU64>);
+
+    impl RuntimeCounter {
+        pub fn new(value: u64) -> Self {
+            Self(Arc::new(AtomicU64::new(value)))
+        }
+
+        pub fn get(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+
+        pub fn increment(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        pub fn add(&self, value: usize) {
+            self.0.fetch_add(value as u64, Ordering::Relaxed);
+        }
+    }
+
+    impl Default for RuntimeCounter {
+        fn default() -> Self {
+            Self::new(0)
+        }
+    }
+}
 
 use crate::math::Quat;
 use crate::math::Vec3;
@@ -143,6 +186,15 @@ pub struct State {
 }
 
 impl State {
+    pub fn for_each_reflected_mut(
+        &mut self,
+        mut visit: impl FnMut(&'static str, &mut dyn reflect::PartialReflect),
+    ) {
+        visit("active_scene_index", &mut self.active_scene_index);
+        visit("frame_index", &mut self.frame_index);
+        visit("registered_systems", &mut self.registered_systems);
+    }
+
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let _size = window.inner_size();
 

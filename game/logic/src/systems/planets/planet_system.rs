@@ -106,20 +106,28 @@ impl Vertex for PlanetNodeInstance {
     }
 }
 
+#[derive(plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
 pub struct MeshJobResults {
+    #[reflect(ignore)]
     pub sender: Sender<GeneratedMesh>,
+    #[reflect(ignore)]
     pub receiver: Receiver<GeneratedMesh>,
     pub wanted: HashSet<NodeKey>,
     pub in_flight: HashSet<NodeKey>,
     pub in_flight_counts: HashMap<NodeKey, usize>,
     pub versions: HashMap<NodeKey, u64>,
     pub pending_requests: HashMap<NodeKey, PendingMeshRequest>,
+    #[reflect(ignore)]
     pub base_grid_cache: Arc<Mutex<HashMap<BaseGridCacheKey, Arc<DensityGrid>>>>,
     pub ready_meshes: Vec<GeneratedMesh>,
+    #[reflect(ignore)]
     pub replacement_sender: Sender<GeneratedReplacement>,
+    #[reflect(ignore)]
     pub replacement_receiver: Receiver<GeneratedReplacement>,
     pub ready_replacements: Vec<GeneratedReplacement>,
     pub next_replacement_id: u64,
+    #[reflect(ignore)]
     pub prioritized_jobs: Vec<PrioritizedMeshJob>,
     pub generations: HashMap<Entity, u64>,
 }
@@ -137,6 +145,7 @@ pub enum MeshPriorityTarget {
     Replacement(u64),
 }
 
+#[derive(plaxel_reflect::Reflect)]
 pub struct PendingMeshRequest {
     pub request: PlanetMeshRequest,
     pub urgent: bool,
@@ -197,8 +206,11 @@ pub fn earth_like_planet_terrain_config() -> PlanetTerrainConfig {
     config
 }
 
+#[derive(plaxel_reflect::Reflect)]
 struct CameraAltitudeLogState {
+    #[reflect(ignore)]
     last_log: Option<Instant>,
+    logs_emitted: u64,
 }
 
 fn random_planet_position(
@@ -280,7 +292,10 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         prioritized_jobs: Vec::new(),
         generations: HashMap::new(),
     });
-    world.insert_resource(CameraAltitudeLogState { last_log: None });
+    world.insert_resource(CameraAltitudeLogState {
+        last_log: None,
+        logs_emitted: 0,
+    });
 }
 
 fn log_camera_altitude(ctx: &mut SystemContext, camera_pos: Vec3) {
@@ -296,6 +311,7 @@ fn log_camera_altitude(ctx: &mut SystemContext, camera_pos: Vec3) {
             false
         } else {
             state.last_log = Some(now);
+            state.logs_emitted += 1;
             true
         }
     };

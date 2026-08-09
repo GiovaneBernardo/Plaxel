@@ -1,3 +1,4 @@
+use crate::reflect::Reflect;
 use crate::{
     core::components::{
         core::TransformComponent,
@@ -23,6 +24,7 @@ pub struct Commands {
     queue: Vec<Box<dyn Command>>,
 }
 
+#[derive(plaxel_reflect::Reflect)]
 pub struct PhysicalSphereParams {
     pub position: crate::math::Vec3,
     pub radius: f32,
@@ -44,7 +46,7 @@ impl Commands {
         });
     }
 
-    pub fn insert<T: Component>(&mut self, entity: Entity, component: T) {
+    pub fn insert<T: Component + Reflect>(&mut self, entity: Entity, component: T) {
         self.push(move |ctx: &mut SystemContext| {
             ctx.world.insert(entity, component);
         });

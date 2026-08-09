@@ -52,34 +52,122 @@ pub enum Action {
     Sprint,
 }
 
+#[derive(Clone, Copy, plaxel_reflect::Reflect)]
+pub enum InputKey {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Space,
+    Tab,
+    Enter,
+    Escape,
+    ShiftLeft,
+    ShiftRight,
+    ControlLeft,
+    ControlRight,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+}
+
+impl From<InputKey> for KeyCode {
+    fn from(value: InputKey) -> Self {
+        match value {
+            InputKey::A => Self::KeyA,
+            InputKey::B => Self::KeyB,
+            InputKey::C => Self::KeyC,
+            InputKey::D => Self::KeyD,
+            InputKey::E => Self::KeyE,
+            InputKey::F => Self::KeyF,
+            InputKey::G => Self::KeyG,
+            InputKey::H => Self::KeyH,
+            InputKey::I => Self::KeyI,
+            InputKey::J => Self::KeyJ,
+            InputKey::K => Self::KeyK,
+            InputKey::L => Self::KeyL,
+            InputKey::M => Self::KeyM,
+            InputKey::N => Self::KeyN,
+            InputKey::O => Self::KeyO,
+            InputKey::P => Self::KeyP,
+            InputKey::Q => Self::KeyQ,
+            InputKey::R => Self::KeyR,
+            InputKey::S => Self::KeyS,
+            InputKey::T => Self::KeyT,
+            InputKey::U => Self::KeyU,
+            InputKey::V => Self::KeyV,
+            InputKey::W => Self::KeyW,
+            InputKey::X => Self::KeyX,
+            InputKey::Y => Self::KeyY,
+            InputKey::Z => Self::KeyZ,
+            InputKey::Space => Self::Space,
+            InputKey::Tab => Self::Tab,
+            InputKey::Enter => Self::Enter,
+            InputKey::Escape => Self::Escape,
+            InputKey::ShiftLeft => Self::ShiftLeft,
+            InputKey::ShiftRight => Self::ShiftRight,
+            InputKey::ControlLeft => Self::ControlLeft,
+            InputKey::ControlRight => Self::ControlRight,
+            InputKey::ArrowUp => Self::ArrowUp,
+            InputKey::ArrowDown => Self::ArrowDown,
+            InputKey::ArrowLeft => Self::ArrowLeft,
+            InputKey::ArrowRight => Self::ArrowRight,
+        }
+    }
+}
+
+#[derive(plaxel_reflect::Reflect)]
 pub struct InputMap {
-    interact: KeyCode,
-    open_menu: KeyCode,
-    walk_forward: KeyCode,
-    walk_left: KeyCode,
-    walk_right: KeyCode,
-    walk_backward: KeyCode,
-    roll_left: KeyCode,
-    roll_right: KeyCode,
-    jump: KeyCode,
-    crouch: KeyCode,
-    sprint: KeyCode,
+    interact: InputKey,
+    open_menu: InputKey,
+    walk_forward: InputKey,
+    walk_left: InputKey,
+    walk_right: InputKey,
+    walk_backward: InputKey,
+    roll_left: InputKey,
+    roll_right: InputKey,
+    jump: InputKey,
+    crouch: InputKey,
+    sprint: InputKey,
 }
 
 impl Default for InputMap {
     fn default() -> Self {
         Self {
-            interact: KeyCode::KeyF,
-            open_menu: KeyCode::Tab,
-            walk_forward: KeyCode::KeyW,
-            walk_left: KeyCode::KeyA,
-            walk_right: KeyCode::KeyD,
-            walk_backward: KeyCode::KeyS,
-            roll_left: KeyCode::KeyQ,
-            roll_right: KeyCode::KeyE,
-            jump: KeyCode::Space,
-            crouch: KeyCode::KeyC,
-            sprint: KeyCode::ShiftLeft,
+            interact: InputKey::F,
+            open_menu: InputKey::Tab,
+            walk_forward: InputKey::W,
+            walk_left: InputKey::A,
+            walk_right: InputKey::D,
+            walk_backward: InputKey::S,
+            roll_left: InputKey::Q,
+            roll_right: InputKey::E,
+            jump: InputKey::Space,
+            crouch: InputKey::C,
+            sprint: InputKey::ShiftLeft,
         }
     }
 }
@@ -99,6 +187,7 @@ impl InputMap {
             Action::Crouch => self.crouch,
             Action::Sprint => self.sprint,
         }
+        .into()
     }
 
     fn just_pressed(&self, input: &InputState, action: Action) -> bool {

@@ -8,7 +8,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 anyhow = { workspace = true }
-engine-inspector-derive = { path = "../engine_inspector_derive" }
 winit = { workspace = true }
 log = { workspace = true }
 wgpu = { workspace = true }
@@ -28,6 +27,7 @@ ron = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 uuid = { workspace = true }
+bevy_reflect = { workspace = true }
 offset-allocator = { workspace = true }
 rapier3d = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -59,6 +59,7 @@ wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true }
 reqwest = { workspace = true }
 getrandom = { workspace = true }
+web-time = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

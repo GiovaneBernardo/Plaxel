@@ -4,6 +4,8 @@ use std::{
     collections::HashMap,
 };
 
+use crate::reflect::{PartialReflect, Reflect};
+
 pub trait Resource: 'static + Send + Sync {}
 
 impl<T: 'static + Send + Sync> Resource for T {}
@@ -11,15 +13,38 @@ impl<T: 'static + Send + Sync> Resource for T {}
 trait ErasedResource {
     fn as_ptr(&self) -> *const ();
     fn as_mut_ptr(&mut self) -> *mut ();
+    fn reflect_mut(&mut self) -> Option<&mut dyn PartialReflect>;
 }
 
-impl<T: Resource> ErasedResource for T {
+struct ReflectedResource<T>(T);
+
+impl<T: Resource + Reflect> ErasedResource for ReflectedResource<T> {
     fn as_ptr(&self) -> *const () {
-        self as *const T as *const ()
+        &self.0 as *const T as *const ()
     }
 
     fn as_mut_ptr(&mut self) -> *mut () {
-        self as *mut T as *mut ()
+        &mut self.0 as *mut T as *mut ()
+    }
+
+    fn reflect_mut(&mut self) -> Option<&mut dyn PartialReflect> {
+        Some(&mut self.0)
+    }
+}
+
+struct OpaqueResource<T>(T);
+
+impl<T: Resource> ErasedResource for OpaqueResource<T> {
+    fn as_ptr(&self) -> *const () {
+        &self.0 as *const T as *const ()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut () {
+        &mut self.0 as *mut T as *mut ()
+    }
+
+    fn reflect_mut(&mut self) -> Option<&mut dyn PartialReflect> {
+        None
     }
 }
 
@@ -34,9 +59,18 @@ impl Resources {
         }
     }
 
-    pub fn insert<T: Resource>(&mut self, value: T) {
-        self.map
-            .insert(type_name::<T>(), RefCell::new(Box::new(value)));
+    pub fn insert<T: Resource + Reflect>(&mut self, value: T) {
+        self.map.insert(
+            type_name::<T>(),
+            RefCell::new(Box::new(ReflectedResource(value))),
+        );
+    }
+
+    pub fn insert_opaque<T: Resource>(&mut self, value: T) {
+        self.map.insert(
+            type_name::<T>(),
+            RefCell::new(Box::new(OpaqueResource(value))),
+        );
     }
 
     pub fn get<T: Resource>(&self) -> Option<Ref<'_, T>> {
@@ -57,5 +91,28 @@ impl Resources {
                 &mut *(boxed.as_mut_ptr() as *mut T)
             })
         })
+    }
+
+    pub fn for_each_reflected_mut(
+        &self,
+        mut visit: impl FnMut(&'static str, &mut dyn PartialReflect),
+    ) {
+        self.for_each_mut(|name, value| {
+            if let Some(value) = value {
+                visit(name, value);
+            }
+        });
+    }
+
+    pub fn for_each_mut(
+        &self,
+        mut visit: impl FnMut(&'static str, Option<&mut dyn PartialReflect>),
+    ) {
+        let mut names = self.map.keys().copied().collect::<Vec<_>>();
+        names.sort_unstable();
+        for name in names {
+            let mut resource = self.map[name].borrow_mut();
+            visit(name, resource.reflect_mut());
+        }
     }
 }

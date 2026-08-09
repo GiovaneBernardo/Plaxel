@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "engine",
-    "engine_inspector_derive",
     "editor/runner",
     "editor/logic",
     "game/logic",
@@ -13,17 +12,17 @@ resolver = "2"
 
 [workspace.dependencies]
 # Graphics / windowing
-wgpu = "27.0.1"
+wgpu = "29.0.0"
 winit = { version = "0.30", features = ["android-native-activity"] }
-egui = "0.33.3"
-egui_dock = { version = "0.18.0", features = ["serde"] }
-egui-wgpu = "0.33.3"
-eframe = "0.33"
+egui = "0.34.2"
+egui_dock = { version = "0.19.1", features = ["serde"] }
+egui-wgpu = "0.34.2"
+eframe = "0.34.2"
 rfd = "0.15"
 offset-allocator = "0.2"
 
 # Math / utils
-glam = { version = "0.30.10", features = ["bytemuck", "serde"] }
+glam = { version = "0.32.0", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.24", features = ["derive"] }
 half = { version = "2", features = ["bytemuck"] }
 rand = "0.8.5"
@@ -60,7 +59,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = "0.2"
 tracy-client = { version = "0.18.4", default-features = false }
 puffin = "0.20.0"
-puffin_egui = "0.30.0"
 
 # Debugging
 renderdoc = "0.12.1"
@@ -71,6 +69,12 @@ ron = "0.8"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 uuid = { version = "1.23.0", features = ["serde", "v4", "js"] }
+bevy_reflect = { version = "0.19.0", default-features = false, features = [
+    "std",
+    "glam",
+    "uuid",
+    "wgpu-types",
+] }
 
 # Hot reload
 hot-lib-reloader = "0.8.2"

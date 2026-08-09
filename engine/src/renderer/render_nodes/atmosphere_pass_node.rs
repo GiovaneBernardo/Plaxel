@@ -167,9 +167,8 @@ impl RenderNode for AtmospherePassNode {
         false
     }
 
-    fn inspect(&mut self, visitor: &mut dyn InspectorVisitor) -> bool {
-        self.settings.inspect(visitor);
-        true
+    fn reflect_mut(&mut self) -> Option<&mut dyn crate::reflect::PartialReflect> {
+        Some(&mut self.settings)
     }
 
     fn describe_pass(&self) -> RenderNodeDescriptor {
@@ -333,7 +332,7 @@ impl RenderNode for AtmospherePassNode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Inspector)]
+#[derive(Clone, Copy, Debug, plaxel_reflect::Reflect)]
 pub struct AtmosphereSettings {
     pub sun_direction: [f32; 3],
     pub planet_center: [f32; 3],

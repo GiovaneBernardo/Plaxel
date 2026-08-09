@@ -6,7 +6,6 @@ edition = "2024"
 [features]
 dynamic_linking = []
 puffin = ["dep:puffin", "engine/puffin"]
-puffin-ui = ["puffin", "dep:puffin_egui"]
 tracy = ["dep:tracy-client", "engine/tracy"]
 
 [lib]
@@ -26,13 +25,13 @@ eframe = { workspace = true }
 rfd = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
+bevy_reflect = { workspace = true }
 subsecond = { workspace = true }
-puffin_egui = { workspace = true, optional = true }
 puffin = { workspace = true, optional = true }
 tracy-client = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-egui-winit = "0.33.3"
+egui-winit = "0.34.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-egui-winit = { version = "0.33.3", default-features = false }
+egui-winit = { version = "0.34.2", default-features = false }

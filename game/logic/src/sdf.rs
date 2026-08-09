@@ -14,9 +14,11 @@ pub const TERRAIN_EDIT_CELL_COUNT: usize = 16;
 pub const TERRAIN_EDIT_SAMPLE_COUNT: usize = TERRAIN_EDIT_CELL_COUNT + 1;
 const TERRAIN_EDIT_LEVEL: u32 = 0;
 
+#[derive(plaxel_reflect::Reflect)]
 pub struct EarthHeightmap {
     pub width: u32,
     pub height: u32,
+    #[reflect(ignore)]
     pub samples: Vec<f32>,
     pub min_height: f32,
     pub max_height: f32,

@@ -22,6 +22,14 @@ pub struct GlobalResources {
 }
 
 impl GlobalResources {
+    pub fn for_each_reflected_mut(
+        &mut self,
+        mut visit: impl FnMut(&'static str, &mut dyn crate::reflect::PartialReflect),
+    ) {
+        visit("input", &mut self.input);
+        visit("profiling_enabled", &mut self.profiling_enabled);
+    }
+
     pub async fn new(window: Arc<Window>) -> Self {
         let frame_capturer = FrameCapturer::new();
         let renderer = Renderer::new(window.clone()).await.unwrap();

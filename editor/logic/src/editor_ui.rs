@@ -2,6 +2,7 @@ use crate::terrain_editor::{TerrainEditorState, draw_terrain_editor};
 use egui::{Color32, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use engine::math::vec3;
+use engine::reflect::{self, PartialReflect, ReflectMut};
 use engine::{
     assets::{
         importer::{AssetPayload, ImportedAsset},
@@ -10,11 +11,7 @@ use engine::{
         material::{Material, MaterialParameter, MaterialResource, MaterialValue},
         serializer,
     },
-    core::components::{
-        core::TransformComponent,
-        physics::{BodyKind, ColliderComponent, ColliderShape, RigidBodyComponent},
-        renderer::MeshRendererComponent,
-    },
+    core::components::core::TransformComponent,
     ecs::entity::Entity,
 };
 use game_types::octree::PlanetLodSettings;
@@ -25,7 +22,7 @@ use std::{
 };
 
 const EDITOR_LAYOUT_PATH: &str = "editor_layout.ron";
-const EDITOR_LAYOUT_VERSION: u32 = 4;
+const EDITOR_LAYOUT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 enum EditorTab {
@@ -36,6 +33,7 @@ enum EditorTab {
     Assets,
     Textures,
     RenderGraph,
+    Resources,
     Profiler,
     Timeline,
     Physics,
@@ -75,6 +73,9 @@ impl EditorUi {
                 if !dock_has_tab(&layout.dock_state, EditorTab::Terrain) {
                     layout.dock_state.push_to_focused_leaf(EditorTab::Terrain);
                 }
+                if !dock_has_tab(&layout.dock_state, EditorTab::Resources) {
+                    layout.dock_state.push_to_focused_leaf(EditorTab::Resources);
+                }
                 layout.version = EDITOR_LAYOUT_VERSION;
             }
             let last_layout_text = layout.to_ron();
@@ -108,6 +109,7 @@ impl EditorUi {
                 EditorTab::Assets,
                 EditorTab::Textures,
                 EditorTab::RenderGraph,
+                EditorTab::Resources,
                 EditorTab::Profiler,
                 EditorTab::Timeline,
                 EditorTab::Physics,
@@ -279,6 +281,7 @@ impl EditorUi {
                 EditorTab::Assets,
                 EditorTab::Textures,
                 EditorTab::RenderGraph,
+                EditorTab::Resources,
                 EditorTab::Profiler,
                 EditorTab::Timeline,
                 EditorTab::Physics,
@@ -465,6 +468,7 @@ impl EditorTab {
             EditorTab::Assets => "Assets",
             EditorTab::Textures => "Textures",
             EditorTab::RenderGraph => "Render Graph",
+            EditorTab::Resources => "Resources",
             EditorTab::Profiler => "Profiler",
             EditorTab::Timeline => "Timeline",
             EditorTab::Physics => "Physics",
@@ -662,6 +666,11 @@ impl TabViewer for EditorTabViewer<'_> {
                 let mut draw = subsecond::HotFn::current(draw_render_graph);
                 draw.call((ui, &mut *self.state, &mut *self.selected_render_node));
             }
+            EditorTab::Resources => {
+                engine::profile_scope!("editor.ui.tab.resources");
+                let mut draw = subsecond::HotFn::current(draw_resources);
+                draw.call((ui, &mut *self.state));
+            }
             EditorTab::Profiler => {
                 engine::profile_scope!("editor.ui.tab.profiler");
                 let mut draw = subsecond::HotFn::current(draw_profiler);
@@ -799,42 +808,284 @@ fn draw_inspector(ui: &mut Ui, state: &mut engine::State, selected_entity: &mut 
     });
 
     ui.separator();
-
-    if let Some(mut transform) = world.get_mut::<TransformComponent>(entity) {
-        component_header(ui, "Transform");
-        inspector_grid(ui, "transform_inspector_grid", |ui| {
-            vector3_row(ui, "Position", &mut transform.position);
-            quaternion_row(ui, "Rotation", &mut transform.rotation);
-            vector3_row(ui, "Scale", &mut transform.scale);
-            vector3_row(ui, "Velocity", &mut transform.velocity);
-        });
+    world.for_each_reflected_component_mut(entity, |type_name, value| {
+        component_header(ui, &display_type_name(type_name));
+        draw_reflected_value(ui, value, 0);
         ui.separator();
+    });
+}
+
+fn draw_resources(ui: &mut Ui, state: &mut engine::State) {
+    ui.label(RichText::new("Live Resources").strong());
+    ui.small("Values are edited directly; ignored runtime fields remain hidden.");
+    ui.separator();
+
+    egui::CollapsingHeader::new("Engine State")
+        .default_open(true)
+        .show(ui, |ui| {
+            state.for_each_reflected_mut(|name, value| reflected_field(ui, name, value, 0));
+        });
+
+    egui::CollapsingHeader::new("Global Resources")
+        .default_open(true)
+        .show(ui, |ui| {
+            state
+                .global_resources
+                .for_each_reflected_mut(|name, value| reflected_field(ui, name, value, 0));
+        });
+
+    ui.separator();
+    let Some(scene) = state.active_scene_mut() else {
+        ui.label("No active scene.");
+        return;
+    };
+    component_header(ui, "Active World Resources");
+    scene.world_mut().for_each_resource_mut(|type_name, value| {
+        let label = display_type_name(type_name);
+        if let Some(value) = value {
+            egui::CollapsingHeader::new(label)
+                .default_open(false)
+                .show(ui, |ui| {
+                    draw_reflected_value(ui, value, 0);
+                });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.weak("opaque runtime resource");
+            });
+        }
+    });
+}
+
+fn display_type_name(type_name: &str) -> String {
+    type_name
+        .rsplit("::")
+        .next()
+        .unwrap_or(type_name)
+        .trim_end_matches('>')
+        .to_string()
+}
+
+fn reflected_field(
+    ui: &mut Ui,
+    label: impl Into<String>,
+    value: &mut dyn PartialReflect,
+    depth: usize,
+) {
+    let label = label.into();
+    if is_reflected_leaf(value) {
+        ui.horizontal(|ui| {
+            ui.set_min_width(260.0);
+            ui.label(pretty_field_name(&label));
+            draw_reflected_value(ui, value, depth + 1);
+        });
+    } else {
+        egui::CollapsingHeader::new(pretty_field_name(&label))
+            .default_open(depth == 0)
+            .show(ui, |ui| draw_reflected_value(ui, value, depth + 1));
+    }
+}
+
+fn pretty_field_name(name: &str) -> String {
+    let mut result = String::new();
+    for (index, part) in name.split('_').filter(|part| !part.is_empty()).enumerate() {
+        if index > 0 {
+            result.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            result.push(first.to_ascii_uppercase());
+            result.extend(chars);
+        }
+    }
+    (!result.is_empty())
+        .then_some(result)
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn is_reflected_leaf(value: &dyn PartialReflect) -> bool {
+    value.try_downcast_ref::<bool>().is_some()
+        || value.try_downcast_ref::<String>().is_some()
+        || value.try_downcast_ref::<f32>().is_some()
+        || value.try_downcast_ref::<f64>().is_some()
+        || value.try_downcast_ref::<i8>().is_some()
+        || value.try_downcast_ref::<i16>().is_some()
+        || value.try_downcast_ref::<i32>().is_some()
+        || value.try_downcast_ref::<i64>().is_some()
+        || value.try_downcast_ref::<u8>().is_some()
+        || value.try_downcast_ref::<u16>().is_some()
+        || value.try_downcast_ref::<u32>().is_some()
+        || value.try_downcast_ref::<u64>().is_some()
+        || value.try_downcast_ref::<engine::math::Vec2>().is_some()
+        || value.try_downcast_ref::<engine::math::Vec3>().is_some()
+        || value.try_downcast_ref::<engine::math::Vec4>().is_some()
+        || value.try_downcast_ref::<engine::math::DVec3>().is_some()
+        || value.try_downcast_ref::<engine::math::Quat>().is_some()
+        || value
+            .try_downcast_ref::<engine::reflect::RuntimeCounter>()
+            .is_some()
+        || matches!(value.reflect_kind(), reflect::ReflectKind::Opaque)
+}
+
+fn draw_reflected_value(ui: &mut Ui, value: &mut dyn PartialReflect, depth: usize) -> bool {
+    macro_rules! drag_number {
+        ($ty:ty, $speed:expr) => {
+            if let Some(number) = value.try_downcast_mut::<$ty>() {
+                return ui.add(egui::DragValue::new(number).speed($speed)).changed();
+            }
+        };
     }
 
-    if let Some(mut body) = world.get_mut::<RigidBodyComponent>(entity) {
-        component_header(ui, "Rigid Body");
-        inspector_grid(ui, "rigid_body_inspector_grid", |ui| {
-            body_kind_row(ui, &mut body.kind);
-            scalar_row(ui, "Mass", &mut body.mass, 0.1);
-            vector3_row(ui, "Velocity", &mut body.velocity);
-        });
-        ui.separator();
+    if let Some(value) = value.try_downcast_mut::<bool>() {
+        return ui.checkbox(value, "").changed();
+    }
+    if let Some(value) = value.try_downcast_mut::<String>() {
+        return ui.text_edit_singleline(value).changed();
+    }
+    drag_number!(f32, 0.01);
+    drag_number!(f64, 0.01);
+    drag_number!(i8, 1.0);
+    drag_number!(i16, 1.0);
+    drag_number!(i32, 1.0);
+    drag_number!(i64, 1.0);
+    drag_number!(u8, 1.0);
+    drag_number!(u16, 1.0);
+    drag_number!(u32, 1.0);
+    drag_number!(u64, 1.0);
+
+    macro_rules! vector_editor {
+        ($ty:ty, $($field:ident),+ $(,)?) => {
+            if let Some(vector) = value.try_downcast_mut::<$ty>() {
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    $(changed |= ui.add(egui::DragValue::new(&mut vector.$field).speed(0.01).prefix(concat!(stringify!($field), " "))).changed();)+
+                });
+                return changed;
+            }
+        };
+    }
+    vector_editor!(engine::math::Vec2, x, y);
+    vector_editor!(engine::math::Vec3, x, y, z);
+    vector_editor!(engine::math::Vec4, x, y, z, w);
+    vector_editor!(engine::math::DVec3, x, y, z);
+    vector_editor!(engine::math::Quat, x, y, z, w);
+
+    if let Some(counter) = value.try_downcast_ref::<engine::reflect::RuntimeCounter>() {
+        ui.monospace(counter.get().to_string());
+        return false;
     }
 
-    if let Some(mut collider) = world.get_mut::<ColliderComponent>(entity) {
-        component_header(ui, "Collider");
-        inspector_grid(ui, "collider_inspector_grid", |ui| {
-            collider_shape_row(ui, &mut collider.shape);
-            scalar_row(ui, "Restitution", &mut collider.restitution, 0.01);
-            scalar_row(ui, "Friction", &mut collider.friction, 0.01);
-        });
-        ui.separator();
-    }
-
-    if world.get::<MeshRendererComponent>(entity).is_some() {
-        component_header(ui, "Mesh Renderer");
-        ui.label("Mesh and material handles are read-only for now.");
-        ui.separator();
+    match value.reflect_mut() {
+        ReflectMut::Struct(value) => {
+            let mut changed = false;
+            for index in 0..value.field_len() {
+                let name = value.name_at(index).unwrap_or("field").to_string();
+                if let Some(field) = value.field_at_mut(index) {
+                    reflected_field(ui, name, field, depth);
+                    changed = true;
+                }
+            }
+            changed
+        }
+        ReflectMut::TupleStruct(value) => {
+            for index in 0..value.field_len() {
+                if let Some(field) = value.field_mut(index) {
+                    reflected_field(ui, index.to_string(), field, depth);
+                }
+            }
+            true
+        }
+        ReflectMut::Tuple(value) => {
+            for index in 0..value.field_len() {
+                if let Some(field) = value.field_mut(index) {
+                    reflected_field(ui, index.to_string(), field, depth);
+                }
+            }
+            true
+        }
+        ReflectMut::List(value) => {
+            for index in 0..value.len() {
+                if let Some(item) = value.get_mut(index) {
+                    reflected_field(ui, format!("[{index}]"), item, depth);
+                }
+            }
+            true
+        }
+        ReflectMut::Array(value) => {
+            for index in 0..value.len() {
+                if let Some(item) = value.get_mut(index) {
+                    reflected_field(ui, format!("[{index}]"), item, depth);
+                }
+            }
+            true
+        }
+        ReflectMut::Enum(value) => {
+            let current_variant = value.variant_name().to_string();
+            let unit_variants = value
+                .get_represented_enum_info()
+                .map(|info| {
+                    (0..info.variant_len())
+                        .filter_map(|index| info.variant_at(index))
+                        .filter(|variant| matches!(variant, reflect::enums::VariantInfo::Unit(_)))
+                        .map(|variant| variant.name())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if unit_variants.len() > 1 {
+                egui::ComboBox::from_id_salt((value.reflect_type_path(), depth))
+                    .selected_text(&current_variant)
+                    .show_ui(ui, |ui| {
+                        for variant in unit_variants {
+                            if ui
+                                .selectable_label(current_variant == variant, variant)
+                                .clicked()
+                            {
+                                let patch = reflect::enums::DynamicEnum::new(variant, ());
+                                let _ = value.try_apply(&patch);
+                            }
+                        }
+                    });
+            } else {
+                ui.monospace(&current_variant);
+            }
+            for index in 0..value.field_len() {
+                let name = value
+                    .name_at(index)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| index.to_string());
+                if let Some(field) = value.field_at_mut(index) {
+                    reflected_field(ui, name, field, depth);
+                }
+            }
+            true
+        }
+        ReflectMut::Map(value) => {
+            ui.small(format!("{} map entries", value.len()));
+            for (index, (key, entry)) in value.iter().take(64).enumerate() {
+                ui.monospace(format!("[{index}] {key:?}: {entry:?}"));
+            }
+            if value.len() > 64 {
+                ui.weak(format!("… {} more entries", value.len() - 64));
+            }
+            false
+        }
+        ReflectMut::Set(value) => {
+            ui.small(format!("{} set entries", value.len()));
+            for (index, entry) in value.iter().take(64).enumerate() {
+                ui.monospace(format!("[{index}] {entry:?}"));
+            }
+            if value.len() > 64 {
+                ui.weak(format!("… {} more entries", value.len() - 64));
+            }
+            false
+        }
+        ReflectMut::Opaque(value) => {
+            ui.monospace(format!(
+                "{} (opaque)",
+                display_type_name(value.reflect_type_path())
+            ));
+            false
+        }
     }
 }
 
@@ -1295,75 +1546,10 @@ fn draw_render_node_inspector(
     };
 
     component_header(ui, "Editable Fields");
-    let inspected = inspector_grid(ui, format!("render_node_inspector_{index}"), |ui| {
-        let mut visitor = EguiInspectorVisitor { ui };
-        node.inspect(&mut visitor)
-    })
-    .inner;
-
-    if !inspected {
-        ui.label("This node does not expose editable uniforms yet.");
-    }
-}
-
-struct EguiInspectorVisitor<'a> {
-    ui: &'a mut Ui,
-}
-
-impl engine::renderer::InspectorVisitor for EguiInspectorVisitor<'_> {
-    fn field_f32(&mut self, name: &'static str, value: &mut f32) {
-        field_label(self.ui, &inspector_field_name(name));
-        drag_value(self.ui, value, 0.01, "");
-        self.ui.end_row();
-    }
-
-    fn field_i32(&mut self, name: &'static str, value: &mut i32) {
-        field_label(self.ui, &inspector_field_name(name));
-        self.ui
-            .add_sized([72.0, 20.0], egui::DragValue::new(value).speed(1.0));
-        self.ui.end_row();
-    }
-
-    fn field_u32(&mut self, name: &'static str, value: &mut u32) {
-        field_label(self.ui, &inspector_field_name(name));
-        self.ui
-            .add_sized([72.0, 20.0], egui::DragValue::new(value).speed(1.0));
-        self.ui.end_row();
-    }
-
-    fn field_bool(&mut self, name: &'static str, value: &mut bool) {
-        field_label(self.ui, &inspector_field_name(name));
-        self.ui.checkbox(value, "");
-        self.ui.end_row();
-    }
-
-    fn field_f32_array(&mut self, name: &'static str, value: &mut [f32]) {
-        field_label(self.ui, &inspector_field_name(name));
-        self.ui.horizontal(|ui| {
-            for item in value {
-                drag_value(ui, item, 0.01, "");
-            }
-        });
-        self.ui.end_row();
-    }
-}
-
-fn inspector_field_name(name: &str) -> String {
-    let mut result = String::new();
-    for (index, part) in name.split('_').filter(|part| !part.is_empty()).enumerate() {
-        if index > 0 {
-            result.push(' ');
-        }
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            result.push(first.to_ascii_uppercase());
-            result.extend(chars);
-        }
-    }
-    if result.is_empty() {
-        name.to_string()
+    if let Some(value) = node.reflect_mut() {
+        draw_reflected_value(ui, value, 0);
     } else {
-        result
+        ui.label("This node does not expose editable uniforms yet.");
     }
 }
 
@@ -1383,7 +1569,7 @@ fn comma_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
     }
 }
 
-fn draw_profiler(ui: &mut Ui, state: &mut engine::State, show_puffin_profiler: &mut bool) {
+fn draw_profiler(ui: &mut Ui, state: &mut engine::State, _show_puffin_profiler: &mut bool) {
     let snapshot = state.global_resources.profiler_snapshot.clone();
 
     ui.horizontal(|ui| {
@@ -1398,17 +1584,6 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, show_puffin_profiler: &
         }
         if ui.button("Capture GPU Frame").clicked() {
             state.global_resources.frame_capturer.request_capture();
-        }
-        #[cfg(feature = "puffin-ui")]
-        {
-            let label = if *show_puffin_profiler {
-                "Hide Puffin"
-            } else {
-                "Show Puffin"
-            };
-            if ui.button(label).clicked() {
-                *show_puffin_profiler = !*show_puffin_profiler;
-            }
         }
         ui.separator();
         ui.label(if state.global_resources.profiling_enabled {
@@ -1442,11 +1617,6 @@ fn draw_profiler(ui: &mut Ui, state: &mut engine::State, show_puffin_profiler: &
         }
     });
     ui.separator();
-
-    #[cfg(feature = "puffin-ui")]
-    if *show_puffin_profiler {
-        puffin_egui::profiler_window(ui.ctx());
-    }
 
     draw_cpu_profiler(ui, &snapshot.cpu);
     ui.separator();
@@ -2056,80 +2226,10 @@ fn field_label(ui: &mut Ui, label: &str) {
     );
 }
 
-fn vector3_row(ui: &mut Ui, label: &str, value: &mut engine::math::Vec3) {
-    field_label(ui, label);
-    ui.horizontal(|ui| {
-        drag_value(ui, &mut value.x, 0.1, "X ");
-        drag_value(ui, &mut value.y, 0.1, "Y ");
-        drag_value(ui, &mut value.z, 0.1, "Z ");
-    });
-    ui.end_row();
-}
-
-fn quaternion_row(ui: &mut Ui, label: &str, value: &mut engine::math::Quat) {
-    field_label(ui, label);
-    ui.horizontal(|ui| {
-        drag_value(ui, &mut value.w, 0.01, "W ");
-        drag_value(ui, &mut value.x, 0.01, "X ");
-        drag_value(ui, &mut value.y, 0.01, "Y ");
-        drag_value(ui, &mut value.z, 0.01, "Z ");
-    });
-    ui.end_row();
-}
-
 fn scalar_row(ui: &mut Ui, label: &str, value: &mut f32, speed: f64) {
     field_label(ui, label);
     drag_value(ui, value, speed, "");
     ui.end_row();
-}
-
-fn body_kind_row(ui: &mut Ui, value: &mut BodyKind) {
-    field_label(ui, "Kind");
-    egui::ComboBox::from_id_salt("rigid_body_kind")
-        .selected_text(match value {
-            BodyKind::Dynamic => "Dynamic",
-            BodyKind::Fixed => "Fixed",
-            BodyKind::Kinematic => "Kinematic",
-        })
-        .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(matches!(value, BodyKind::Dynamic), "Dynamic")
-                .clicked()
-            {
-                *value = BodyKind::Dynamic;
-            }
-            if ui
-                .selectable_label(matches!(value, BodyKind::Fixed), "Fixed")
-                .clicked()
-            {
-                *value = BodyKind::Fixed;
-            }
-            if ui
-                .selectable_label(matches!(value, BodyKind::Kinematic), "Kinematic")
-                .clicked()
-            {
-                *value = BodyKind::Kinematic;
-            }
-        });
-    ui.end_row();
-}
-
-fn collider_shape_row(ui: &mut Ui, shape: &mut ColliderShape) {
-    match shape {
-        ColliderShape::Sphere { radius } => scalar_row(ui, "Sphere Radius", radius, 0.05),
-        ColliderShape::Cuboid { half_extents } => {
-            vector3_row(ui, "Half Extents", half_extents);
-        }
-        ColliderShape::Trimesh { vertices, indices } => {
-            field_label(ui, "Shape");
-            ui.label(format!(
-                "Trimesh: {} vertices, {} triangles",
-                vertices.len(),
-                indices.len()
-            ));
-            ui.end_row();
-        }
-    }
 }
 
 fn drag_value(ui: &mut Ui, value: &mut f32, speed: f64, prefix: &'static str) {

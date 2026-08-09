@@ -180,6 +180,15 @@ impl From<FilterMode> for wgpu::FilterMode {
     }
 }
 
+impl From<FilterMode> for wgpu::MipmapFilterMode {
+    fn from(value: FilterMode) -> Self {
+        match value {
+            FilterMode::Nearest => Self::Nearest,
+            FilterMode::Linear => Self::Linear,
+        }
+    }
+}
+
 impl From<SamplerBorderColor> for wgpu::SamplerBorderColor {
     fn from(color: SamplerBorderColor) -> wgpu::SamplerBorderColor {
         match color {
@@ -684,7 +693,11 @@ impl RendererAPI for WgpuBackend {
 
         let output = {
             crate::profile_scope!("wgpu.acquire_surface");
-            self.surface.get_current_texture()?
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(output)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(output) => output,
+                status => anyhow::bail!("unable to acquire surface texture: {status:?}"),
+            }
         };
         let view = output
             .texture
@@ -1664,15 +1677,17 @@ impl WgpuBackend {
         let mut flags = wgpu::InstanceFlags::default();
         flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
             backends: wgpu::Backends::DX12,
-            flags,
             #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
             backends: wgpu::Backends::BROWSER_WEBGPU,
-            ..Default::default()
+            flags,
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
         });
 
         let surface = instance.create_surface(window.clone()).unwrap();
@@ -1903,6 +1918,7 @@ impl WgpuBackend {
             depth_stencil_attachment: depth_stencil_attachment,
             occlusion_query_set: None,
             timestamp_writes: None,
+            multiview_mask: None,
         });
 
         let mut ctx = WgpuRenderContext {
@@ -2000,9 +2016,9 @@ impl WgpuBackend {
                 source: wgpu::ShaderSource::Wgsl(load_shader_source(&descriptor.shader).into()),
             });
 
-        let wgpu_layouts: Vec<&wgpu::BindGroupLayout> = bind_group_layouts
+        let wgpu_layouts: Vec<Option<&wgpu::BindGroupLayout>> = bind_group_layouts
             .iter()
-            .map(|h| self.get_bind_group_layout(*h).unwrap())
+            .map(|h| Some(self.get_bind_group_layout(*h).unwrap()))
             .collect();
 
         let render_pipeline_layout =
@@ -2010,7 +2026,7 @@ impl WgpuBackend {
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Render Pipeline Layout"),
                     bind_group_layouts: &wgpu_layouts,
-                    push_constant_ranges: &[],
+                    immediate_size: 0,
                 });
 
         engine_info!("Depth Format: {:?}", texture::Texture::DEPTH_FORMAT);
@@ -2054,8 +2070,8 @@ impl WgpuBackend {
             .and_then(|ds| target_info.depth_format.map(|format| (ds, format)))
             .map(|(ds, format)| wgpu::DepthStencilState {
                 format: format.into(),
-                depth_write_enabled: ds.write_enabled,
-                depth_compare: ds.compare.into(),
+                depth_write_enabled: Some(ds.write_enabled),
+                depth_compare: Some(ds.compare.into()),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             });
@@ -2103,7 +2119,7 @@ impl WgpuBackend {
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },
-                multiview: None,
+                multiview_mask: None,
                 cache: self.pipeline_cache.as_ref(),
             })
     }

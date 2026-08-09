@@ -25,8 +25,6 @@ use crate::renderer::wgpu_backend::WgpuBackend;
 use crate::texture;
 use wgpu;
 
-pub use engine_inspector_derive::Inspector;
-
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub struct PipelineHandle(pub u32);
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
@@ -378,18 +376,6 @@ pub enum AttachmentLoadOp {
     ClearDepth(f32),
 }
 
-pub trait Inspector {
-    fn inspect(&mut self, visitor: &mut dyn InspectorVisitor);
-}
-
-pub trait InspectorVisitor {
-    fn field_f32(&mut self, name: &'static str, value: &mut f32);
-    fn field_i32(&mut self, name: &'static str, value: &mut i32);
-    fn field_u32(&mut self, name: &'static str, value: &mut u32);
-    fn field_bool(&mut self, name: &'static str, value: &mut bool);
-    fn field_f32_array(&mut self, name: &'static str, value: &mut [f32]);
-}
-
 pub trait RenderNode {
     /// Human-readable profiler label supplied automatically by the concrete pass type.
     fn profile_name(&self) -> &'static str {
@@ -404,8 +390,8 @@ pub trait RenderNode {
     fn needs_depth(&self) -> bool {
         true
     }
-    fn inspect(&mut self, _visitor: &mut dyn InspectorVisitor) -> bool {
-        false
+    fn reflect_mut(&mut self) -> Option<&mut dyn crate::reflect::PartialReflect> {
+        None
     }
     fn resize(
         &mut self,

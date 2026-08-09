@@ -1,8 +1,10 @@
 use engine::{ecs::entity::Entity, math::Vec3};
 
 // Universe origin assumes 0 0 0, no need for a displaced universe?
+#[derive(plaxel_reflect::Reflect)]
 pub struct Universe {}
 
+#[derive(plaxel_reflect::Reflect)]
 pub struct StarSystemComponent {
     pub planets: Vec<Entity>,
     pub radius: f64,

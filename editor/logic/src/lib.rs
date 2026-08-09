@@ -1,3 +1,5 @@
+pub extern crate bevy_reflect as plaxel_reflect;
+
 pub mod editor;
 pub mod editor_ui;
 pub mod egui_node;

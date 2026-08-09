@@ -5,7 +5,7 @@ use engine::{
     renderer::GeometryPassNode,
 };
 
-#[derive(Default)]
+#[derive(Default, plaxel_reflect::Reflect)]
 pub struct EditorSpawnRequests {
     pub physical_spheres: Vec<PhysicalSphereParams>,
 }
@@ -62,9 +62,12 @@ pub fn viewport_context_menu(
                     *viewport_menu_open = false;
                     let world_pos = get_world_pos(state, &viewport_menu_pos);
 
+                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         state.spawn_dropped_obj(path.as_path(), &world_pos).ok();
                     }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = world_pos;
                 }
             });
         })

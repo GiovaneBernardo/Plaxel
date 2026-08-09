@@ -1,3 +1,4 @@
+use crate::reflect::{PartialReflect, Reflect};
 use std::any::type_name;
 
 use crate::ecs::{
@@ -31,7 +32,7 @@ impl World {
         self.entities.allocate()
     }
 
-    pub fn insert<T: Component>(&mut self, entity: Entity, component: T) {
+    pub fn insert<T: Component + Reflect>(&mut self, entity: Entity, component: T) {
         let mut storage = self.storages.ensure_storage::<T>();
 
         storage.insert(entity, component, self.change_tick);
@@ -71,8 +72,46 @@ impl World {
         self.entities.deallocate(entity)
     }
 
-    pub fn insert_resource<T: Resource>(&mut self, resource: T) {
+    pub fn insert_resource<T: Resource + Reflect>(&mut self, resource: T) {
         self.resources.insert(resource);
+    }
+
+    pub fn insert_opaque<T: Component>(&mut self, entity: Entity, component: T) {
+        let mut storage = self.storages.ensure_opaque_storage::<T>();
+        storage.insert(entity, component, self.change_tick);
+        self.change_log.push(WorldChange {
+            tick: self.change_tick,
+            entity,
+            component_type: Some(type_name::<T>()),
+            kind: WorldChangeKind::Inserted,
+        });
+    }
+
+    pub fn insert_opaque_resource<T: Resource>(&mut self, resource: T) {
+        self.resources.insert_opaque(resource);
+    }
+
+    pub fn for_each_reflected_resource_mut(
+        &self,
+        visit: impl FnMut(&'static str, &mut dyn PartialReflect),
+    ) {
+        self.resources.for_each_reflected_mut(visit);
+    }
+
+    pub fn for_each_resource_mut(
+        &self,
+        visit: impl FnMut(&'static str, Option<&mut dyn PartialReflect>),
+    ) {
+        self.resources.for_each_mut(visit);
+    }
+
+    pub fn for_each_reflected_component_mut(
+        &self,
+        entity: Entity,
+        visit: impl FnMut(&'static str, &mut dyn PartialReflect),
+    ) {
+        self.storages
+            .for_each_reflected_component_mut(entity, self.change_tick, visit);
     }
 
     pub fn get<T: Component>(&self, entity: Entity) -> Option<std::cell::Ref<'_, T>> {
@@ -144,8 +183,37 @@ impl World {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, plaxel_reflect::Reflect)]
     struct TestComponent(u32);
+
+    #[derive(Debug, PartialEq, plaxel_reflect::Reflect)]
+    struct TestResource {
+        value: f32,
+    }
+
+    #[test]
+    fn reflected_components_and_resources_are_enumerated_and_mutable() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, TestComponent(1));
+        world.insert_resource(TestResource { value: 2.0 });
+
+        world.for_each_reflected_component_mut(entity, |_, value| {
+            value
+                .try_downcast_mut::<TestComponent>()
+                .expect("component should retain its concrete reflected type")
+                .0 = 3;
+        });
+        world.for_each_reflected_resource_mut(|_, value| {
+            value
+                .try_downcast_mut::<TestResource>()
+                .expect("resource should retain its concrete reflected type")
+                .value = 4.0;
+        });
+
+        assert_eq!(world.get::<TestComponent>(entity).unwrap().0, 3);
+        assert_eq!(world.get_resource::<TestResource>().unwrap().value, 4.0);
+    }
 
     #[test]
     fn independent_change_cursors_do_not_consume_each_others_events() {

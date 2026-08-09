@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const TERRAIN_FIELD_GRAPH_VERSION: u32 = 1;
 pub const TERRAIN_CHANNEL_COUNT: usize = 8;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, plaxel_reflect::Reflect)]
 pub struct TerrainFieldGraph {
     pub version: u32,
     pub name: String,
@@ -17,7 +17,7 @@ pub struct TerrainFieldGraph {
     pub layers: Vec<TerrainFieldLayer>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, plaxel_reflect::Reflect)]
 pub struct TerrainFieldLayer {
     pub id: u64,
     pub name: String,
@@ -28,7 +28,7 @@ pub struct TerrainFieldLayer {
     pub mask: Option<TerrainFieldMask>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, plaxel_reflect::Reflect)]
 pub enum TerrainFieldSource {
     Constant {
         value: f64,
@@ -49,7 +49,7 @@ pub enum TerrainFieldSource {
     Noise(TerrainNoiseNode),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, plaxel_reflect::Reflect)]
 pub struct TerrainNoiseNode {
     pub kind: TerrainNoiseKind,
     pub domain: TerrainNoiseDomain,
@@ -64,7 +64,7 @@ pub struct TerrainNoiseNode {
     pub seed_offset: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, plaxel_reflect::Reflect)]
 pub struct TerrainFieldMask {
     pub channel: TerrainFieldChannel,
     pub minimum: f64,
@@ -73,7 +73,18 @@ pub struct TerrainFieldMask {
     pub invert: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    plaxel_reflect::Reflect,
+)]
 pub enum TerrainFieldChannel {
     #[default]
     Continents,
@@ -86,7 +97,9 @@ pub enum TerrainFieldChannel {
     Density,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, plaxel_reflect::Reflect,
+)]
 pub enum TerrainFieldOperation {
     #[default]
     Add,
@@ -97,7 +110,9 @@ pub enum TerrainFieldOperation {
     Replace,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, plaxel_reflect::Reflect,
+)]
 pub enum TerrainNoiseKind {
     #[default]
     Fbm,
@@ -106,7 +121,9 @@ pub enum TerrainNoiseKind {
     Cellular,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, plaxel_reflect::Reflect,
+)]
 pub enum TerrainNoiseDomain {
     #[default]
     SurfaceMeters,
@@ -132,13 +149,13 @@ pub struct TerrainValueRange {
     pub maximum: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, plaxel_reflect::Reflect)]
 pub struct TerrainGraphApplyRequest {
     pub target: Entity,
     pub graph: TerrainFieldGraph,
 }
 
-#[derive(Default)]
+#[derive(Default, plaxel_reflect::Reflect)]
 pub struct TerrainGraphApplyQueue {
     pub requests: Vec<TerrainGraphApplyRequest>,
 }

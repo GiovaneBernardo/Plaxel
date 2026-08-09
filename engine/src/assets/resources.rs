@@ -40,7 +40,7 @@ pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     #[cfg(target_arch = "wasm32")]
     let data = {
         let url = format_url(file_name);
-        reqwest::get(url).await?.bytes().await?
+        reqwest::get(url).await?.bytes().await?.to_vec()
     };
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -7,3 +7,4 @@ edition = "2024"
 engine = { path = "../../engine" }
 bytemuck = { workspace = true }
 serde = { workspace = true }
+bevy_reflect = { workspace = true }

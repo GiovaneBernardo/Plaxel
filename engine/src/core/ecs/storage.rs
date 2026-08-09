@@ -1,6 +1,7 @@
 use crate::ecs::change::ChangeTick;
 use crate::ecs::component::Component;
 use crate::ecs::entity::Entity;
+use crate::reflect::{PartialReflect, Reflect};
 use std::any::type_name;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,19 +10,60 @@ trait ErasedStorage {
     fn as_ptr(&self) -> *const ();
     fn as_mut_ptr(&mut self) -> *mut ();
     fn remove_entity(&mut self, entity: Entity);
+    fn reflected_component_mut(
+        &mut self,
+        entity: Entity,
+        tick: ChangeTick,
+    ) -> Option<&mut dyn PartialReflect>;
 }
 
-impl<T: 'static> ErasedStorage for Storage<T> {
+struct ReflectedStorage<T>(Storage<T>);
+
+impl<T: Component + Reflect> ErasedStorage for ReflectedStorage<T> {
     fn as_ptr(&self) -> *const () {
-        self as *const Storage<T> as *const ()
+        &self.0 as *const Storage<T> as *const ()
     }
 
     fn as_mut_ptr(&mut self) -> *mut () {
-        self as *mut Storage<T> as *mut ()
+        &mut self.0 as *mut Storage<T> as *mut ()
     }
 
     fn remove_entity(&mut self, entity: Entity) {
-        self.remove(entity);
+        self.0.remove(entity);
+    }
+
+    fn reflected_component_mut(
+        &mut self,
+        entity: Entity,
+        tick: ChangeTick,
+    ) -> Option<&mut dyn PartialReflect> {
+        self.0
+            .get_mut(entity, tick)
+            .map(|value| value as &mut dyn PartialReflect)
+    }
+}
+
+struct OpaqueStorage<T>(Storage<T>);
+
+impl<T: Component> ErasedStorage for OpaqueStorage<T> {
+    fn as_ptr(&self) -> *const () {
+        &self.0 as *const Storage<T> as *const ()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut () {
+        &mut self.0 as *mut Storage<T> as *mut ()
+    }
+
+    fn remove_entity(&mut self, entity: Entity) {
+        self.0.remove(entity);
+    }
+
+    fn reflected_component_mut(
+        &mut self,
+        _entity: Entity,
+        _tick: ChangeTick,
+    ) -> Option<&mut dyn PartialReflect> {
+        None
     }
 }
 
@@ -237,17 +279,44 @@ impl Storages {
         }
     }
 
-    pub fn ensure_storage<T: Component>(&mut self) -> std::cell::RefMut<'_, Storage<T>> {
+    pub fn ensure_storage<T: Component + Reflect>(&mut self) -> std::cell::RefMut<'_, Storage<T>> {
         let type_name = type_name::<T>();
 
         let cell = self
             .map
             .entry(type_name)
-            .or_insert_with(|| RefCell::new(Box::new(Storage::<T>::new())));
+            .or_insert_with(|| RefCell::new(Box::new(ReflectedStorage(Storage::<T>::new()))));
 
         std::cell::RefMut::map(cell.borrow_mut(), |boxed| unsafe {
             // See `get_storage` for the hot-reload TypeId rationale.
             &mut *(boxed.as_mut_ptr() as *mut Storage<T>)
         })
+    }
+
+    pub fn ensure_opaque_storage<T: Component>(&mut self) -> std::cell::RefMut<'_, Storage<T>> {
+        let type_name = type_name::<T>();
+        let cell = self
+            .map
+            .entry(type_name)
+            .or_insert_with(|| RefCell::new(Box::new(OpaqueStorage(Storage::<T>::new()))));
+        std::cell::RefMut::map(cell.borrow_mut(), |boxed| unsafe {
+            &mut *(boxed.as_mut_ptr() as *mut Storage<T>)
+        })
+    }
+
+    pub fn for_each_reflected_component_mut(
+        &self,
+        entity: Entity,
+        tick: ChangeTick,
+        mut visit: impl FnMut(&'static str, &mut dyn PartialReflect),
+    ) {
+        let mut names = self.map.keys().copied().collect::<Vec<_>>();
+        names.sort_unstable();
+        for name in names {
+            let mut storage = self.map[name].borrow_mut();
+            if let Some(value) = storage.reflected_component_mut(entity, tick) {
+                visit(name, value);
+            }
+        }
     }
 }
