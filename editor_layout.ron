@@ -1,5 +1,5 @@
 (
-    version: 5,
+    version: 6,
     dock_state: (
         surfaces: [
             Main((
@@ -30,7 +30,7 @@
                                 y: 1341.3438,
                             ),
                         ),
-                        fraction: 0.58401406,
+                        fraction: 0.61844337,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
@@ -57,7 +57,7 @@
                             ),
                             max: (
                                 x: 2109.3333,
-                                y: 801.3333,
+                                y: 846.0,
                             ),
                         ),
                         viewport: (
@@ -67,7 +67,7 @@
                             ),
                             max: (
                                 x: 2109.3438,
-                                y: 801.34375,
+                                y: 846.0,
                             ),
                         ),
                         tabs: [
@@ -81,7 +81,7 @@
                         rect: (
                             min: (
                                 x: 0.0,
-                                y: 802.6667,
+                                y: 847.3333,
                             ),
                             max: (
                                 x: 2109.3333,
@@ -155,7 +155,7 @@
                         rect: (
                             min: (
                                 x: 0.0,
-                                y: 802.6667,
+                                y: 847.3333,
                             ),
                             max: (
                                 x: 1169.3334,
@@ -165,7 +165,7 @@
                         viewport: (
                             min: (
                                 x: 0.0,
-                                y: 826.65625,
+                                y: 871.34375,
                             ),
                             max: (
                                 x: 1169.3438,
@@ -180,7 +180,7 @@
                             Timeline,
                             Profiler,
                         ],
-                        active: (3),
+                        active: (0),
                         scroll: 0.0,
                         collapsed: false,
                     )),
@@ -188,7 +188,7 @@
                         rect: (
                             min: (
                                 x: 1170.0,
-                                y: 802.6667,
+                                y: 847.3333,
                             ),
                             max: (
                                 x: 2109.3333,
@@ -198,7 +198,7 @@
                         viewport: (
                             min: (
                                 x: 1170.0,
-                                y: 826.65625,
+                                y: 871.34375,
                             ),
                             max: (
                                 x: 2109.3438,
@@ -247,4 +247,5 @@
     maximize_viewport: false,
     floating_hierarchy: true,
     floating_inspector: true,
+    floating_profiler: false,
 )

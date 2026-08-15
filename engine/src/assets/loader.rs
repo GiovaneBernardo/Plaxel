@@ -6,25 +6,12 @@ use crate::assets::manager::AssetHeader;
 use crate::assets::manager::AssetManager;
 use crate::assets::manager::AssetType;
 use crate::assets::serializer::{BINARY_DELIMITER, MAGIC};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 
 pub fn load_header(path: &Path) -> anyhow::Result<AssetHeader> {
     let mut file = std::fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0; 4096];
-
-    loop {
-        let read = file.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-
-        bytes.extend_from_slice(&chunk[..read]);
-        if find_bytes(&bytes, BINARY_DELIMITER).is_some() {
-            break;
-        }
-    }
+    let bytes = read_through_header(&mut file)?;
 
     let (mut header, content_offset) = parse_text_header(&bytes)?;
     let file_len = file.metadata()?.len();
@@ -33,6 +20,39 @@ pub fn load_header(path: &Path) -> anyhow::Result<AssetHeader> {
     header.content_size = file_len.saturating_sub(content_offset as u64);
 
     Ok(header)
+}
+
+fn read_through_header(reader: &mut impl Read) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = vec![0; MAGIC.len()];
+    match reader.read_exact(&mut bytes) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
+            anyhow::bail!("invalid asset file magic");
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    if bytes.as_slice() != MAGIC {
+        anyhow::bail!("invalid asset file magic");
+    }
+
+    let mut chunk = [0; 4096];
+    loop {
+        let previous_len = bytes.len();
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            anyhow::bail!("asset file is missing binary delimiter");
+        }
+
+        bytes.extend_from_slice(&chunk[..read]);
+
+        // Preserve enough overlap to find a delimiter split across two reads,
+        // while avoiding another scan of the entire accumulated header.
+        let search_start = previous_len.saturating_sub(BINARY_DELIMITER.len() - 1);
+        if find_bytes(&bytes[search_start..], BINARY_DELIMITER).is_some() {
+            return Ok(bytes);
+        }
+    }
 }
 
 pub fn load_payload(path: &Path) -> anyhow::Result<AssetPayload> {
@@ -83,3 +103,33 @@ trait AssetLoader {
 //    fn read_header(&self, id: AssetId) -> anyhow::Result<AssetHeader>;
 //    fn read_payload(&self, id: AssetId) -> anyhow::Result<Vec<u8>>;
 //}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn rejects_non_assets_after_reading_only_the_magic_prefix() {
+        let mut reader = Cursor::new(vec![b'x'; 64 * 1024]);
+
+        let error = read_through_header(&mut reader).unwrap_err();
+
+        assert_eq!(error.to_string(), "invalid asset file magic");
+        assert_eq!(reader.position(), MAGIC.len() as u64);
+    }
+
+    #[test]
+    fn finds_a_delimiter_split_across_read_chunks() {
+        let delimiter_start = 4095;
+        let mut input = MAGIC.to_vec();
+        input.resize(delimiter_start, b'x');
+        input.extend_from_slice(BINARY_DELIMITER);
+        input.extend_from_slice(b"payload");
+        let mut reader = Cursor::new(input);
+
+        let bytes = read_through_header(&mut reader).unwrap();
+
+        assert_eq!(find_bytes(&bytes, BINARY_DELIMITER), Some(delimiter_start));
+    }
+}

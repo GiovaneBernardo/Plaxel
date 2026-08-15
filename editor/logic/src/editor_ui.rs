@@ -2692,7 +2692,9 @@ fn asset_tile_label(state: &engine::State, path: &Path) -> String {
         return format!("[DIR]\n{name}");
     }
 
-    if let Ok(header) = loader::load_header(path) {
+    if is_compiled_asset(path)
+        && let Ok(header) = loader::load_header(path)
+    {
         let icon = match header.asset_type {
             AssetType::Material => "[MAT]",
             AssetType::Texture => {
@@ -2771,6 +2773,17 @@ fn is_asset_extension(path: &Path, extension: &str) -> bool {
     path.extension()
         .and_then(|candidate| candidate.to_str())
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
+}
+
+fn is_compiled_asset(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "plxmesh" | "plxmat" | "plxtex" | "plax"
+            )
+        })
 }
 
 fn project_root() -> PathBuf {
