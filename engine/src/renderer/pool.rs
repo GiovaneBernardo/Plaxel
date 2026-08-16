@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::model::VertexLayout;
+use crate::prelude::*;
 use crate::renderer::BufferHandle;
 use offset_allocator::{Allocation, Allocator};
 

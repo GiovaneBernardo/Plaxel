@@ -1,8 +1,9 @@
+use crate::EditorContext;
 use engine::math::vec3;
 use engine::{core::components::core::TransformComponent, ecs::query::Query};
 
 #[unsafe(no_mangle)]
-pub fn hierarchy_draw(state: &mut engine::State, ctx: &egui::Context) {
+pub fn hierarchy_draw(state: &mut EditorContext<'_>, ctx: &egui::Context) {
     egui::Window::new("Hierarchy")
         .resizable([true, true])
         .default_size([2000.0, 1000.0])

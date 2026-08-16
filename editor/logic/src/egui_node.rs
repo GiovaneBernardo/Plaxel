@@ -10,6 +10,7 @@ use engine::renderer::{
     RenderResources,
 };
 
+use crate::EditorContext;
 use crate::editor_ui::EditorUi;
 use crate::viewport_context_menu::viewport_context_menu;
 
@@ -44,7 +45,7 @@ impl EguiRenderNode {
     }
 
     /// Initialize egui_winit. Call once after window is available.
-    pub fn init_winit(&mut self, window: &engine::Window) {
+    pub fn init_winit(&mut self, window: &winit::window::Window) {
         if self.egui_winit.is_none() {
             self.egui_winit = Some(egui_winit::State::new(
                 self.egui_ctx.clone(),
@@ -58,23 +59,24 @@ impl EguiRenderNode {
     }
 
     /// Process input and build egui UI. Call during the update phase.
-    pub fn process(&mut self, state: &mut engine::State) {
+    pub fn process(&mut self, state: &mut EditorContext<'_>, events: &[winit::event::WindowEvent]) {
+        let window = state.global_resources.window.clone();
         {
             engine::profile_scope!("editor.egui.init_winit");
-            self.init_winit(&state.window);
+            self.init_winit(&window);
         }
         let egui_winit = self.egui_winit.as_mut().unwrap();
 
         {
             engine::profile_scope!("editor.egui.window_events");
-            for event in &state.events {
-                let _ = egui_winit.on_window_event(&state.window, event);
+            for event in events {
+                let _ = egui_winit.on_window_event(&window, event);
             }
         }
 
         let raw_input = {
             engine::profile_scope!("editor.egui.take_input");
-            egui_winit.take_egui_input(&state.window)
+            egui_winit.take_egui_input(&window)
         };
 
         let full_output = {
@@ -124,15 +126,15 @@ impl EguiRenderNode {
 
         {
             engine::profile_scope!("editor.egui.platform_output");
-            egui_winit.handle_platform_output(&state.window, full_output.platform_output);
+            egui_winit.handle_platform_output(&window, full_output.platform_output);
         }
 
         {
             engine::profile_scope!("editor.egui.screen_descriptor");
-            let size = state.window.inner_size();
+            let size = window.inner_size();
             self.screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [size.width, size.height],
-                pixels_per_point: state.window.scale_factor() as f32,
+                pixels_per_point: window.scale_factor() as f32,
             };
         }
 

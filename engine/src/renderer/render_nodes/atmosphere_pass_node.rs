@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::assets::material::Material;
 use crate::assets::material::{TextureAsset, TextureMip};
-use crate::renderer::*;
+use crate::prelude::*;
+use crate::renderer::FullscreenPassNode;
 
 pub struct AtmospherePassNode {
     fullscreen: FullscreenPassNode,

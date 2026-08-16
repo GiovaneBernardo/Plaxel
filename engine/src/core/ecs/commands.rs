@@ -7,13 +7,13 @@ use crate::{
     ecs::{component::Component, entity::Entity, system::SystemContext},
 };
 
-pub trait Command {
+pub trait Command: Send {
     fn apply(self: Box<Self>, ctx: &mut SystemContext);
 }
 
 impl<F> Command for F
 where
-    F: FnOnce(&mut SystemContext),
+    F: FnOnce(&mut SystemContext) + Send,
 {
     fn apply(self: Box<Self>, ctx: &mut SystemContext) {
         self(ctx);
@@ -36,7 +36,7 @@ impl Commands {
         Self { queue: Vec::new() }
     }
 
-    pub fn push(&mut self, command: impl FnOnce(&mut SystemContext) + 'static) {
+    pub fn push(&mut self, command: impl FnOnce(&mut SystemContext) + Send + 'static) {
         self.queue.push(Box::new(command));
     }
 

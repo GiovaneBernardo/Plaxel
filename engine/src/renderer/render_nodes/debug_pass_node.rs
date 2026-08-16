@@ -4,7 +4,7 @@ use crate::assets::manager::Handle;
 use crate::assets::material::Material;
 use crate::camera;
 use crate::model::MeshAsset;
-use crate::renderer::core::*;
+use crate::prelude::*;
 use crate::renderer::ids::material_passes;
 
 #[repr(C)]

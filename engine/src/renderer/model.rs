@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     assets::manager::{Asset, AssetType},
+    prelude::*,
     texture,
 };
 
@@ -105,39 +106,6 @@ pub struct Material {
     #[allow(dead_code)]
     pub diffuse_texture: texture::Texture,
     pub bind_group: wgpu::BindGroup,
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum StepMode {
-    Vertex,
-    Instance,
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VertexLayout {
-    pub stride: u64,
-    pub step_mode: StepMode,
-    pub attributes: Vec<VertexAttribute>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VertexAttribute {
-    pub offset: u64,
-    pub shader_location: u32,
-    pub format: AttributeFormat,
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum AttributeFormat {
-    Float32,
-    Float32x2,
-    Float32x3,
-    Float32x4,
-    Uint32,
-    Uint8x4,
-    Snorm8x4,
-    Unorm8x4,
-    // add as needed
 }
 
 #[derive(Clone, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]

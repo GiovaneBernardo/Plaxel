@@ -5,6 +5,7 @@ use crate::ecs::{
     change::{ChangeCursor, ChangeTick, WorldChange, WorldChangeKind},
     component::Component,
     entity::{Entities, Entity},
+    event::{Event, Events},
     resource::{Resource, Resources},
     storage::{Storage, Storages},
 };
@@ -89,6 +90,26 @@ impl World {
 
     pub fn insert_opaque_resource<T: Resource>(&mut self, resource: T) {
         self.resources.insert_opaque(resource);
+    }
+
+    pub fn contains_resource<T: Resource>(&self) -> bool {
+        self.resources.contains::<T>()
+    }
+
+    pub fn init_resource<T: Resource + Reflect + Default>(&mut self) {
+        if !self.contains_resource::<T>() {
+            self.insert_resource(T::default());
+        }
+    }
+
+    pub fn init_opaque_resource<T: Resource + Default>(&mut self) {
+        if !self.contains_resource::<T>() {
+            self.insert_opaque_resource(T::default());
+        }
+    }
+
+    pub fn add_event<E: Event>(&mut self) {
+        self.init_opaque_resource::<Events<E>>();
     }
 
     pub fn for_each_reflected_resource_mut(

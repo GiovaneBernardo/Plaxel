@@ -9,8 +9,25 @@ use crate::{
             ColliderComponent, RapierColliderHandle, RapierRigidBodyHandle, RigidBodyComponent,
         },
     },
-    ecs::{commands::Commands, query::Query, system::SystemContext},
+    ecs::{
+        commands::Commands, plugin::Plugin, query::Query, resource::ResMut, schedule::CoreSchedule,
+        system::SystemContext,
+    },
 };
+
+pub struct PhysicsPlugin;
+
+impl Plugin for PhysicsPlugin {
+    fn build(&self, app: &mut crate::App) {
+        app.insert_resource(Physics::new())
+            .add_system(CoreSchedule::PostUpdate, step_physics);
+    }
+}
+
+fn step_physics(mut physics: ResMut<Physics>) {
+    crate::profile_scope!("physics.step");
+    physics.step();
+}
 
 #[derive(plaxel_reflect::Reflect)]
 #[reflect(from_reflect = false)]
@@ -256,4 +273,42 @@ impl Physics {
             }
         });
     }
+}
+
+pub fn cook_trimesh_indices(vertices: &[crate::math::Vec3], indices: &[u32]) -> Vec<[u32; 3]> {
+    let vertex_count = vertices.len() as u32;
+    let mut triangles = Vec::with_capacity(indices.len() / 3);
+
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        if a >= vertex_count || b >= vertex_count || c >= vertex_count {
+            continue;
+        }
+
+        let pa = vertices[a as usize];
+        let pb = vertices[b as usize];
+        let pc = vertices[c as usize];
+        if !pa.x.is_finite()
+            || !pa.y.is_finite()
+            || !pa.z.is_finite()
+            || !pb.x.is_finite()
+            || !pb.y.is_finite()
+            || !pb.z.is_finite()
+            || !pc.x.is_finite()
+            || !pc.y.is_finite()
+            || !pc.z.is_finite()
+        {
+            continue;
+        }
+
+        let ab = pb - pa;
+        let ac = pc - pa;
+        if ab.cross(ac).length_squared() <= f32::EPSILON {
+            continue;
+        }
+
+        triangles.push([a, b, c]);
+    }
+
+    triangles
 }

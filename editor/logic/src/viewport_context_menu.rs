@@ -1,3 +1,4 @@
+use crate::EditorContext;
 use egui::{Pos2, Response};
 use engine::math::vec3;
 use engine::{
@@ -30,7 +31,7 @@ pub fn editor_spawn_system(
 pub fn viewport_context_menu(
     viewport_menu_pos: &mut egui::Pos2,
     viewport_menu_open: &mut bool,
-    state: &mut engine::State,
+    state: &mut EditorContext<'_>,
     ctx: &egui::Context,
 ) -> Response {
     egui::Area::new(egui::Id::new("viewport_context_menu"))
@@ -74,7 +75,7 @@ pub fn viewport_context_menu(
         .response
 }
 
-pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> engine::math::Vec3 {
+pub fn get_world_pos(state: &mut EditorContext<'_>, mouse_pos: &Pos2) -> engine::math::Vec3 {
     let Some(mut taken_node) = state
         .global_resources
         .renderer
@@ -85,7 +86,7 @@ pub fn get_world_pos(state: &mut engine::State, mouse_pos: &Pos2) -> engine::mat
     };
 
     let mut world_pos = vec3(0.0, 0.0, 0.0);
-    let pixels_per_point = state.window.scale_factor() as f32;
+    let pixels_per_point = state.global_resources.window.scale_factor() as f32;
     let physical_mouse_pos = Pos2::new(
         mouse_pos.x * pixels_per_point,
         mouse_pos.y * pixels_per_point,

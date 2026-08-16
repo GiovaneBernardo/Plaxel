@@ -2,7 +2,15 @@ pub extern crate bevy_reflect as plaxel_reflect;
 
 use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::input::KeyCode;
+use engine::core::window::{
+    KeyboardInput, MouseButtonInput, MouseMotion, MouseWheel, WindowResized,
+};
 use engine::ecs::entity::Entity;
+use engine::ecs::event::EventReader;
+use engine::ecs::plugin::Plugin;
+use engine::ecs::query::Query;
+use engine::ecs::resource::ResMut;
+use engine::ecs::schedule::CoreSchedule;
 use engine::ecs::system::SystemContext;
 use engine::ecs::world::World;
 
@@ -62,6 +70,108 @@ struct GameState {
     max_depth: u32,
     octree_job_in_flight: bool,
     terrain_brush_radius: f32,
+}
+
+pub struct GamePlugin;
+impl Plugin for GamePlugin {
+    fn build(&self, app: &mut engine::App) {
+        app.add_named_legacy_system(
+            CoreSchedule::Startup,
+            "game.initialize_state",
+            initialize_game_state,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Startup,
+            "game.terrain_producer_init",
+            render::producers::planet_terrain_producer::planet_terrain_producer_init,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Startup,
+            "game.planet_init",
+            systems::planets::planet_system_init,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Startup,
+            "game.universe_init",
+            systems::planets::universe_system::universe_system_init,
+        )
+        .add_system(CoreSchedule::Startup, report_schedules_started)
+        .add_named_legacy_system(
+            CoreSchedule::Update,
+            "game.planet_update",
+            systems::planets::planet_system_update,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Update,
+            "game.create_missing_rapier_bodies",
+            Physics::create_missing_rapier_bodies_system,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Update,
+            "game.player_interaction",
+            player_interaction_system,
+        )
+        .add_system(CoreSchedule::Update, handle_key_press)
+        .add_system(CoreSchedule::Update, handle_mouse_button)
+        .add_system(CoreSchedule::Update, handle_mouse_motion)
+        .add_system(CoreSchedule::Update, handle_mouse_scroll)
+        .add_system(CoreSchedule::Update, handle_resize)
+        .add_named_legacy_system(
+            CoreSchedule::Update,
+            "game.camera_update",
+            camera_update_system,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Update,
+            "game.terrain_producer_update",
+            render::producers::planet_terrain_producer::planet_terrain_producer_update,
+        )
+        .add_system(
+            CoreSchedule::Update,
+            engine::core::systems::systems::engine_input_system,
+        )
+        .add_system(CoreSchedule::Update, report_window_resize)
+        .add_named_legacy_system(
+            CoreSchedule::RenderExtract,
+            "game.extract_render_state",
+            extract_game_render_state,
+        );
+    }
+}
+
+fn report_schedules_started() {
+    game_info!("Startup and frame schedules are running");
+}
+
+/// Small example of consuming a winit event after the App adapter has placed
+/// it in the ECS world. Each system gets its own independent reader cursor.
+fn report_window_resize(mut events: EventReader<WindowResized>) {
+    for event in events.read() {
+        game_info!("Window resized to {}x{}", event.width, event.height);
+    }
+}
+
+fn handle_resize(mut events: EventReader<WindowResized>, camera: Option<ResMut<GameCamera>>) {
+    let Some(mut camera) = camera else {
+        return;
+    };
+
+    for event in events.read() {
+        if event.width == 0 || event.height == 0 {
+            continue;
+        }
+
+        camera.camera.aspect = event.width as f32 / event.height as f32;
+        let camera_copy = engine::camera::Camera {
+            position: camera.camera.position,
+            orientation: camera.camera.orientation,
+            aspect: camera.camera.aspect,
+            fovy: camera.camera.fovy,
+            znear: camera.camera.znear,
+            zfar: camera.camera.zfar,
+        };
+        camera.uniform.update_view_proj(&camera_copy);
+    }
 }
 
 #[repr(C)]
@@ -178,9 +288,12 @@ const MAX_CHUNK_WORKER_SPAWNS_PER_FRAME: usize = 12;
 const TERRAIN_PHYSICS_RADIUS: f32 = 384.0;
 const MAX_TERRAIN_PHYSICS_BRICK_SIZE: f32 = 64.0;
 const COARSE_PLANET_BRICK_LEVEL: u8 = 6;
-#[unsafe(no_mangle)]
-pub fn initialize_game_state(state: &mut engine::State) {
-    let size = state.window.inner_size();
+
+fn initialize_game_state(
+    ctx: &mut SystemContext<'_>,
+    _commands: &mut engine::ecs::commands::Commands,
+) {
+    let size = ctx.globals.window.inner_size();
     let aspect = size.width as f32 / size.height.max(1) as f32;
 
     let mut camera = engine::camera::Camera {
@@ -195,26 +308,22 @@ pub fn initialize_game_state(state: &mut engine::State) {
         zfar: 15_000_000.0,
     };
     if camera.position.length() > PLANET_SIZE as f32 {
-        camera.position = engine::math::vec3(0.0, PLANET_SIZE as f32, 0.0);
+        camera.position = vec3(0.0, PLANET_SIZE as f32, 0.0);
     }
 
     let mut uniform = engine::camera::CameraUniform::new();
     uniform.update_view_proj(&camera);
-    state
-        .global_resources
+    ctx.globals
         .renderer
         .render_resources
         .insert(CameraData::from_camera(&camera, uniform));
 
-    let scene = state.active_scene_mut().unwrap();
-    let world = scene.world_mut();
-
+    let world = &mut ctx.world;
     world.insert_resource(GameModeState {
         mode: GameMode::Walking,
     });
     world.insert_resource(InputMap::default());
     world.insert_resource(PlanetLodSettings::default());
-    //load_earth_heightmap_resource(world);
 
     let velocity_sample_pos = camera.position;
     let velocity_sample_time = Instant::now();
@@ -223,10 +332,10 @@ pub fn initialize_game_state(state: &mut engine::State) {
     world.insert(
         camera_entity,
         TransformComponent {
-            position: engine::math::vec3(0.0, 8573.0, 0.0),
+            position: vec3(0.0, 8573.0, 0.0),
             rotation: Quat::IDENTITY,
-            scale: engine::math::vec3(1.0, 1.0, 1.0),
-            velocity: engine::math::vec3(0.0, 0.0, 0.0),
+            scale: vec3(1.0, 1.0, 1.0),
+            velocity: vec3(0.0, 0.0, 0.0),
         },
     );
     world.insert(
@@ -270,110 +379,238 @@ pub fn initialize_game_state(state: &mut engine::State) {
     });
 }
 
-#[unsafe(no_mangle)]
-pub fn register_systems(state: &mut engine::State) {
-    initialize_game_state(state);
-    register_static_schedule_systems(state);
-}
-
-fn register_static_schedule_systems(state: &mut engine::State) {
-    let Some(scene) = state.active_scene_mut() else {
-        return;
-    };
-
-    let init_schedule_mut = scene.init_schedule_mut();
-    init_schedule_mut
-        .add_system(render::producers::planet_terrain_producer::planet_terrain_producer_init);
-    init_schedule_mut.add_system(hot_planet_system_init);
-    init_schedule_mut.add_system(systems::planets::universe_system::universe_system_init);
-
-    let update_schedule_mut = scene.update_schedule_mut();
-    update_schedule_mut.add_system(hot_planet_system_update);
-    update_schedule_mut.add_system(Physics::create_missing_rapier_bodies_system);
-    update_schedule_mut.add_static_system(hot_player_interaction_system);
-    update_schedule_mut.add_system(hot_camera_update_system);
-    update_schedule_mut
-        .add_system(render::producers::planet_terrain_producer::planet_terrain_producer_update);
-    update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
-}
-
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub fn hot_planet_system_init(
-    ctx: &mut engine::ecs::system::SystemContext,
-    commands: &mut engine::ecs::commands::Commands,
+fn extract_game_render_state(
+    ctx: &mut SystemContext<'_>,
+    _commands: &mut engine::ecs::commands::Commands,
 ) {
-    systems::planets::planet_system_init(ctx, commands);
+    let renderer = &mut ctx.globals.renderer;
+    let world = &*ctx.world;
+
+    sync_camera_to_renderer(renderer, world);
+    sync_planet_debug(renderer, world);
+    sync_planet_octree_debug(renderer, world);
+    sync_physics_debug(renderer, world);
 }
 
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub fn hot_planet_system_update(
-    ctx: &mut engine::ecs::system::SystemContext,
-    commands: &mut engine::ecs::commands::Commands,
-) {
-    systems::planets::planet_system_update(ctx, commands);
-}
+// #[unsafe(no_mangle)]
+// pub fn initialize_game_state(state: &mut engine::State) {
+//     let size = state.window.inner_size();
+//     let aspect = size.width as f32 / size.height.max(1) as f32;
 
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub fn hot_player_interaction_system(
-    ctx: &mut engine::ecs::system::SystemContext,
-    commands: &mut engine::ecs::commands::Commands,
-) {
-    player_interaction_system(ctx, commands);
-}
+//     let mut camera = engine::camera::Camera {
+//         position: (0.0, PLANET_SIZE as f32, 2.0).into(),
+//         orientation: engine::camera::Camera::look_at(
+//             vec3(0.01, -1.0, 0.0).normalize(),
+//             vec3(0.0, 0.0, -1.0),
+//         ),
+//         aspect,
+//         fovy: 65.0,
+//         znear: 0.1,
+//         zfar: 15_000_000.0,
+//     };
+//     if camera.position.length() > PLANET_SIZE as f32 {
+//         camera.position = engine::math::vec3(0.0, PLANET_SIZE as f32, 0.0);
+//     }
 
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub fn hot_camera_update_system(
-    ctx: &mut engine::ecs::system::SystemContext,
-    commands: &mut engine::ecs::commands::Commands,
-) {
-    camera_update_system(ctx, commands);
-}
+//     let mut uniform = engine::camera::CameraUniform::new();
+//     uniform.update_view_proj(&camera);
+//     state
+//         .global_resources
+//         .renderer
+//         .render_resources
+//         .insert(CameraData::from_camera(&camera, uniform));
 
-#[unsafe(no_mangle)]
-pub fn render() {}
+//     let scene = state.active_scene_mut().unwrap();
+//     let world = scene.world_mut();
 
-#[unsafe(no_mangle)]
-pub fn update(state: &mut engine::State) {
-    engine::profile_scope!("game.update");
-    let mut update = subsecond::HotFn::current(update_impl);
-    update.call((state,));
-}
+//     world.insert_resource(GameModeState {
+//         mode: GameMode::Walking,
+//     });
+//     world.insert_resource(InputMap::default());
+//     world.insert_resource(PlanetLodSettings::default());
+//     //load_earth_heightmap_resource(world);
 
-fn update_impl(state: &mut engine::State) {
-    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
-        return;
-    };
+//     let velocity_sample_pos = camera.position;
+//     let velocity_sample_time = Instant::now();
 
-    // avoid simultaneous mutable borrows of state.global_resources
-    let scenes = &mut state.scenes;
-    let Some(scene) = scenes.get_mut(scene_index) else {
-        return;
-    };
+//     let camera_entity = world.spawn();
+//     world.insert(
+//         camera_entity,
+//         TransformComponent {
+//             position: engine::math::vec3(0.0, 8573.0, 0.0),
+//             rotation: Quat::IDENTITY,
+//             scale: engine::math::vec3(1.0, 1.0, 1.0),
+//             velocity: engine::math::vec3(0.0, 0.0, 0.0),
+//         },
+//     );
+//     world.insert(
+//         camera_entity,
+//         CameraComponent {
+//             speed: 1.0,
+//             fov: 75.0,
+//             far_plane: 15000.0,
+//             near_plane: 0.001,
+//         },
+//     );
 
-    // borrow renderer after using scenes to avoid overlapping mutable borrows
-    let renderer = &mut state.global_resources.renderer;
-    {
-        engine::profile_scope!("game.update.sync_camera");
-        sync_camera_to_renderer(renderer, scene.world());
+//     world.insert_resource(GameCamera {
+//         entity: camera_entity,
+//         world_position: velocity_sample_pos.as_dvec3(),
+//         camera,
+//         controller: engine::camera::CameraController::new(0.2),
+//         uniform,
+//         previous_world_position: velocity_sample_pos.as_dvec3(),
+//         velocity_sample_pos,
+//         velocity_sample_time,
+//         velocity_sample_distance: 0.0,
+//     });
+
+//     world.insert_resource(GameState {
+//         start_with_earth_like_terrain: true,
+//         previous_leaves: HashMap::new(),
+//         current_leaves: HashMap::new(),
+//         mesh_neighbor_signatures: HashMap::new(),
+//         terrain_colliders: HashMap::new(),
+//         in_flight: HashSet::new(),
+//         empty_chunks: HashSet::new(),
+//         empty_neighbor_signatures: HashMap::new(),
+//         update_octree: true,
+//         terrain_physics_enabled: true,
+//         debug_nodes: Vec::new(),
+//         debug_depth: 0,
+//         max_depth: 0,
+//         octree_job_in_flight: false,
+//         terrain_brush_radius: 10.0,
+//     });
+// }
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    #[test]
+    fn game_schedules_initialize_before_startup_resources_are_created() {
+        let mut app = engine::App::new();
+        app.add_plugin(engine::PlaxelDefaultPlugin)
+            .add_plugin(GamePlugin);
+
+        app.initialize_schedules();
+
+        assert!(
+            app.schedules
+                .schedules
+                .get(&CoreSchedule::Startup)
+                .is_some_and(|schedule| schedule.system_accesses().count() >= 5)
+        );
     }
-    {
-        engine::profile_scope!("game.update.sync_planet_debug");
-        sync_planet_debug(renderer, scene.world());
-    }
-    {
-        engine::profile_scope!("game.update.sync_octree_debug");
-        sync_planet_octree_debug(renderer, scene.world());
-    }
-    {
-        engine::profile_scope!("game.update.sync_physics_debug");
-        sync_physics_debug(renderer, scene.world());
-    }
-    state.frame_index += 1;
 }
+
+// #[unsafe(no_mangle)]
+// pub fn register_systems(state: &mut engine::State) {
+//     initialize_game_state(state);
+//     register_static_schedule_systems(state);
+// }
+
+// fn register_static_schedule_systems(state: &mut engine::State) {
+//     let Some(scene) = state.active_scene_mut() else {
+//         return;
+//     };
+
+//     let init_schedule_mut = scene.init_schedule_mut();
+//     init_schedule_mut.add_legacy_system(
+//         render::producers::planet_terrain_producer::planet_terrain_producer_init,
+//     );
+//     init_schedule_mut.add_legacy_system(hot_planet_system_init);
+//     init_schedule_mut.add_legacy_system(systems::planets::universe_system::universe_system_init);
+
+//     let update_schedule_mut = scene.update_schedule_mut();
+//     update_schedule_mut.add_legacy_system(hot_planet_system_update);
+//     update_schedule_mut.add_legacy_system(Physics::create_missing_rapier_bodies_system);
+//     update_schedule_mut.add_static_legacy_system(hot_player_interaction_system);
+//     update_schedule_mut.add_legacy_system(hot_camera_update_system);
+//     update_schedule_mut.add_legacy_system(
+//         render::producers::planet_terrain_producer::planet_terrain_producer_update,
+//     );
+//     update_schedule_mut.add_system(engine::core::systems::systems::engine_input_system);
+// }
+
+// #[unsafe(no_mangle)]
+// #[inline(never)]
+// pub fn hot_planet_system_init(
+//     ctx: &mut engine::ecs::system::SystemContext,
+//     commands: &mut engine::ecs::commands::Commands,
+// ) {
+//     systems::planets::planet_system_init(ctx, commands);
+// }
+
+// #[unsafe(no_mangle)]
+// #[inline(never)]
+// pub fn hot_planet_system_update(
+//     ctx: &mut engine::ecs::system::SystemContext,
+//     commands: &mut engine::ecs::commands::Commands,
+// ) {
+//     systems::planets::planet_system_update(ctx, commands);
+// }
+
+// #[unsafe(no_mangle)]
+// #[inline(never)]
+// pub fn hot_player_interaction_system(
+//     ctx: &mut engine::ecs::system::SystemContext,
+//     commands: &mut engine::ecs::commands::Commands,
+// ) {
+//     player_interaction_system(ctx, commands);
+// }
+
+// #[unsafe(no_mangle)]
+// #[inline(never)]
+// pub fn hot_camera_update_system(
+//     ctx: &mut engine::ecs::system::SystemContext,
+//     commands: &mut engine::ecs::commands::Commands,
+// ) {
+//     camera_update_system(ctx, commands);
+// }
+
+// #[unsafe(no_mangle)]
+// pub fn render() {}
+
+// #[unsafe(no_mangle)]
+// pub fn update(state: &mut engine::State) {
+//     engine::profile_scope!("game.update");
+//     let mut update = subsecond::HotFn::current(update_impl);
+//     update.call((state,));
+// }
+
+// fn update_impl(state: &mut engine::State) {
+//     let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
+//         return;
+//     };
+
+//     // avoid simultaneous mutable borrows of state.global_resources
+//     let scenes = &mut state.scenes;
+//     let Some(scene) = scenes.get_mut(scene_index) else {
+//         return;
+//     };
+
+//     // borrow renderer after using scenes to avoid overlapping mutable borrows
+//     let renderer = &mut state.global_resources.renderer;
+//     {
+//         engine::profile_scope!("game.update.sync_camera");
+//         sync_camera_to_renderer(renderer, scene.world());
+//     }
+//     {
+//         engine::profile_scope!("game.update.sync_planet_debug");
+//         sync_planet_debug(renderer, scene.world());
+//     }
+//     {
+//         engine::profile_scope!("game.update.sync_octree_debug");
+//         sync_planet_octree_debug(renderer, scene.world());
+//     }
+//     {
+//         engine::profile_scope!("game.update.sync_physics_debug");
+//         sync_physics_debug(renderer, scene.world());
+//     }
+//     state.frame_index += 1;
+// }
 
 fn camera_update_system(ctx: &mut SystemContext, _commands: &mut engine::ecs::commands::Commands) {
     let world = &mut ctx.world;
@@ -519,78 +756,6 @@ fn sync_planet_octree_debug(renderer: &mut engine::renderer::Renderer, world: &W
     });
 }
 
-// TODO: This should probably be deprecated as now inputs are passed around with InputState world's resource
-// Or maybe not, as it works well for debugging stuff
-#[unsafe(no_mangle)]
-pub fn handle_key_press(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
-    let mut handler = subsecond::HotFn::current(handle_key_press_impl);
-    handler.call((state, key_code, pressed));
-}
-
-fn handle_key_press_impl(state: &mut engine::State, key_code: KeyCode, pressed: bool) {
-    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
-        return;
-    };
-    let Some(scene) = state.scenes.get_mut(scene_index) else {
-        return;
-    };
-    let world = scene.world_mut();
-
-    if let Some(mut camera) = world.get_resource_mut::<GameCamera>() {
-        let mut camera_transform = world.get_mut::<TransformComponent>(camera.entity).unwrap();
-        camera.controller.handle_key(key_code, pressed);
-
-        if pressed && key_code == KeyCode::PageUp {
-            camera_transform.position = engine::math::vec3(0.0, PLANET_SIZE as f32, 0.0);
-            camera.world_position = camera_transform.position.as_dvec3();
-        }
-        if pressed && key_code == KeyCode::PageDown {
-            camera_transform.position = engine::math::vec3(0.0, 0.0, 0.0);
-            camera.world_position = camera_transform.position.as_dvec3();
-        }
-    }
-
-    if let Some(mut game_state) = world.get_resource_mut::<GameState>() {
-        if pressed && key_code == KeyCode::KeyK {
-            game_state.update_octree = !game_state.update_octree;
-        }
-
-        if pressed && key_code == KeyCode::KeyP {
-            game_state.terrain_physics_enabled = !game_state.terrain_physics_enabled;
-            if !game_state.terrain_physics_enabled {
-                if let Some(mut physics) = world.get_resource_mut::<Physics>() {
-                    for (_, handle) in game_state.terrain_colliders.drain() {
-                        physics.remove_collider(handle.0);
-                    }
-                }
-            }
-        }
-
-        if pressed && key_code == KeyCode::KeyL {
-            if let Some(mut physics) = world.get_resource_mut::<Physics>() {
-                for (_, handle) in game_state.terrain_colliders.drain() {
-                    physics.remove_collider(handle.0);
-                }
-            }
-            game_state.previous_leaves.clear();
-            game_state.current_leaves.clear();
-            game_state.mesh_neighbor_signatures.clear();
-            game_state.in_flight.clear();
-            game_state.empty_chunks.clear();
-            game_state.empty_neighbor_signatures.clear();
-            game_state.debug_nodes.clear();
-            game_state.octree_job_in_flight = false;
-        }
-
-        if pressed && key_code == KeyCode::BracketLeft {
-            game_state.debug_depth = (game_state.debug_depth + 1).min(game_state.max_depth);
-        }
-        if pressed && key_code == KeyCode::BracketRight {
-            game_state.debug_depth = game_state.debug_depth.saturating_sub(1);
-        }
-    }
-}
-
 fn cook_terrain_collider_mesh(
     vertices: &[PlanetVertex],
     indices: &[u32],
@@ -644,94 +809,119 @@ fn cook_terrain_collider_mesh(
     Some((collider_vertices, collider_indices))
 }
 
-#[unsafe(no_mangle)]
-pub fn handle_mouse_button(state: &mut engine::State, button: engine::MouseButton, pressed: bool) {
-    let mut handler = subsecond::HotFn::current(handle_mouse_button_impl);
-    handler.call((state, button, pressed));
-}
+fn handle_key_press(
+    mut events: EventReader<KeyboardInput>,
+    camera: Option<ResMut<GameCamera>>,
+    game_state: Option<ResMut<GameState>>,
+    physics: Option<ResMut<Physics>>,
+    mut transforms: Query<(&mut TransformComponent,)>,
+) {
+    let mut camera = camera;
+    let mut game_state = game_state;
+    let mut physics = physics;
 
-fn handle_mouse_button_impl(state: &mut engine::State, button: engine::MouseButton, pressed: bool) {
-    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
-        return;
-    };
-    let Some(scene) = state.scenes.get_mut(scene_index) else {
-        return;
-    };
+    for event in events.read() {
+        if let Some(camera) = camera.as_mut() {
+            camera.controller.handle_key(event.key_code, event.pressed);
 
-    if button == engine::MouseButton::Right {
-        if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
-            camera.controller.handle_mouse_click(pressed);
+            if event.pressed && !event.repeat {
+                let new_position = match event.key_code {
+                    KeyCode::PageUp => Some(vec3(0.0, PLANET_SIZE as f32, 0.0)),
+                    KeyCode::PageDown => Some(Vec3::ZERO),
+                    _ => None,
+                };
+
+                if let Some(new_position) = new_position {
+                    let camera_entity = camera.entity;
+                    transforms.for_each(|entity, (transform,)| {
+                        if entity == camera_entity {
+                            transform.position = new_position;
+                        }
+                    });
+                    camera.world_position = new_position.as_dvec3();
+                }
+            }
+        }
+
+        if !event.pressed || event.repeat {
+            continue;
+        }
+
+        let Some(game_state) = game_state.as_mut() else {
+            continue;
+        };
+
+        match event.key_code {
+            KeyCode::KeyK => {
+                game_state.update_octree = !game_state.update_octree;
+            }
+            KeyCode::KeyP => {
+                game_state.terrain_physics_enabled = !game_state.terrain_physics_enabled;
+                if !game_state.terrain_physics_enabled {
+                    if let Some(physics) = physics.as_mut() {
+                        for (_, handle) in game_state.terrain_colliders.drain() {
+                            physics.remove_collider(handle.0);
+                        }
+                    }
+                }
+            }
+            KeyCode::KeyL => {
+                if let Some(physics) = physics.as_mut() {
+                    for (_, handle) in game_state.terrain_colliders.drain() {
+                        physics.remove_collider(handle.0);
+                    }
+                }
+                game_state.previous_leaves.clear();
+                game_state.current_leaves.clear();
+                game_state.mesh_neighbor_signatures.clear();
+                game_state.in_flight.clear();
+                game_state.empty_chunks.clear();
+                game_state.empty_neighbor_signatures.clear();
+                game_state.debug_nodes.clear();
+                game_state.octree_job_in_flight = false;
+            }
+            KeyCode::BracketLeft => {
+                game_state.debug_depth = (game_state.debug_depth + 1).min(game_state.max_depth);
+            }
+            KeyCode::BracketRight => {
+                game_state.debug_depth = game_state.debug_depth.saturating_sub(1);
+            }
+            _ => {}
         }
     }
 }
 
-#[unsafe(no_mangle)]
-pub fn handle_mouse_motion(state: &mut engine::State, dx: f64, dy: f64) {
-    let mut handler = subsecond::HotFn::current(handle_mouse_motion_impl);
-    handler.call((state, dx, dy));
-}
-
-fn handle_mouse_motion_impl(state: &mut engine::State, dx: f64, dy: f64) {
-    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
-        return;
-    };
-    let Some(scene) = state.scenes.get_mut(scene_index) else {
+fn handle_mouse_button(
+    mut events: EventReader<MouseButtonInput>,
+    camera: Option<ResMut<GameCamera>>,
+) {
+    let Some(mut camera) = camera else {
         return;
     };
 
-    if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
-        camera.controller.handle_mouse(dx as f32, dy as f32);
+    for event in events.read() {
+        if event.button == engine::core::input::MouseButton::Right {
+            camera.controller.handle_mouse_click(event.pressed);
+        }
     }
 }
 
-#[unsafe(no_mangle)]
-pub fn handle_mouse_scroll(state: &mut engine::State, delta: engine::MouseScrollDelta) {
-    let mut handler = subsecond::HotFn::current(handle_mouse_scroll_impl);
-    handler.call((state, delta));
-}
-
-fn handle_mouse_scroll_impl(state: &mut engine::State, delta: engine::MouseScrollDelta) {
-    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
-        return;
-    };
-    let Some(scene) = state.scenes.get_mut(scene_index) else {
+fn handle_mouse_motion(mut events: EventReader<MouseMotion>, camera: Option<ResMut<GameCamera>>) {
+    let Some(mut camera) = camera else {
         return;
     };
 
-    if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
-        camera.controller.handle_mouse_scroll(delta);
+    for event in events.read() {
+        camera.controller.handle_mouse(event.delta_x, event.delta_y);
     }
 }
 
-#[unsafe(no_mangle)]
-pub fn handle_resize(state: &mut engine::State, width: u32, height: u32) {
-    let mut handler = subsecond::HotFn::current(handle_resize_impl);
-    handler.call((state, width, height));
-}
-
-fn handle_resize_impl(state: &mut engine::State, width: u32, height: u32) {
-    game_info!("Teste C");
-    if width == 0 || height == 0 {
-        return;
-    }
-
-    let Some(scene_index) = state.active_scene_index.map(|i| i as usize) else {
-        return;
-    };
-    let Some(scene) = state.scenes.get_mut(scene_index) else {
+fn handle_mouse_scroll(mut events: EventReader<MouseWheel>, camera: Option<ResMut<GameCamera>>) {
+    let Some(mut camera) = camera else {
         return;
     };
 
-    if let Some(mut camera) = scene.world_mut().get_resource_mut::<GameCamera>() {
-        camera.camera.aspect = width as f32 / height as f32;
-        let camera_copy = engine::camera::Camera {
-            position: camera.camera.position,
-            orientation: camera.camera.orientation,
-            aspect: camera.camera.aspect,
-            fovy: camera.camera.fovy,
-            znear: camera.camera.znear,
-            zfar: camera.camera.zfar,
-        };
-        camera.uniform.update_view_proj(&camera_copy);
+    for event in events.read() {
+        camera.controller.handle_scroll(event.vertical);
     }
 }

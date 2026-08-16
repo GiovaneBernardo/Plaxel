@@ -1,7 +1,15 @@
-use std::cell::{Ref, RefMut};
+use std::{
+    any::type_name,
+    cell::{Ref, RefMut},
+};
 
 use crate::ecs::{
-    change::ChangeTick, component::Component, entity::Entity, storage::Storage, world::World,
+    access::{AccessConflict, SystemAccess},
+    change::ChangeTick,
+    component::Component,
+    entity::Entity,
+    storage::Storage,
+    world::World,
 };
 
 pub trait QueryParam<'w> {
@@ -12,6 +20,8 @@ pub trait QueryParam<'w> {
     fn borrow(world: &'w World) -> Option<Self::Fetch>;
 
     fn get<'a>(fetch: &'a mut Self::Fetch, entity: Entity) -> Option<Self::Item<'a>>;
+
+    fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict>;
 }
 
 impl<'w, T: Component> QueryParam<'w> for &T {
@@ -25,6 +35,10 @@ impl<'w, T: Component> QueryParam<'w> for &T {
 
     fn get<'a>(fetch: &'a mut Self::Fetch, entity: Entity) -> Option<Self::Item<'a>> {
         fetch.get(entity)
+    }
+
+    fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict> {
+        access.add_component_read(type_name::<T>())
     }
 }
 
@@ -40,6 +54,10 @@ impl<'w, T: Component> QueryParam<'w> for &mut T {
     fn get<'a>(fetch: &'a mut Self::Fetch, entity: Entity) -> Option<Self::Item<'a>> {
         fetch.0.get_mut(entity, fetch.1)
     }
+
+    fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict> {
+        access.add_component_write(type_name::<T>())
+    }
 }
 
 pub trait QueryTuple<'w> {
@@ -50,6 +68,8 @@ pub trait QueryTuple<'w> {
     fn borrow(world: &'w World) -> Option<Self::Fetch>;
 
     fn get<'a>(fetch: &'a mut Self::Fetch, entity: Entity) -> Option<Self::Item<'a>>;
+
+    fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict>;
 }
 
 macro_rules! impl_query_tuple {
@@ -74,6 +94,11 @@ macro_rules! impl_query_tuple {
                 let ($($name,)+) = fetch;
 
                 Some(($($name::get($name, entity)?,)+))
+            }
+
+            fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict> {
+                $($name::register_access(access)?;)+
+                Ok(())
             }
         }
     };

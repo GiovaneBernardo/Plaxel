@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub struct GlobalResources {
+    pub window: Arc<Window>,
     pub renderer: renderer::Renderer,
     pub asset_manager: AssetManager,
     pub frame_capturer: FrameCapturer,
@@ -36,6 +37,7 @@ impl GlobalResources {
 
         let worker_count = (num_cpus::get() - 1).max(1);
         Self {
+            window,
             asset_manager: AssetManager::new(),
             frame_capturer,
             input: InputState::new(),

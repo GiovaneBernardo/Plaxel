@@ -1,21 +1,9 @@
 use std::collections::HashMap;
 
-use crate::assets::manager::Asset;
-use crate::assets::manager::AssetType;
 use crate::model::ModelVertex;
 use crate::model::TransformInstance;
 use crate::model::Vertex;
-use crate::model::VertexLayout;
-use crate::renderer::BlendMode;
-use crate::renderer::CompareFunction;
-use crate::renderer::CullMode;
-use crate::renderer::DepthState;
-use crate::renderer::FrontFace;
-use crate::renderer::MultisampleState;
-use crate::renderer::PolygonMode;
-use crate::renderer::SamplerDescriptor;
-use crate::renderer::TextureFormat;
-use crate::renderer::Topology;
+use crate::prelude::*;
 use crate::renderer::ids::{MaterialPassId, material_passes};
 use uuid::Uuid;
 

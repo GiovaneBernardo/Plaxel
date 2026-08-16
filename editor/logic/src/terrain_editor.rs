@@ -337,7 +337,7 @@ impl TerrainEditorState {
 pub fn draw_terrain_editor(
     ui: &mut Ui,
     state: &mut TerrainEditorState,
-    engine_state: &mut engine::State,
+    engine_state: &mut crate::EditorContext<'_>,
     selected_entity: Option<Entity>,
 ) {
     let camera_location = terrain_camera_location(engine_state, selected_entity, &state.graph);
@@ -424,7 +424,7 @@ pub fn draw_terrain_editor(
 }
 
 fn terrain_camera_location(
-    engine_state: &mut engine::State,
+    engine_state: &mut crate::EditorContext<'_>,
     selected_entity: Option<Entity>,
     graph: &TerrainFieldGraph,
 ) -> Option<TerrainCameraLocation> {
@@ -478,7 +478,7 @@ fn terrain_camera_location(
 
 fn apply_to_planet(
     state: &mut TerrainEditorState,
-    engine_state: &mut engine::State,
+    engine_state: &mut crate::EditorContext<'_>,
     selected_entity: Option<Entity>,
 ) {
     let errors = state.graph.validate();

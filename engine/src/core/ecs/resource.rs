@@ -2,6 +2,7 @@ use std::{
     any::type_name,
     cell::{Ref, RefCell, RefMut},
     collections::HashMap,
+    ops::{Deref, DerefMut},
 };
 
 use crate::reflect::{PartialReflect, Reflect};
@@ -9,6 +10,56 @@ use crate::reflect::{PartialReflect, Reflect};
 pub trait Resource: 'static + Send + Sync {}
 
 impl<T: 'static + Send + Sync> Resource for T {}
+
+pub struct Res<'w, T: Resource> {
+    value: Ref<'w, T>,
+}
+
+impl<'w, T: Resource> Res<'w, T> {
+    pub(crate) fn new(value: Ref<'w, T>) -> Self {
+        Self { value }
+    }
+
+    pub fn into_inner(self) -> Ref<'w, T> {
+        self.value
+    }
+}
+
+impl<T: Resource> Deref for Res<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+pub struct ResMut<'w, T: Resource> {
+    value: RefMut<'w, T>,
+}
+
+impl<'w, T: Resource> ResMut<'w, T> {
+    pub(crate) fn new(value: RefMut<'w, T>) -> Self {
+        Self { value }
+    }
+
+    pub fn into_inner(self) -> RefMut<'w, T> {
+        self.value
+    }
+}
+
+impl<T: Resource> Deref for ResMut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T: Resource> DerefMut for ResMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
 
 trait ErasedResource {
     fn as_ptr(&self) -> *const ();
@@ -71,6 +122,10 @@ impl Resources {
             type_name::<T>(),
             RefCell::new(Box::new(OpaqueResource(value))),
         );
+    }
+
+    pub fn contains<T: Resource>(&self) -> bool {
+        self.map.contains_key(type_name::<T>())
     }
 
     pub fn get<T: Resource>(&self) -> Option<Ref<'_, T>> {

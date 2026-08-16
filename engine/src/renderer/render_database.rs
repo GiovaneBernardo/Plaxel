@@ -3,6 +3,8 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use crate::prelude::*;
+
 use crate::{
     assets::{
         manager::{AssetManager, Handle},
@@ -17,7 +19,7 @@ use crate::{
     math::{Mat4, Vec3},
     model::{MeshAsset, TransformInstance},
     renderer::{
-        BindGroupHandle, PipelineHandle,
+        BindGroupHandle,
         ids::{MaterialPassId, RenderPhaseId, phases},
     },
 };

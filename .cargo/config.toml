@@ -1,5 +1,7 @@
 [target.x86_64-pc-windows-msvc]
-linker = "lld-link.exe"
+# Dioxus hot-patching installs `dx` as a linker proxy. Do not force a custom
+# linker here: dx 0.7.9 rewrites MSVC response files without preserving quotes,
+# which breaks Visual Studio library paths containing spaces.
 rustflags = ["-Zshare-generics=n"]
 
 [alias]

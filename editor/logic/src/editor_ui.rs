@@ -1,3 +1,4 @@
+use crate::EditorContext;
 use crate::terrain_editor::{TerrainEditorState, draw_terrain_editor};
 use egui::{Color32, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
@@ -149,12 +150,12 @@ impl EditorUi {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, state: &mut engine::State) {
+    pub fn show(&mut self, ctx: &egui::Context, state: &mut EditorContext<'_>) {
         self.show_impl(ctx, state);
     }
 
     #[inline(never)]
-    fn show_impl(&mut self, ctx: &egui::Context, state: &mut engine::State) {
+    fn show_impl(&mut self, ctx: &egui::Context, state: &mut EditorContext<'_>) {
         if !self.style_applied {
             engine::profile_scope!("editor.ui.apply_style");
             let mut apply_style = subsecond::HotFn::current(apply_editor_style);
@@ -228,7 +229,7 @@ impl EditorUi {
         }
     }
 
-    fn top_toolbar(&mut self, ctx: &egui::Context, state: &mut engine::State) {
+    fn top_toolbar(&mut self, ctx: &egui::Context, state: &mut EditorContext<'_>) {
         egui::TopBottomPanel::top("editor_top_toolbar")
             .exact_height(44.0)
             .frame(egui::Frame::default().fill(Color32::from_rgb(24, 27, 31)))
@@ -319,7 +320,7 @@ impl EditorUi {
         });
     }
 
-    fn status_bar(&self, ctx: &egui::Context, state: &engine::State) {
+    fn status_bar(&self, ctx: &egui::Context, state: &EditorContext<'_>) {
         egui::TopBottomPanel::bottom("editor_status_bar")
             .exact_height(28.0)
             .frame(egui::Frame::default().fill(Color32::from_rgb(20, 23, 27)))
@@ -342,7 +343,7 @@ impl EditorUi {
             });
     }
 
-    fn show_maximized_viewport(&mut self, ctx: &egui::Context, state: &mut engine::State) {
+    fn show_maximized_viewport(&mut self, ctx: &egui::Context, state: &mut EditorContext<'_>) {
         egui::Area::new(egui::Id::new("viewport_overlay_stats"))
             .fixed_pos(egui::pos2(16.0, 58.0))
             .show(ctx, |ui| {
@@ -373,7 +374,7 @@ impl EditorUi {
         }
     }
 
-    fn show_performance_overlay(&mut self, ctx: &egui::Context, state: &engine::State) {
+    fn show_performance_overlay(&mut self, ctx: &egui::Context, state: &EditorContext<'_>) {
         if !self.floating_profiler {
             return;
         }
@@ -399,7 +400,7 @@ impl EditorUi {
         self.performance_expanded = expanded;
     }
 
-    fn sanitize_selection(&mut self, state: &engine::State) {
+    fn sanitize_selection(&mut self, state: &EditorContext<'_>) {
         let Some(entity) = self.selected_entity else {
             return;
         };
@@ -547,7 +548,7 @@ impl AssetEditorState {
         }
     }
 
-    fn select_path(&mut self, path: PathBuf, state: &engine::State) {
+    fn select_path(&mut self, path: PathBuf, state: &EditorContext<'_>) {
         self.selected_path = Some(path.clone());
         self.status = None;
         self.material = None;
@@ -605,7 +606,7 @@ struct MaterialEditor {
 }
 
 impl MaterialEditor {
-    fn load(path: PathBuf, state: &engine::State) -> anyhow::Result<Self> {
+    fn load(path: PathBuf, state: &EditorContext<'_>) -> anyhow::Result<Self> {
         let header = loader::load_header(&path)?;
         let payload = loader::load_payload(&path)?;
         let AssetPayload::Material(mut material) = payload else {
@@ -629,7 +630,7 @@ impl MaterialEditor {
         })
     }
 
-    fn save(&mut self, state: &mut engine::State) {
+    fn save(&mut self, state: &mut EditorContext<'_>) {
         let imported = ImportedAsset {
             header: self.header.clone(),
             payload: AssetPayload::Material(self.material.clone()),
@@ -666,8 +667,8 @@ impl MaterialEditor {
     }
 }
 
-struct EditorTabViewer<'a> {
-    state: &'a mut engine::State,
+struct EditorTabViewer<'a, 'world> {
+    state: &'a mut EditorContext<'world>,
     selected_entity: &'a mut Option<Entity>,
     selected_render_node: &'a mut Option<engine::renderer::ids::GraphPassId>,
     show_puffin_profiler: &'a mut bool,
@@ -677,7 +678,7 @@ struct EditorTabViewer<'a> {
     terrain: &'a mut TerrainEditorState,
 }
 
-impl TabViewer for EditorTabViewer<'_> {
+impl TabViewer for EditorTabViewer<'_, '_> {
     type Tab = EditorTab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
@@ -776,7 +777,7 @@ impl TabViewer for EditorTabViewer<'_> {
     }
 }
 
-fn draw_viewport_tab(ui: &mut Ui, state: &mut engine::State) {
+fn draw_viewport_tab(ui: &mut Ui, state: &mut EditorContext<'_>) {
     ui.add_space(10.0);
     egui::Frame::popup(ui.style()).show(ui, |ui| {
         ui.label(RichText::new("Game").strong());
@@ -794,7 +795,11 @@ fn draw_viewport_tab(ui: &mut Ui, state: &mut engine::State) {
     });
 }
 
-fn draw_hierarchy(ui: &mut Ui, state: &mut engine::State, selected_entity: &mut Option<Entity>) {
+fn draw_hierarchy(
+    ui: &mut Ui,
+    state: &mut EditorContext<'_>,
+    selected_entity: &mut Option<Entity>,
+) {
     ui.horizontal(|ui| {
         if ui.button("New Entity").clicked() {
             if let Some(scene) = state.active_scene_mut() {
@@ -835,7 +840,11 @@ fn draw_hierarchy(ui: &mut Ui, state: &mut engine::State, selected_entity: &mut 
     });
 }
 
-fn draw_inspector(ui: &mut Ui, state: &mut engine::State, selected_entity: &mut Option<Entity>) {
+fn draw_inspector(
+    ui: &mut Ui,
+    state: &mut EditorContext<'_>,
+    selected_entity: &mut Option<Entity>,
+) {
     let Some(entity) = *selected_entity else {
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
@@ -876,16 +885,10 @@ fn draw_inspector(ui: &mut Ui, state: &mut engine::State, selected_entity: &mut 
     });
 }
 
-fn draw_resources(ui: &mut Ui, state: &mut engine::State) {
+fn draw_resources(ui: &mut Ui, state: &mut EditorContext<'_>) {
     ui.label(RichText::new("Live Resources").strong());
     ui.small("Values are edited directly; ignored runtime fields remain hidden.");
     ui.separator();
-
-    egui::CollapsingHeader::new("Engine State")
-        .default_open(true)
-        .show(ui, |ui| {
-            state.for_each_reflected_mut(|name, value| reflected_field(ui, name, value, 0));
-        });
 
     egui::CollapsingHeader::new("Global Resources")
         .default_open(true)
@@ -1240,7 +1243,7 @@ fn console_level_color(level: engine::logging::ConsoleLevel) -> Color32 {
     }
 }
 
-fn draw_asset_browser(ui: &mut Ui, state: &mut engine::State, assets: &mut AssetEditorState) {
+fn draw_asset_browser(ui: &mut Ui, state: &mut EditorContext<'_>, assets: &mut AssetEditorState) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Assets").strong());
         ui.separator();
@@ -1275,7 +1278,7 @@ fn draw_asset_browser(ui: &mut Ui, state: &mut engine::State, assets: &mut Asset
 
 fn draw_asset_tiles(
     ui: &mut Ui,
-    state: &mut engine::State,
+    state: &mut EditorContext<'_>,
     assets: &mut AssetEditorState,
     current_dir: &Path,
 ) {
@@ -1322,7 +1325,7 @@ fn draw_asset_tiles(
 
 fn draw_selected_asset_inspector(
     ui: &mut Ui,
-    state: &mut engine::State,
+    state: &mut EditorContext<'_>,
     assets: &mut AssetEditorState,
 ) {
     ui.label(RichText::new("Asset Inspector").strong());
@@ -1349,7 +1352,7 @@ fn draw_selected_asset_inspector(
     }
 }
 
-fn draw_generic_asset_info(ui: &mut Ui, state: &engine::State, path: &Path) {
+fn draw_generic_asset_info(ui: &mut Ui, state: &EditorContext<'_>, path: &Path) {
     match loader::load_header(path) {
         Ok(header) => {
             inspector_grid(ui, "generic_asset_info", |ui| {
@@ -1365,7 +1368,7 @@ fn draw_generic_asset_info(ui: &mut Ui, state: &engine::State, path: &Path) {
     }
 }
 
-fn draw_material_editor(ui: &mut Ui, state: &mut engine::State, editor: &mut MaterialEditor) {
+fn draw_material_editor(ui: &mut Ui, state: &mut EditorContext<'_>, editor: &mut MaterialEditor) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Material").strong());
         if ui.button("Save").clicked() {
@@ -1420,7 +1423,11 @@ fn draw_material_editor(ui: &mut Ui, state: &mut engine::State, editor: &mut Mat
     }
 }
 
-fn draw_texture_explorer(ui: &mut Ui, state: &mut engine::State, assets: &mut AssetEditorState) {
+fn draw_texture_explorer(
+    ui: &mut Ui,
+    state: &mut EditorContext<'_>,
+    assets: &mut AssetEditorState,
+) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Loaded Textures").strong());
         ui.separator();
@@ -1463,7 +1470,7 @@ struct RenderNodeSummary {
 
 fn draw_render_graph(
     ui: &mut Ui,
-    state: &mut engine::State,
+    state: &mut EditorContext<'_>,
     selected_render_node: &mut Option<engine::renderer::ids::GraphPassId>,
 ) {
     ui.horizontal(|ui| {
@@ -1525,7 +1532,7 @@ fn draw_render_graph(
     });
 }
 
-fn render_node_summaries(state: &engine::State) -> Vec<RenderNodeSummary> {
+fn render_node_summaries(state: &EditorContext<'_>) -> Vec<RenderNodeSummary> {
     let graph = &state.global_resources.renderer.render_graph;
     graph
         .nodes
@@ -1557,7 +1564,7 @@ fn render_node_summaries(state: &engine::State) -> Vec<RenderNodeSummary> {
 
 fn draw_render_node_inspector(
     ui: &mut Ui,
-    state: &mut engine::State,
+    state: &mut EditorContext<'_>,
     index: engine::renderer::ids::GraphPassId,
     summaries: &[RenderNodeSummary],
 ) {
@@ -1632,7 +1639,7 @@ fn comma_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
 
 fn draw_profiler(
     ui: &mut Ui,
-    state: &mut engine::State,
+    state: &mut EditorContext<'_>,
     _show_puffin_profiler: &mut bool,
     profiler_paused: &mut bool,
     paused_snapshot: &mut Option<engine::profiling::ProfileSnapshot>,
@@ -2682,7 +2689,7 @@ fn int_row(ui: &mut Ui, label: &str, value: &mut i32) {
     ui.end_row();
 }
 
-fn asset_tile_label(state: &engine::State, path: &Path) -> String {
+fn asset_tile_label(state: &EditorContext<'_>, path: &Path) -> String {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy())
@@ -2731,7 +2738,7 @@ fn asset_tile_label(state: &engine::State, path: &Path) -> String {
     format!("{icon}\n{name}")
 }
 
-fn asset_loaded_text(state: &engine::State, header: &AssetHeader) -> String {
+fn asset_loaded_text(state: &EditorContext<'_>, header: &AssetHeader) -> String {
     match header.asset_type {
         AssetType::Texture => state
             .global_resources
@@ -2749,7 +2756,7 @@ fn asset_loaded_text(state: &engine::State, header: &AssetHeader) -> String {
     }
 }
 
-fn loaded_texture_headers(state: &engine::State) -> Vec<AssetHeader> {
+fn loaded_texture_headers(state: &EditorContext<'_>) -> Vec<AssetHeader> {
     let mut textures = state
         .global_resources
         .asset_manager

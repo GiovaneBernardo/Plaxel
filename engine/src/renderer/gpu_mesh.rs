@@ -2,10 +2,8 @@ use std::{error::Error, fmt};
 
 use offset_allocator::Allocation;
 
-use crate::{
-    model::VertexLayout,
-    renderer::{BufferHandle, MeshDrawRange, gpu::GpuHandle, pool::VertexPoolId},
-};
+use crate::prelude::*;
+use crate::renderer::{BufferHandle, MeshDrawRange, gpu::GpuHandle, pool::VertexPoolId};
 
 pub type GpuMeshHandle = GpuHandle<GpuMesh>;
 

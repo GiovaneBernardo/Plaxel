@@ -170,12 +170,17 @@ impl CameraController {
     }
 
     pub fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
-        let mut scroll = match delta {
+        let scroll = match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
             MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 100.0,
         };
 
-        scroll = scroll.clamp(-1.0, 1.0);
+        self.handle_scroll(scroll);
+    }
+
+    /// Applies a platform-independent, normalized scroll amount.
+    pub fn handle_scroll(&mut self, scroll: f32) {
+        let scroll = scroll.clamp(-1.0, 1.0);
 
         let sensitivity: f32 = 0.2;
         let factor = (1.0f32 + sensitivity).powf(scroll);

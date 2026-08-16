@@ -1,6 +1,6 @@
 use crate::assets::material::Material;
-use crate::renderer::core::*;
 use crate::renderer::ids::material_passes;
+use crate::renderer::prelude::*;
 
 pub struct FullscreenPassNode {
     pub material: Material,

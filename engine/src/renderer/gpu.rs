@@ -4,6 +4,8 @@ use std::{
     marker::PhantomData,
 };
 
+use bytemuck::{Pod, Zeroable};
+
 pub struct GpuHandle<T> {
     index: u32,
     generation: u32,
@@ -118,5 +120,27 @@ impl<T> GpuArena<T> {
 impl<T> Default for GpuArena<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GpuMaterialData {
+    pub diffuse_texture_index: u32,
+    pub normal_texture_index: u32,
+    pub roughness_texture_index: u32,
+    pub flags: u32,
+    pub base_color: [f32; 4],
+}
+
+impl Default for GpuMaterialData {
+    fn default() -> Self {
+        Self {
+            diffuse_texture_index: 0,
+            normal_texture_index: 0,
+            roughness_texture_index: 0,
+            flags: 0,
+            base_color: [1.0, 1.0, 1.0, 1.0],
+        }
     }
 }
