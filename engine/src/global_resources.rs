@@ -19,7 +19,8 @@ pub struct GlobalResources {
     pub input: InputState,
     pub job_system: JobSystem,
     pub profiling_enabled: bool,
-    pub profiler_snapshot: ProfileSnapshot,
+    /// Rate limited profiler view shared with the editor; cloning it is an `Arc` bump.
+    pub profiler_snapshot: Arc<ProfileSnapshot>,
 }
 
 impl GlobalResources {
@@ -44,7 +45,7 @@ impl GlobalResources {
             renderer,
             job_system: JobSystem::new(worker_count),
             profiling_enabled: true,
-            profiler_snapshot: ProfileSnapshot::default(),
+            profiler_snapshot: Arc::new(ProfileSnapshot::default()),
         }
     }
 }

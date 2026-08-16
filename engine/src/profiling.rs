@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
     sync::{
-        LazyLock, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -13,6 +13,14 @@ pub mod cpu;
 pub mod gpu;
 
 const MAX_FRAMES: usize = 120;
+/// Default rate at which [`shared_snapshot`] rebuilds the snapshot handed to the UI.
+/// Building one clones every retained sample, so the cost is paid a few times per
+/// second instead of once per frame, and readouts stay readable instead of flickering
+/// at the frame rate. Set it to zero to rebuild every frame.
+pub const DEFAULT_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+
+static SNAPSHOT_INTERVAL_US: AtomicU64 =
+    AtomicU64::new(DEFAULT_SNAPSHOT_INTERVAL.as_micros() as u64);
 // Terrain generation can fan out across many chunk jobs in one frame. Keep
 // enough samples to retain the nested phase scopes instead of silently making
 // late-running workers look uninstrumented.
@@ -66,12 +74,20 @@ pub struct ScopeSummary {
     pub max_us: f64,
 }
 
+/// Per frame cost kept for the history graph. Only the newest frame keeps its
+/// individual samples, so the history stays cheap to clone.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameTiming {
+    pub index: u64,
+    pub total_us: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProfileSnapshot {
     pub enabled: bool,
     pub tracy_enabled: bool,
     pub puffin_enabled: bool,
-    pub frames: Vec<FrameSample>,
+    pub timings: Vec<FrameTiming>,
     pub latest_frame: Option<FrameSample>,
     pub latest_scopes: Vec<ScopeSummary>,
     pub average_frame_us: f64,
@@ -86,13 +102,13 @@ impl Default for ProfileSnapshot {
             enabled: is_enabled(),
             tracy_enabled: cfg!(feature = "tracy"),
             puffin_enabled: cfg!(feature = "puffin"),
-            frames: Vec::new(),
+            timings: Vec::new(),
             latest_frame: None,
             latest_scopes: Vec::new(),
             average_frame_us: 0.0,
             max_frame_us: 0.0,
-            cpu: cpu::snapshot(),
-            gpu: gpu::snapshot(),
+            cpu: cpu::CpuProfileSnapshot::default(),
+            gpu: gpu::GpuProfileSnapshot::default(),
         }
     }
 }
@@ -316,28 +332,37 @@ pub fn record_counter(name: &'static str, value: f64) {
 pub fn snapshot() -> ProfileSnapshot {
     cpu::poll();
     let profiler = PROFILER.lock().unwrap();
-    let frames = profiler.frames.iter().cloned().collect::<Vec<_>>();
-    let latest_frame = frames.last().cloned();
+    let timings = profiler
+        .frames
+        .iter()
+        .map(|frame| FrameTiming {
+            index: frame.index,
+            total_us: frame.total_us,
+        })
+        .collect::<Vec<_>>();
+    let latest_frame = profiler.frames.back().cloned();
+    drop(profiler);
+
     let latest_scopes = latest_frame
         .as_ref()
         .map(|frame| summarize_scopes(&frame.scopes))
         .unwrap_or_default();
 
-    let average_frame_us = if frames.is_empty() {
+    let average_frame_us = if timings.is_empty() {
         0.0
     } else {
-        frames.iter().map(|frame| frame.total_us).sum::<f64>() / frames.len() as f64
+        timings.iter().map(|timing| timing.total_us).sum::<f64>() / timings.len() as f64
     };
-    let max_frame_us = frames
+    let max_frame_us = timings
         .iter()
-        .map(|frame| frame.total_us)
+        .map(|timing| timing.total_us)
         .fold(0.0_f64, f64::max);
 
     ProfileSnapshot {
         enabled: is_enabled(),
         tracy_enabled: cfg!(feature = "tracy"),
         puffin_enabled: cfg!(feature = "puffin"),
-        frames,
+        timings,
         latest_frame,
         latest_scopes,
         average_frame_us,
@@ -345,6 +370,33 @@ pub fn snapshot() -> ProfileSnapshot {
         cpu: cpu::snapshot(),
         gpu: gpu::snapshot(),
     }
+}
+
+/// How often [`shared_snapshot`] is allowed to rebuild. Zero means every frame.
+pub fn snapshot_interval() -> Duration {
+    Duration::from_micros(SNAPSHOT_INTERVAL_US.load(Ordering::Relaxed))
+}
+
+pub fn set_snapshot_interval(interval: Duration) {
+    SNAPSHOT_INTERVAL_US.store(interval.as_micros() as u64, Ordering::Relaxed);
+}
+
+/// Snapshot shared with the editor. Rebuilt at most once per
+/// [`snapshot_interval`]; every other call clones an [`Arc`].
+pub fn shared_snapshot() -> Arc<ProfileSnapshot> {
+    static SHARED: LazyLock<Mutex<(Instant, Arc<ProfileSnapshot>)>> = LazyLock::new(|| {
+        Mutex::new((
+            Instant::now() - DEFAULT_SNAPSHOT_INTERVAL,
+            Arc::new(ProfileSnapshot::default()),
+        ))
+    });
+
+    let interval = snapshot_interval();
+    let mut shared = SHARED.lock().unwrap();
+    if interval.is_zero() || shared.0.elapsed() >= interval {
+        *shared = (Instant::now(), Arc::new(snapshot()));
+    }
+    shared.1.clone()
 }
 
 fn micros_since_clock(instant: Instant) -> u64 {

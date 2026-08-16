@@ -28,13 +28,20 @@ pub struct GpuFrameSample {
     pub summed_pass_ms: f64,
 }
 
+/// Per frame cost kept for the history graph, without the individual passes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuFrameTiming {
+    pub index: u64,
+    pub summed_pass_ms: f64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GpuProfileSnapshot {
     pub timestamp_supported: bool,
     pub pipeline_statistics_supported: bool,
     pub readback_latency_frames: u32,
     pub latest_frame: Option<GpuFrameSample>,
-    pub frames: Vec<GpuFrameSample>,
+    pub timings: Vec<GpuFrameTiming>,
 }
 
 #[derive(Default)]
@@ -65,12 +72,19 @@ pub fn publish(frame: GpuFrameSample) {
 
 pub fn snapshot() -> GpuProfileSnapshot {
     let profiler = GPU_PROFILER.lock().unwrap();
-    let frames = profiler.frames.iter().cloned().collect::<Vec<_>>();
+    let timings = profiler
+        .frames
+        .iter()
+        .map(|frame| GpuFrameTiming {
+            index: frame.index,
+            summed_pass_ms: frame.summed_pass_ms,
+        })
+        .collect::<Vec<_>>();
     GpuProfileSnapshot {
         timestamp_supported: profiler.timestamp_supported,
         pipeline_statistics_supported: profiler.pipeline_statistics_supported,
         readback_latency_frames: profiler.readback_latency_frames,
-        latest_frame: frames.last().cloned(),
-        frames,
+        latest_frame: profiler.frames.back().cloned(),
+        timings,
     }
 }

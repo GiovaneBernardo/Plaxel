@@ -25,7 +25,7 @@ fn render(mut globals: GlobalsMut) {
     } else {
         globals.frame_capturer.finish_capture_after_frame();
     }
-    globals.profiler_snapshot = crate::profiling::snapshot();
+    globals.profiler_snapshot = crate::profiling::shared_snapshot();
 }
 
 fn sync_render_database(

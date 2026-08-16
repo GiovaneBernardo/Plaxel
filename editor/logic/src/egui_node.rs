@@ -81,7 +81,8 @@ impl EguiRenderNode {
 
         let full_output = {
             engine::profile_scope!("editor.egui.run");
-            self.egui_ctx.run(raw_input, |ctx| {
+            self.egui_ctx.run_ui(raw_input, |ui| {
+                let ctx = ui.ctx().clone();
                 let open_viewport_menu = ctx.input(|input| {
                     input.modifiers.alt
                         && input.pointer.button_pressed(egui::PointerButton::Secondary)
@@ -96,7 +97,7 @@ impl EguiRenderNode {
 
                 {
                     engine::profile_scope!("editor.egui.ui");
-                    self.editor_ui.show(ctx, state);
+                    self.editor_ui.show(ui, state);
                 }
 
                 if self.viewport_menu_open {
@@ -105,7 +106,7 @@ impl EguiRenderNode {
                         &mut self.viewport_menu_pos,
                         &mut self.viewport_menu_open,
                         state,
-                        ctx,
+                        &ctx,
                     );
 
                     let close_menu = ctx.input(|input| {

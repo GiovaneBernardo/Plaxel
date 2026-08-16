@@ -1,10 +1,10 @@
 pub extern crate bevy_reflect as plaxel_reflect;
 
-pub mod editor;
 pub mod editor_ui;
 pub mod egui_node;
-pub mod hierarchy;
+pub mod panels;
 pub mod terrain_editor;
+pub mod theme;
 pub mod viewport_context_menu;
 
 use egui_node::EguiRenderNode;

@@ -353,7 +353,7 @@ pub fn draw_terrain_editor(
         state.redo();
     }
 
-    ui.horizontal(|ui| {
+    crate::theme::toolbar(ui, |ui| {
         if ui.button("New").clicked() {
             state.new_document();
         }
@@ -368,35 +368,34 @@ pub fn draw_terrain_editor(
         }
         ui.separator();
         if ui
-            .add_enabled(!state.undo.is_empty(), egui::Button::new("Undo"))
+            .add_enabled(!state.undo.is_empty(), egui::Button::new("↩ Undo"))
             .clicked()
         {
             state.undo();
         }
         if ui
-            .add_enabled(!state.redo.is_empty(), egui::Button::new("Redo"))
+            .add_enabled(!state.redo.is_empty(), egui::Button::new("↪ Redo"))
             .clicked()
         {
             state.redo();
         }
         ui.separator();
-        if ui.button("Refresh Preview").clicked() {
+        if ui.button("⟳ Refresh preview").clicked() {
             state.dirty_preview = true;
             state.last_edit_time = 0.0;
         }
-        if ui.button("Apply to Planet").clicked() {
+        if ui.button("Apply to planet").clicked() {
             apply_to_planet(state, engine_state, selected_entity);
         }
         ui.checkbox(&mut state.auto_preview, "Auto");
         if state.dirty_document {
-            ui.colored_label(Color32::from_rgb(240, 190, 80), "Modified");
+            crate::theme::tag(ui, "modified", crate::theme::WARN);
         }
     });
-    ui.separator();
 
-    egui::SidePanel::left("terrain_graph_layers")
-        .default_width(390.0)
-        .width_range(300.0..=560.0)
+    egui::Panel::left("terrain_graph_layers")
+        .default_size(390.0)
+        .size_range(300.0..=560.0)
         .resizable(true)
         .show_inside(ui, |ui| {
             let before = state.graph.clone();

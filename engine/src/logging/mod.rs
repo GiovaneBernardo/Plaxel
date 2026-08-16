@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     fmt,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{
         Mutex, OnceLock,
@@ -17,7 +17,12 @@ use tracing_subscriber::{
 };
 
 const MAX_CONSOLE_ENTRIES: usize = 1_000;
+/// Only the tail of the log file can hold the newest [`MAX_CONSOLE_ENTRIES`], so readers
+/// never parse more than this much of a session that has been logging for hours.
+const MAX_CONSOLE_TAIL_BYTES: u64 = 512 * 1024;
 const CONSOLE_LOG_PATH: &str = ".plaxel_editor_console.log";
+
+static CONSOLE_REVISION: AtomicU64 = AtomicU64::new(0);
 
 // Engine
 #[macro_export]
@@ -151,6 +156,11 @@ pub enum ConsoleLevel {
     Panic,
 }
 
+/// Bumped whenever the console changes, so viewers can skip re-reading unchanged logs.
+pub fn console_revision() -> u64 {
+    CONSOLE_REVISION.load(Ordering::Relaxed)
+}
+
 pub fn console_entries() -> Vec<ConsoleEntry> {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -167,6 +177,7 @@ pub fn console_entries() -> Vec<ConsoleEntry> {
 }
 
 pub fn clear_console_entries() {
+    CONSOLE_REVISION.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut entries) = console_buffer().lock() {
         entries.clear();
     }
@@ -264,6 +275,7 @@ fn console_buffer() -> &'static Mutex<VecDeque<ConsoleEntry>> {
 fn push_console_entry(level: ConsoleLevel, target: impl Into<String>, message: impl Into<String>) {
     static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
     let sequence = NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    CONSOLE_REVISION.fetch_add(1, Ordering::Relaxed);
     let target = target.into();
     let message = message.into();
 
@@ -318,14 +330,24 @@ fn append_console_file_entry(level: ConsoleLevel, target: &str, message: &str) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn console_file_entries() -> Vec<ConsoleEntry> {
-    let Ok(file) = fs::File::open(console_log_path()) else {
+    let Ok(mut file) = fs::File::open(console_log_path()) else {
         return Vec::new();
     };
 
-    let lines = BufReader::new(file)
+    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let offset = length.saturating_sub(MAX_CONSOLE_TAIL_BYTES);
+    if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
+        return Vec::new();
+    }
+
+    let mut lines = BufReader::new(file)
         .lines()
         .map_while(Result::ok)
         .collect::<Vec<_>>();
+    if offset > 0 && !lines.is_empty() {
+        // The seek lands mid line, so the first one is a fragment.
+        lines.remove(0);
+    }
     let start = lines.len().saturating_sub(MAX_CONSOLE_ENTRIES);
 
     lines
