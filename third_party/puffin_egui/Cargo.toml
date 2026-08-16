@@ -1,0 +1,22 @@
+[package]
+name = "puffin_egui"
+version = "0.30.0"
+edition = "2024"
+publish = false
+description = "Local egui 0.34 compatibility patch for puffin_egui 0.30.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/EmbarkStudios/puffin"
+
+[dependencies]
+egui = { workspace = true }
+egui_extras = { version = "0.34.2", features = ["serde"], default-features = false }
+indexmap = { version = "2.13.0", features = ["serde"] }
+log = "0.4.29"
+log-once = "0.4"
+natord = "1.0.9"
+parking_lot = "0.12"
+puffin = { workspace = true, features = ["packing"] }
+serde = { workspace = true, features = ["derive", "rc"], optional = true }
+time = { version = "0.3.47", features = ["formatting", "macros"], default-features = false }
+vec1 = "1.12"
+web-time = "1.1"

@@ -1653,6 +1653,17 @@ fn draw_profiler(
         if ui.button("Capture GPU Frame").clicked() {
             state.global_resources.frame_capturer.request_capture();
         }
+        #[cfg(feature = "puffin-ui")]
+        {
+            let label = if *_show_puffin_profiler {
+                "Hide Puffin"
+            } else {
+                "Show Puffin"
+            };
+            if ui.button(label).clicked() {
+                *_show_puffin_profiler = !*_show_puffin_profiler;
+            }
+        }
         ui.separator();
         ui.label(if *profiler_paused { "paused" } else { "live" });
         ui.separator();
@@ -1681,6 +1692,11 @@ fn draw_profiler(
         }
     });
     ui.separator();
+
+    #[cfg(feature = "puffin-ui")]
+    if *_show_puffin_profiler && !puffin_egui::profiler_window(ui.ctx()) {
+        *_show_puffin_profiler = false;
+    }
 
     let snapshot = displayed_profiler_snapshot(&live_snapshot, *profiler_paused, paused_snapshot);
 
@@ -2089,6 +2105,10 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                         if snapshot.total_samples > 0 && ui.button("Clear CPU capture").clicked() {
                             engine::profiling::cpu::clear_capture();
                         }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if snapshot.etl_available && ui.button("Save ETL...").clicked() {
+                            save_cpu_etl_capture();
+                        }
                     }
                     _ => {}
                 }
@@ -2366,6 +2386,22 @@ fn draw_cpu_profiler(ui: &mut Ui, snapshot: &engine::profiling::cpu::CpuProfileS
                 }
             });
         });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_cpu_etl_capture() {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("ETW trace", &["etl"])
+        .set_file_name("plaxel-cpu-capture.etl")
+        .save_file()
+    else {
+        return;
+    };
+
+    match engine::profiling::cpu::save_etl(&path) {
+        Ok(()) => log::info!("Saved ETW CPU capture to {}", path.display()),
+        Err(error) => log::error!("Could not save ETW CPU capture: {error}"),
+    }
 }
 
 fn draw_cpu_call_tree_node(

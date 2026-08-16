@@ -59,6 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = "0.2"
 tracy-client = { version = "0.18.4", default-features = false }
 puffin = "0.20.0"
+puffin_egui = { path = "third_party/puffin_egui" }
 
 # Debugging
 renderdoc = "0.12.1"

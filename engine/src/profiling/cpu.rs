@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CpuCaptureState {
@@ -67,6 +67,7 @@ pub struct CpuProfileSnapshot {
     pub symbolized_addresses: usize,
     pub source_location_addresses: usize,
     pub unresolved_addresses: usize,
+    pub etl_available: bool,
     pub functions: Vec<CpuFunctionHotspot>,
     pub source_files: Vec<CpuSourceHotspot>,
     pub source_lines: Vec<CpuSourceLineHotspot>,
@@ -98,6 +99,7 @@ impl Default for CpuProfileSnapshot {
             symbolized_addresses: 0,
             source_location_addresses: 0,
             unresolved_addresses: 0,
+            etl_available: false,
             functions: Vec::new(),
             source_files: Vec::new(),
             source_lines: Vec::new(),
@@ -118,6 +120,10 @@ pub fn stop_capture() {
 
 pub fn clear_capture() {
     platform::clear_capture();
+}
+
+pub fn save_etl(path: &Path) -> Result<(), String> {
+    platform::save_etl(path)
 }
 
 pub fn poll() {
@@ -144,6 +150,9 @@ mod platform {
 
     pub fn stop_capture() {}
     pub fn clear_capture() {}
+    pub fn save_etl(_path: &Path) -> Result<(), String> {
+        Err("ETW capture export is only available on 64-bit Windows.".to_string())
+    }
     pub fn poll() {}
     pub fn mark_frame(_index: u64) {}
     pub fn snapshot() -> CpuProfileSnapshot {
@@ -158,13 +167,15 @@ mod platform {
         ffi::{CStr, c_void},
         hash::{Hash, Hasher},
         mem::{offset_of, size_of, zeroed},
+        os::windows::ffi::OsStrExt,
+        path::PathBuf,
         ptr::{null, null_mut},
         sync::{
             Arc, LazyLock, Mutex,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
         thread::{self, JoinHandle},
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use rustc_demangle::try_demangle;
@@ -190,9 +201,9 @@ mod platform {
                     },
                     Etw::{
                         CLASSIC_EVENT_ID, CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW,
-                        EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FLAG_PROFILE,
-                        EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
-                        EVENT_TRACE_SYSTEM_LOGGER_MODE, OpenTraceW,
+                        EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FILE_MODE_SEQUENTIAL,
+                        EVENT_TRACE_FLAG_PROFILE, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
+                        EVENT_TRACE_REAL_TIME_MODE, EVENT_TRACE_SYSTEM_LOGGER_MODE, OpenTraceW,
                         PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
                         PerfInfoGuid, ProcessTrace, StartTraceW, TRACE_PROFILE_INTERVAL,
                         TraceQueryInformation, TraceSampledProfileIntervalInfo,
@@ -220,6 +231,7 @@ mod platform {
             started: None,
             stop: None,
             worker: None,
+            etl_path: None,
         })
     });
     static CURRENT_FRAME: AtomicU64 = AtomicU64::new(0);
@@ -229,6 +241,7 @@ mod platform {
         started: Option<Instant>,
         stop: Option<Arc<AtomicBool>>,
         worker: Option<JoinHandle<Result<CpuProfileSnapshot, String>>>,
+        etl_path: Option<PathBuf>,
     }
 
     #[derive(Clone, Eq)]
@@ -260,6 +273,7 @@ mod platform {
     struct PropertiesBuffer {
         properties: EVENT_TRACE_PROPERTIES,
         logger_name: [u16; 256],
+        log_file_name: [u16; 1024],
     }
 
     impl PropertiesBuffer {
@@ -268,6 +282,20 @@ mod platform {
             value.properties.Wnode.BufferSize = size_of::<Self>() as u32;
             value.properties.LoggerNameOffset = offset_of!(Self, logger_name) as u32;
             value
+        }
+
+        fn set_log_file(&mut self, path: &Path) -> Result<(), String> {
+            let path = path
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect::<Vec<_>>();
+            if path.len() > self.log_file_name.len() {
+                return Err("The temporary ETL capture path is too long for ETW.".to_string());
+            }
+            self.log_file_name[..path.len()].copy_from_slice(&path);
+            self.properties.LogFileNameOffset = offset_of!(Self, log_file_name) as u32;
+            Ok(())
         }
     }
 
@@ -285,11 +313,19 @@ mod platform {
             return Err("A CPU capture is already running.".to_string());
         }
 
+        if let Some(previous) = manager.etl_path.take() {
+            let _ = std::fs::remove_file(previous);
+        }
+
+        let process_id = unsafe { GetCurrentProcessId() };
+        let etl_path = temporary_etl_path(process_id);
+
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let worker_etl_path = etl_path.clone();
         let worker = thread::Builder::new()
             .name("plaxel-cpu-profiler".to_string())
-            .spawn(move || capture_worker(duration, worker_stop))
+            .spawn(move || capture_worker(duration, worker_stop, worker_etl_path))
             .map_err(|error| format!("Could not start CPU profiler thread: {error}"))?;
 
         manager.snapshot = CpuProfileSnapshot {
@@ -302,6 +338,7 @@ mod platform {
         manager.started = Some(Instant::now());
         manager.stop = Some(stop);
         manager.worker = Some(worker);
+        manager.etl_path = Some(etl_path);
         Ok(())
     }
 
@@ -316,6 +353,9 @@ mod platform {
         poll();
         let mut manager = MANAGER.lock().unwrap();
         if manager.worker.is_none() {
+            if let Some(path) = manager.etl_path.take() {
+                let _ = std::fs::remove_file(path);
+            }
             manager.snapshot = CpuProfileSnapshot::default();
             manager.started = None;
             manager.stop = None;
@@ -342,8 +382,12 @@ mod platform {
             .unwrap_or_else(|_| Err("CPU profiler worker panicked.".to_string()));
 
         let mut manager = MANAGER.lock().unwrap();
+        let etl_available = manager.etl_path.as_ref().is_some_and(|path| path.is_file());
         match result {
-            Ok(snapshot) => manager.snapshot = snapshot,
+            Ok(mut snapshot) => {
+                snapshot.etl_available = etl_available;
+                manager.snapshot = snapshot;
+            }
             Err(error) => {
                 let requested_duration = manager.snapshot.requested_duration;
                 manager.snapshot = CpuProfileSnapshot {
@@ -351,6 +395,7 @@ mod platform {
                     state: CpuCaptureState::Failed,
                     status: error,
                     requested_duration,
+                    etl_available,
                     ..CpuProfileSnapshot::default()
                 };
             }
@@ -363,10 +408,27 @@ mod platform {
         poll();
         let manager = MANAGER.lock().unwrap();
         let mut snapshot = manager.snapshot.clone();
+        snapshot.etl_available = manager.etl_path.as_ref().is_some_and(|path| path.is_file());
         if let Some(started) = manager.started {
             snapshot.elapsed = started.elapsed().min(snapshot.requested_duration);
         }
         snapshot
+    }
+
+    pub fn save_etl(path: &Path) -> Result<(), String> {
+        poll();
+        let manager = MANAGER.lock().unwrap();
+        if manager.worker.is_some() {
+            return Err("Stop the CPU capture before saving its ETL file.".to_string());
+        }
+        let source = manager
+            .etl_path
+            .as_deref()
+            .filter(|path| path.is_file())
+            .ok_or_else(|| "No completed ETL capture is available to save.".to_string())?;
+        std::fs::copy(source, path)
+            .map(|_| ())
+            .map_err(|error| format!("Could not save ETL capture to {}: {error}", path.display()))
     }
 
     pub fn mark_frame(index: u64) {
@@ -376,6 +438,7 @@ mod platform {
     fn capture_worker(
         duration: Duration,
         stop_requested: Arc<AtomicBool>,
+        etl_path: PathBuf,
     ) -> Result<CpuProfileSnapshot, String> {
         enable_system_profile_privilege()?;
 
@@ -383,14 +446,17 @@ mod platform {
         let first_frame = CURRENT_FRAME.load(Ordering::Relaxed);
         let session_name = wide_null(&format!("Plaxel CPU Profiler (PID {process_id})"));
         let mut properties = PropertiesBuffer::new();
+        properties.set_log_file(&etl_path)?;
         properties.properties.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
         properties.properties.Wnode.ClientContext = 1;
         properties.properties.BufferSize = 64;
         properties.properties.MinimumBuffers = 4;
         properties.properties.MaximumBuffers = 64;
         properties.properties.FlushTimer = 1;
-        properties.properties.LogFileMode =
-            EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE;
+        properties.properties.MaximumFileSize = 1024;
+        properties.properties.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL
+            | EVENT_TRACE_REAL_TIME_MODE
+            | EVENT_TRACE_SYSTEM_LOGGER_MODE;
         properties.properties.EnableFlags = EVENT_TRACE_FLAG_PROFILE;
 
         let mut session = CONTROLTRACE_HANDLE::default();
@@ -499,6 +565,14 @@ mod platform {
                 .max(1),
             sample_interval,
         )
+    }
+
+    fn temporary_etl_path(process_id: u32) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("plaxel-cpu-{process_id}-{nonce}.etl"))
     }
 
     fn stop_session(session: CONTROLTRACE_HANDLE, session_name: &[u16]) {
@@ -959,6 +1033,7 @@ mod platform {
             symbolized_addresses,
             source_location_addresses,
             unresolved_addresses,
+            etl_available: false,
             functions: function_rows,
             source_files: source_rows,
             source_lines: source_line_rows,
@@ -1123,6 +1198,25 @@ mod platform {
                 "resolved function without source: {}",
                 frame.function
             );
+        }
+
+        #[test]
+        fn configures_etl_output_path_with_spaces() {
+            let path = Path::new(r"C:\Temp\Plaxel CPU Capture.etl");
+            let expected = path
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect::<Vec<_>>();
+            let mut properties = PropertiesBuffer::new();
+
+            properties.set_log_file(path).unwrap();
+
+            assert_eq!(
+                properties.properties.LogFileNameOffset,
+                offset_of!(PropertiesBuffer, log_file_name) as u32
+            );
+            assert_eq!(&properties.log_file_name[..expected.len()], expected);
         }
 
         #[test]

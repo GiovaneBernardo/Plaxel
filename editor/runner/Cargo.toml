@@ -15,6 +15,7 @@ static-game-logic = ["dep:static-game-logic"]
 profiling = [
     "engine/profiling",
     "engine/puffin",
+    "editor-logic/puffin-ui",
     "static-game-logic?/profiling",
     "static-game-logic?/puffin",
 ]

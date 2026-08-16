@@ -218,7 +218,7 @@
                     Empty,
                     Empty,
                 ],
-                focused_node: Some((3)),
+                focused_node: Some((9)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),
@@ -247,5 +247,5 @@
     maximize_viewport: false,
     floating_hierarchy: true,
     floating_inspector: true,
-    floating_profiler: true,
+    floating_profiler: false,
 )
