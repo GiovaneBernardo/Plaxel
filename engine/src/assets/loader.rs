@@ -1,11 +1,12 @@
 // NOTE: Loader uses engine formats and loads them into the GPU/CPU
 
-use crate::assets::importer::AssetPayload;
-use crate::assets::manager::AssetContext;
+use crate::assets::importer::LegacyAssetPayload;
 use crate::assets::manager::AssetHeader;
-use crate::assets::manager::AssetManager;
 use crate::assets::manager::AssetType;
+use crate::assets::material::{Material, MaterialResource, TextureAsset};
 use crate::assets::serializer::{BINARY_DELIMITER, MAGIC};
+use crate::assets::server::{AssetLoader, LoadContext};
+use crate::model::MeshAsset;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
 
@@ -55,10 +56,39 @@ fn read_through_header(reader: &mut impl Read) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-pub fn load_payload(path: &Path) -> anyhow::Result<AssetPayload> {
-    let bytes = std::fs::read(path)?;
+fn load_legacy_payload_bytes(bytes: &[u8]) -> anyhow::Result<LegacyAssetPayload> {
     let (_, content_offset) = parse_text_header(&bytes)?;
     Ok(bincode::deserialize(&bytes[content_offset..])?)
+}
+
+/// Deserializes the opaque payload used by version-2 cooked assets. This is
+/// the helper custom loaders normally use after registering their extension.
+pub fn deserialize_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> anyhow::Result<T> {
+    let (header, content_offset) = parse_text_header(bytes)?;
+    if header.version < 2 {
+        anyhow::bail!("typed payload decoding requires cooked asset version 2 or newer");
+    }
+    Ok(bincode::deserialize(&bytes[content_offset..])?)
+}
+
+fn decode_versioned<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    legacy: impl FnOnce(LegacyAssetPayload) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let (header, _) = parse_text_header(bytes)?;
+    if header.version >= 2 {
+        deserialize_payload(bytes)
+    } else {
+        legacy(load_legacy_payload_bytes(bytes)?)
+    }
+}
+
+pub fn load_material_payload(path: &Path) -> anyhow::Result<Material> {
+    let bytes = std::fs::read(path)?;
+    decode_versioned(&bytes, |payload| match payload {
+        LegacyAssetPayload::Material(asset) => Ok(asset),
+        _ => anyhow::bail!("cooked file does not contain a material"),
+    })
 }
 
 fn parse_text_header(bytes: &[u8]) -> anyhow::Result<(AssetHeader, usize)> {
@@ -83,26 +113,90 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-pub fn load_asset(_asset_manager: &mut AssetManager, _ctx: &AssetContext, _header: &AssetHeader) {
-    //let asset = match header.asset_type {
-    //    _ => {
-    //        panic!("Unsupported asset type: {:?}", header.asset_type);
-    //    }
-    //};
-    //asset_manager.assets.insert(header.uuid, asset);
+pub struct CookedMeshLoader;
+
+impl AssetLoader for CookedMeshLoader {
+    type Asset = MeshAsset;
+
+    fn extensions(&self) -> &[&'static str] {
+        &["plxmesh"]
+    }
+
+    fn legacy_asset_type(&self) -> Option<AssetType> {
+        Some(AssetType::Mesh)
+    }
+
+    fn load(&self, bytes: &[u8], context: &mut LoadContext) -> anyhow::Result<MeshAsset> {
+        let asset = decode_versioned(bytes, |payload| match payload {
+            LegacyAssetPayload::Mesh(asset) => Ok(asset),
+            _ => anyhow::bail!("cooked file does not contain a mesh"),
+        })?;
+        {
+            if let Some(material) = asset.material_uuid {
+                context.load_dependency_by_id::<Material>(material);
+            }
+            Ok(asset)
+        }
+    }
 }
 
-trait AssetLoader {
-    type Asset;
+pub struct CookedMaterialLoader;
 
-    fn asset_type(&self) -> AssetType;
-    fn load(&self, header: &AssetHeader, payload: &[u8]) -> anyhow::Result<Self::Asset>;
+impl AssetLoader for CookedMaterialLoader {
+    type Asset = Material;
+
+    fn extensions(&self) -> &[&'static str] {
+        &["plxmat"]
+    }
+
+    fn legacy_asset_type(&self) -> Option<AssetType> {
+        Some(AssetType::Material)
+    }
+
+    fn load(&self, bytes: &[u8], context: &mut LoadContext) -> anyhow::Result<Material> {
+        let asset = decode_versioned(bytes, |payload| match payload {
+            LegacyAssetPayload::Material(asset) => Ok(asset),
+            _ => anyhow::bail!("cooked file does not contain a material"),
+        })?;
+        {
+            for binding in &asset.bindings {
+                match &binding.resource {
+                    MaterialResource::Texture(id) => {
+                        context.load_dependency_by_id::<TextureAsset>(*id);
+                    }
+                    MaterialResource::TextureArray(ids) => {
+                        for id in ids {
+                            context.load_dependency_by_id::<TextureAsset>(*id);
+                        }
+                    }
+                    MaterialResource::Sampler(_) | MaterialResource::Buffer(_) => {}
+                }
+            }
+            Ok(asset)
+        }
+    }
 }
 
-//trait AssetReader {
-//    fn read_header(&self, id: AssetId) -> anyhow::Result<AssetHeader>;
-//    fn read_payload(&self, id: AssetId) -> anyhow::Result<Vec<u8>>;
-//}
+pub struct CookedTextureLoader;
+
+impl AssetLoader for CookedTextureLoader {
+    type Asset = TextureAsset;
+
+    fn extensions(&self) -> &[&'static str] {
+        &["plxtex"]
+    }
+
+    fn legacy_asset_type(&self) -> Option<AssetType> {
+        Some(AssetType::Texture)
+    }
+
+    fn load(&self, bytes: &[u8], _context: &mut LoadContext) -> anyhow::Result<TextureAsset> {
+        decode_versioned(bytes, |payload| match payload {
+            LegacyAssetPayload::Texture(asset) => Ok(asset),
+            _ => anyhow::bail!("cooked file does not contain a texture"),
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {

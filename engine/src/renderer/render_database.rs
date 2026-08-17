@@ -7,7 +7,7 @@ use crate::prelude::*;
 
 use crate::{
     assets::{
-        manager::{AssetManager, Handle},
+        manager::{Assets, Handle},
         material::Material,
     },
     core::components::{core::TransformComponent, renderer::MeshRendererComponent},
@@ -167,6 +167,7 @@ pub struct RenderDatabase {
     phase_cache_revision: u64,
     phase_cache: HashMap<RenderPhaseId, Vec<RenderObjectId>>,
     ecs_cursor: ChangeCursor,
+    material_revision: u64,
     stats: RenderDatabaseStats,
 }
 
@@ -181,6 +182,7 @@ impl RenderDatabase {
             phase_cache_revision: 0,
             phase_cache: HashMap::new(),
             ecs_cursor: ChangeCursor::default(),
+            material_revision: 0,
             stats: RenderDatabaseStats::default(),
         }
     }
@@ -347,9 +349,13 @@ impl RenderDatabase {
         }
     }
 
-    pub fn sync_ecs(&mut self, world: &mut World, assets: &AssetManager) {
+    pub fn sync_ecs(&mut self, world: &mut World) {
         let last = self.ecs_cursor.tick;
         let now = world.change_tick();
+        let current_material_revision = world
+            .get_resource::<Assets<Material>>()
+            .map_or(0, |assets| assets.revision());
+        let materials_changed = current_material_revision != self.material_revision;
         let changed_entities = {
             crate::profile_scope!("render_database.collect_changed_entities");
             let mut changed_entities = HashSet::new();
@@ -361,6 +367,11 @@ impl RenderDatabase {
             if let Some(transforms) = world.get_storage::<TransformComponent>() {
                 for (entity, _) in transforms.iter_changed_since(last, now) {
                     changed_entities.insert(entity);
+                }
+            }
+            if materials_changed {
+                if let Some(mesh_renderers) = world.get_storage::<MeshRendererComponent>() {
+                    changed_entities.extend(mesh_renderers.iter().map(|(entity, _)| entity));
                 }
             }
             changed_entities
@@ -385,7 +396,10 @@ impl RenderDatabase {
                     }
                     continue;
                 };
-                let Some(material) = assets.get_by_uuid::<Material>(mesh_renderer.material) else {
+                let material = world
+                    .get_resource::<Assets<Material>>()
+                    .and_then(|assets| assets.get_by_id(mesh_renderer.material).cloned());
+                let Some(material) = material else {
                     if let Some(id) = self.entity_objects.remove(&entity) {
                         self.remove(id);
                     }
@@ -430,6 +444,7 @@ impl RenderDatabase {
         {
             crate::profile_scope!("render_database.acknowledge_changes");
             world.acknowledge_changes(&mut self.ecs_cursor);
+            self.material_revision = current_material_revision;
         }
     }
 }
@@ -477,14 +492,12 @@ fn transform_instance(transform: &TransformComponent, material_index: u32) -> Tr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assets::manager::AssetType;
     use uuid::Uuid;
 
     fn object() -> RenderObject {
         RenderObject {
             mesh: Handle {
                 uuid: Uuid::new_v4(),
-                asset_type: AssetType::Mesh,
                 _marker: std::marker::PhantomData,
             },
             material: Material::new("shaders/test.wgsl".into()),

@@ -1775,7 +1775,6 @@ impl WgpuBackend {
     fn load_mesh_with_data(&mut self, mesh: &MeshAsset) -> Handle<MeshAsset> {
         let handle: Handle<MeshAsset> = Handle {
             uuid: mesh.uuid,
-            asset_type: AssetType::Mesh,
             _marker: std::marker::PhantomData,
         };
         let gpu_handle = self

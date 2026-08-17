@@ -4,4 +4,4 @@ pub mod player;
 pub mod terrain;
 
 pub use planets::*;
-pub use player::{InputMap, player_interaction_system};
+pub use player::{InputMap, player_interaction_system, preload_build_block_assets};

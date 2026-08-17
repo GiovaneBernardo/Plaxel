@@ -2,19 +2,17 @@
 //! cached: reading them touches the disk, which must never happen per frame.
 
 use crate::EditorContext;
-use crate::panels::fields::{
-    inspector_grid, int_row, readonly_row, scalar_row, text_row, u32_row,
-};
 use crate::panels::fields::{bool_row, field_label, float_array_row};
+use crate::panels::fields::{inspector_grid, int_row, readonly_row, scalar_row, text_row, u32_row};
 use crate::panels::icons::{self, Icon};
 use crate::theme;
 use egui::{FontId, Rect, RichText, Ui, Vec2};
 use engine::assets::{
-    importer::{AssetPayload, ImportedAsset},
     loader,
-    manager::{AssetHeader, AssetType, Uuid},
+    manager::{AssetCatalog, AssetHeader, AssetType, Assets, Uuid},
     material::{Material, MaterialResource, MaterialValue},
     serializer,
+    server::AssetServer,
 };
 use std::{
     fs,
@@ -106,9 +104,11 @@ impl AssetEditorState {
         }
 
         self.listing.entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            b.is_dir.cmp(&a.is_dir).then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
         });
     }
 
@@ -166,17 +166,18 @@ struct MaterialEditor {
 impl MaterialEditor {
     fn load(path: PathBuf, state: &EditorContext<'_>) -> anyhow::Result<Self> {
         let header = loader::load_header(&path)?;
-        let payload = loader::load_payload(&path)?;
-        let AssetPayload::Material(mut material) = payload else {
-            anyhow::bail!("asset payload is not a material");
-        };
+        let mut material = loader::load_material_payload(&path)?;
 
         if let Some(loaded) = state
-            .global_resources
-            .asset_manager
-            .get_by_uuid::<Material>(material.uuid)
+            .world
+            .get_resource::<Assets<Material>>()
+            .and_then(|assets| assets.get_by_id(material.uuid).cloned())
         {
             material.material_index = loaded.material_index;
+        }
+
+        if let Some(server) = state.world.get_resource::<AssetServer>() {
+            server.add(material.clone());
         }
 
         Ok(Self {
@@ -189,33 +190,27 @@ impl MaterialEditor {
     }
 
     fn save(&mut self, state: &mut EditorContext<'_>) {
-        let imported = ImportedAsset {
-            header: self.header.clone(),
-            payload: AssetPayload::Material(self.material.clone()),
-        };
+        self.header.version = 2;
+        self.header.type_name = Some(std::any::type_name::<Material>().to_owned());
 
-        match serializer::write_imported_asset(&imported, &self.path) {
+        match serializer::write_asset(
+            self.header.clone(),
+            std::any::type_name::<Material>(),
+            "plxmat",
+            &self.material,
+            &self.path,
+        ) {
             Ok(()) => {
-                let material_index = state
-                    .global_resources
-                    .renderer
-                    .renderer_api
-                    .upload_material_asset(&self.material, Some(self.material.material_index));
-                self.material.material_index = material_index;
-                state
-                    .global_resources
-                    .asset_manager
-                    .paths
-                    .insert(self.path.clone(), self.material.uuid);
-                state
-                    .global_resources
-                    .asset_manager
-                    .headers
-                    .insert(self.material.uuid, self.header.clone());
-                state
-                    .global_resources
-                    .asset_manager
-                    .add_asset::<Material>(self.material.clone());
+                if let Some(server) = state.world.get_resource::<AssetServer>() {
+                    server.register_cooked_path(&self.header, self.path.clone());
+                    server.add(self.material.clone());
+                }
+                if let Some(mut catalog) = state.world.get_resource_mut::<AssetCatalog>() {
+                    catalog.paths.insert(self.path.clone(), self.material.uuid);
+                    catalog
+                        .headers
+                        .insert(self.material.uuid, self.header.clone());
+                }
                 self.status = Some("Saved material.".to_string());
             }
             Err(error) => self.status = Some(format!("Save failed: {error}")),
@@ -223,7 +218,11 @@ impl MaterialEditor {
     }
 }
 
-pub fn draw_asset_browser(ui: &mut Ui, state: &mut EditorContext<'_>, assets: &mut AssetEditorState) {
+pub fn draw_asset_browser(
+    ui: &mut Ui,
+    state: &mut EditorContext<'_>,
+    assets: &mut AssetEditorState,
+) {
     let now = ui.input(|input| input.time);
     let mut force_refresh = false;
 
@@ -245,11 +244,7 @@ pub fn draw_asset_browser(ui: &mut Ui, state: &mut EditorContext<'_>, assets: &m
             force_refresh = true;
         }
         ui.separator();
-        theme::truncated(
-            ui,
-            relative_display(&assets.current_dir),
-            theme::TEXT_DIM,
-        );
+        theme::truncated(ui, relative_display(&assets.current_dir), theme::TEXT_DIM);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(
                 egui::Slider::new(&mut assets.tile_size, MIN_TILE..=MAX_TILE)
@@ -271,9 +266,12 @@ pub fn draw_asset_browser(ui: &mut Ui, state: &mut EditorContext<'_>, assets: &m
             draw_asset_tiles(ui, state, assets)
         });
         ui.separator();
-        ui.allocate_ui(Vec2::new(ui.available_width(), ui.available_height()), |ui| {
-            draw_selected_asset_inspector(ui, state, assets);
-        });
+        ui.allocate_ui(
+            Vec2::new(ui.available_width(), ui.available_height()),
+            |ui| {
+                draw_selected_asset_inspector(ui, state, assets);
+            },
+        );
     });
 }
 
@@ -339,8 +337,10 @@ fn asset_tile(
     uploaded: bool,
 ) -> egui::Response {
     let footer = (tile_size * 0.26).clamp(20.0, 30.0);
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(tile_size, tile_size + footer), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(tile_size, tile_size + footer),
+        egui::Sense::click(),
+    );
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -454,11 +454,7 @@ fn draw_generic_asset_info(ui: &mut Ui, state: &EditorContext<'_>, path: &Path) 
 
 fn draw_material_editor(ui: &mut Ui, state: &mut EditorContext<'_>, editor: &mut MaterialEditor) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Material")
-                .strong()
-                .color(theme::TEXT_STRONG),
-        );
+        ui.label(RichText::new("Material").strong().color(theme::TEXT_STRONG));
         if ui.button("Save").clicked() {
             editor.save(state);
         }
@@ -608,6 +604,7 @@ fn entry_icon(is_dir: bool, path: &Path, header: Option<&AssetHeader>) -> Icon {
             AssetType::Mesh => Icon::Mesh,
             AssetType::Prefab => Icon::Prefab,
             AssetType::Audio => Icon::Audio,
+            AssetType::Custom => Icon::File,
         };
     }
     match path
@@ -635,10 +632,9 @@ fn asset_loaded_text(state: &EditorContext<'_>, header: &AssetHeader) -> String 
             .is_texture_asset_uploaded(header.uuid)
             .to_string(),
         AssetType::Material => state
-            .global_resources
-            .asset_manager
-            .get_by_uuid::<Material>(header.uuid)
-            .is_some()
+            .world
+            .get_resource::<Assets<Material>>()
+            .is_some_and(|assets| assets.get_by_id(header.uuid).is_some())
             .to_string(),
         _ => "unknown".to_string(),
     }
@@ -646,20 +642,24 @@ fn asset_loaded_text(state: &EditorContext<'_>, header: &AssetHeader) -> String 
 
 fn loaded_texture_headers(state: &EditorContext<'_>) -> Vec<AssetHeader> {
     let mut textures = state
-        .global_resources
-        .asset_manager
-        .headers
-        .values()
-        .filter(|header| {
-            header.asset_type == AssetType::Texture
-                && state
-                    .global_resources
-                    .renderer
-                    .renderer_api
-                    .is_texture_asset_uploaded(header.uuid)
+        .world
+        .get_resource::<AssetCatalog>()
+        .map(|catalog| {
+            catalog
+                .headers
+                .values()
+                .filter(|header| {
+                    header.asset_type == AssetType::Texture
+                        && state
+                            .global_resources
+                            .renderer
+                            .renderer_api
+                            .is_texture_asset_uploaded(header.uuid)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         })
-        .cloned()
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
     textures.sort_by(|a, b| a.name.cmp(&b.name));
     textures
 }

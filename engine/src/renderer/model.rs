@@ -2,11 +2,7 @@ use std::ops::Range;
 
 use uuid::Uuid;
 
-use crate::{
-    assets::manager::{Asset, AssetType},
-    prelude::*,
-    texture,
-};
+use crate::{assets::manager::Asset, prelude::*, texture};
 
 pub trait Vertex {
     fn layout() -> VertexLayout;
@@ -120,7 +116,6 @@ pub struct MeshAsset {
 }
 
 impl Asset for MeshAsset {
-    const ASSET_TYPE: AssetType = AssetType::Mesh;
     fn uuid(&self) -> Uuid {
         self.uuid
     }

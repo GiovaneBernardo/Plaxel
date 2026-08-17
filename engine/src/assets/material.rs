@@ -65,7 +65,6 @@ pub enum MaterialValue {
 }
 
 impl Asset for Material {
-    const ASSET_TYPE: AssetType = AssetType::Material;
     fn uuid(&self) -> Uuid {
         self.uuid
     }
@@ -341,7 +340,6 @@ pub enum TextureCompression {
 }
 
 impl Asset for TextureAsset {
-    const ASSET_TYPE: AssetType = AssetType::Texture;
     fn uuid(&self) -> Uuid {
         self.uuid
     }

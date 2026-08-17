@@ -1,30 +1,52 @@
-pub use crate::assets::loader;
-use crate::assets::server::AssetServer;
-use crate::renderer::RendererAPI;
-use std::any::Any;
-use std::any::TypeId;
-use std::hash::Hash;
-use std::hash::Hasher;
-pub use std::path::Path;
-use std::path::PathBuf;
-use std::{collections::HashMap, fs};
+use std::{
+    any::TypeId,
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    marker::PhantomData,
+    path::{Path, PathBuf},
+};
+
 pub use uuid::Uuid;
 
+/// Stable identity shared by serialized references and the runtime asset stores.
+pub type AssetId = Uuid;
+
+/// A cheap, typed reference to an asset.
+///
+/// The marker is compile-time only: serialized handles contain just the stable
+/// UUID, so runtime type registration is not coupled to a closed asset enum.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
 pub struct Handle<T> {
-    pub uuid: Uuid,
-    pub asset_type: AssetType,
+    pub uuid: AssetId,
     #[serde(skip)]
-    pub _marker: std::marker::PhantomData<T>,
+    pub _marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> Handle<T> {
+    pub const fn new(uuid: AssetId) -> Self {
+        Self {
+            uuid,
+            _marker: PhantomData,
+        }
+    }
+
+    pub const fn id(self) -> AssetId {
+        self.uuid
+    }
+
+    pub fn untyped(self) -> UntypedHandle {
+        UntypedHandle {
+            uuid: self.uuid,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+        }
+    }
 }
 
 impl<T> std::fmt::Debug for Handle<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handle")
-            .field("uuid", &self.uuid)
-            .field("asset_type", &self.asset_type)
-            .finish()
+        f.debug_tuple("Handle").field(&self.uuid).finish()
     }
 }
 
@@ -41,28 +63,199 @@ impl<T> PartialEq for Handle<T> {
 }
 impl<T> Eq for Handle<T> {}
 impl<T> Hash for Handle<T> {
-    fn hash<H: Hasher>(&self, h: &mut H) {
-        self.uuid.hash(h)
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.uuid.hash(state);
     }
 }
 
-#[derive(
-    Copy, Clone, serde::Serialize, serde::Deserialize, std::fmt::Debug, PartialEq, Eq, Hash,
-)]
+/// Marker implemented by every CPU-side runtime asset.
+///
+/// `uuid` is part of the current engine data model and lets generated assets
+/// retain their identity when inserted. It does not select a storage or loader.
+pub trait Asset: Send + Sync + 'static {
+    fn uuid(&self) -> AssetId;
+}
+
+#[derive(Debug)]
+struct AssetEntry<T> {
+    value: T,
+    version: u64,
+}
+
+/// Type-specific CPU asset storage kept as a normal world resource.
+pub struct Assets<T: Asset> {
+    items: HashMap<AssetId, AssetEntry<T>>,
+    revision: u64,
+}
+
+/// Renderer-owned map from CPU asset handles to prepared GPU representations.
+/// Put this in `Renderer::render_resources`, not in the ECS world. A renderer
+/// or game plugin decides what `G` is and updates it from `AssetEvent<A>`.
+pub struct GpuAssets<A: Asset, G: Send + Sync + 'static> {
+    items: HashMap<AssetId, G>,
+    marker: PhantomData<fn() -> A>,
+}
+
+impl<A: Asset, G: Send + Sync + 'static> Default for GpuAssets<A, G> {
+    fn default() -> Self {
+        Self {
+            items: HashMap::new(),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<A: Asset, G: Send + Sync + 'static> GpuAssets<A, G> {
+    pub fn insert(&mut self, handle: Handle<A>, prepared: G) -> Option<G> {
+        self.items.insert(handle.uuid, prepared)
+    }
+
+    pub fn get(&self, handle: Handle<A>) -> Option<&G> {
+        self.items.get(&handle.uuid)
+    }
+
+    pub fn get_mut(&mut self, handle: Handle<A>) -> Option<&mut G> {
+        self.items.get_mut(&handle.uuid)
+    }
+
+    pub fn remove(&mut self, handle: Handle<A>) -> Option<G> {
+        self.items.remove(&handle.uuid)
+    }
+
+    pub fn contains(&self, handle: Handle<A>) -> bool {
+        self.items.contains_key(&handle.uuid)
+    }
+}
+
+impl<T: Asset> Default for Assets<T> {
+    fn default() -> Self {
+        Self {
+            items: HashMap::new(),
+            revision: 0,
+        }
+    }
+}
+
+impl<T: Asset> Assets<T> {
+    pub fn insert(&mut self, id: AssetId, asset: T) -> Option<T> {
+        self.revision = self.revision.wrapping_add(1);
+        let version = self
+            .items
+            .get(&id)
+            .map_or(1, |entry| entry.version.wrapping_add(1));
+        self.items
+            .insert(
+                id,
+                AssetEntry {
+                    value: asset,
+                    version,
+                },
+            )
+            .map(|entry| entry.value)
+    }
+
+    pub fn add(&mut self, asset: T) -> Handle<T> {
+        let handle = Handle::new(asset.uuid());
+        self.insert(handle.uuid, asset);
+        handle
+    }
+
+    pub fn get(&self, handle: Handle<T>) -> Option<&T> {
+        self.get_by_id(handle.uuid)
+    }
+
+    pub fn get_mut(&mut self, handle: Handle<T>) -> Option<&mut T> {
+        self.get_mut_by_id(handle.uuid)
+    }
+
+    pub fn get_by_id(&self, id: AssetId) -> Option<&T> {
+        self.items.get(&id).map(|entry| &entry.value)
+    }
+
+    pub fn get_mut_by_id(&mut self, id: AssetId) -> Option<&mut T> {
+        let entry = self.items.get_mut(&id)?;
+        self.revision = self.revision.wrapping_add(1);
+        entry.version = entry.version.wrapping_add(1);
+        Some(&mut entry.value)
+    }
+
+    pub fn version(&self, handle: Handle<T>) -> Option<u64> {
+        self.items.get(&handle.uuid).map(|entry| entry.version)
+    }
+
+    pub fn contains(&self, handle: Handle<T>) -> bool {
+        self.items.contains_key(&handle.uuid)
+    }
+
+    pub fn remove(&mut self, handle: Handle<T>) -> Option<T> {
+        let removed = self.items.remove(&handle.uuid).map(|entry| entry.value);
+        if removed.is_some() {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> {
+        self.items
+            .iter()
+            .map(|(id, entry)| (Handle::new(*id), &entry.value))
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UntypedHandle {
+    pub uuid: AssetId,
+    pub type_id: TypeId,
+    pub type_name: &'static str,
+}
+
+impl UntypedHandle {
+    pub fn typed<T: Asset>(self) -> Option<Handle<T>> {
+        (self.type_id == TypeId::of::<T>()).then(|| Handle::new(self.uuid))
+    }
+}
+
+/// Events emitted when a typed CPU store changes. Renderer preparation and
+/// gameplay readers have independent cursors, so neither consumes the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetEvent<T: Asset> {
+    Added { handle: Handle<T>, version: u64 },
+    Modified { handle: Handle<T>, version: u64 },
+    Removed { handle: Handle<T> },
+}
+
+/// The enum remains only in version-1 cooked-file metadata. Runtime type
+/// registration and handles do not depend on it.
+#[derive(Copy, Clone, serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq, Hash)]
 pub enum AssetType {
     Material,
     Texture,
     Mesh,
     Prefab,
     Audio,
+    Custom,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize, std::fmt::Debug)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct AssetHeader {
     pub version: u16,
-    pub uuid: Uuid,
+    pub uuid: AssetId,
     pub name: String,
     pub asset_type: AssetType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
     #[serde(skip)]
     pub file_path: PathBuf,
     #[serde(skip)]
@@ -71,143 +264,43 @@ pub struct AssetHeader {
     pub content_size: u64,
 }
 
-pub trait Asset {
-    const ASSET_TYPE: AssetType;
-
-    fn uuid(&self) -> Uuid;
+/// Editor-facing index of cooked files. This is metadata only; assets live in
+/// `Assets<T>` world resources and are loaded by `AssetServer`.
+#[derive(Default)]
+pub struct AssetCatalog {
+    pub headers: HashMap<AssetId, AssetHeader>,
+    pub paths: HashMap<PathBuf, AssetId>,
 }
 
-pub struct Assets<T> {
-    items: HashMap<Uuid, T>,
-}
-
-impl<T: Asset> Assets<T> {
-    pub fn add(&mut self, asset: T) -> Option<&T> {
-        let uuid = asset.uuid();
-        self.items.insert(asset.uuid(), asset);
-        return self.items.get(&uuid);
-    }
-
-    pub fn get(&self, uuid: &Uuid) -> Option<&T> {
-        self.items.get(uuid)
-    }
-
-    pub fn get_mut(&mut self, uuid: &Uuid) -> Option<&mut T> {
-        self.items.get_mut(uuid)
-    }
-}
-
-pub struct UntypedHandle {
-    pub uuid: Uuid,
-    pub asset_type: AssetType,
-    pub type_id: TypeId,
-}
-
-pub struct AssetRegistry {}
-
-pub struct AssetManager {
-    pub server: AssetServer,
-    pub headers: HashMap<Uuid, AssetHeader>,
-    pub storages: HashMap<TypeId, Box<dyn Any>>,
-    pub names: HashMap<(AssetType, String), UntypedHandle>,
-    pub paths: HashMap<PathBuf, Uuid>,
-}
-
-impl AssetManager {
-    pub fn new() -> Self {
-        Self {
-            server: AssetServer {},
-            headers: HashMap::new(),
-            storages: HashMap::new(),
-            names: HashMap::new(),
-            paths: HashMap::new(),
-        }
-    }
-
+impl AssetCatalog {
     pub fn scan_folder(&mut self, folder: &Path) -> anyhow::Result<()> {
-        for entry in fs::read_dir(folder)? {
+        if !folder.exists() {
+            return Ok(());
+        }
+        self.scan_recursive(folder)
+    }
+
+    fn scan_recursive(&mut self, folder: &Path) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(folder)? {
             let path = entry?.path();
+            if path.is_dir() {
+                self.scan_recursive(&path)?;
+                continue;
+            }
             if path
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension == "plax" || extension.starts_with("plx"))
             {
-                let header = loader::load_header(&path).unwrap();
-                self.paths.insert(path.to_path_buf(), header.uuid);
+                let header = crate::assets::loader::load_header(&path)?;
+                self.paths.insert(path, header.uuid);
                 self.headers.insert(header.uuid, header);
             }
         }
         Ok(())
     }
 
-    pub fn load_assets(&mut self, ctx: &AssetContext) {
-        let headers: Vec<_> = self.headers.values().cloned().collect();
-
-        for header in &headers {
-            loader::load_asset(self, ctx, header);
-        }
+    pub fn uuid_for_path(&self, path: &Path) -> Option<AssetId> {
+        self.paths.get(path).copied()
     }
-
-    pub fn register_asset_type<T: 'static>(&mut self) {
-        self.storages.insert(
-            TypeId::of::<T>(),
-            Box::new(Assets::<T> {
-                items: HashMap::new(),
-            }),
-        );
-    }
-
-    pub fn assets<T: Asset + 'static>(&self) -> Option<&Assets<T>> {
-        self.storages
-            .get(&TypeId::of::<T>())?
-            .downcast_ref::<Assets<T>>()
-    }
-
-    pub fn assets_mut<T: Asset + 'static>(&mut self) -> Option<&mut Assets<T>> {
-        self.storages
-            .get_mut(&TypeId::of::<T>())?
-            .downcast_mut::<Assets<T>>()
-    }
-
-    pub fn add_asset<T: Asset + 'static>(&mut self, asset: T) -> Option<&T> {
-        if !self.storages.contains_key(&TypeId::of::<T>()) {
-            self.register_asset_type::<T>();
-        }
-        self.assets_mut::<T>().unwrap().add(asset)
-    }
-
-    pub fn get_by_uuid<T: Asset + 'static>(&self, uuid: Uuid) -> Option<&T> {
-        self.assets::<T>()?.get(&uuid)
-    }
-
-    pub fn get<T: Asset + 'static>(&self, handle: Handle<T>) -> Option<&T> {
-        self.assets::<T>()?.get(&handle.uuid)
-    }
-
-    pub fn get_mut<T: Asset + 'static>(&mut self, handle: Handle<T>) -> Option<&mut T> {
-        self.assets_mut::<T>()?.get_mut(&handle.uuid)
-    }
-
-    pub fn get_by_name<T: Asset + 'static>(&self, name: &str) -> Option<&T> {
-        let handle = self.handle::<T>(name)?;
-        self.get(handle)
-    }
-
-    pub fn handle<T: Asset + 'static>(&self, name: &str) -> Option<Handle<T>> {
-        let untyped = self.names.get(&(T::ASSET_TYPE, name.to_string()))?;
-
-        Some(Handle {
-            uuid: untyped.uuid,
-            asset_type: T::ASSET_TYPE,
-            _marker: std::marker::PhantomData,
-        })
-    }
-
-    pub fn uuid_for_path(&self, path: &PathBuf) -> Option<&Uuid> {
-        self.paths.get(path)
-    }
-}
-
-pub struct AssetContext {
-    pub renderer_api: Box<dyn RendererAPI>,
 }

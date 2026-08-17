@@ -1,20 +1,18 @@
-use std::any::TypeId;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use engine::assets::importer::AssetPayload;
-use engine::assets::loader;
-use engine::assets::manager::{Asset, Handle, UntypedHandle, Uuid};
-use engine::assets::material::{Material, MaterialResource};
+use engine::assets::manager::{Assets, Handle, Uuid};
+use engine::assets::material::Material;
+use engine::assets::server::AssetServer;
 use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::components::renderer::MeshRendererComponent;
 use engine::ecs::entity::Entity;
 use engine::ecs::query::Query;
-use engine::game_info;
+use engine::ecs::resource::Res;
 use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
-use engine::renderer::{FrameBindings, GeometryPassNode};
+use engine::renderer::DefaultMeshes;
 use game_types::assembly::Assembly;
 use game_types::octree::{DensityRange, FaceNeighbor, OctreeNode, PlanetMeshRequest};
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
@@ -25,7 +23,7 @@ use engine::math::{Quat, Vec3, vec3};
 
 use engine::core::input::{InputState, KeyCode, MouseButton};
 use engine::ecs::commands::{Commands, PhysicalSphereParams};
-use engine::ecs::system::SystemContext;
+use engine::ecs::system::{GlobalsMut, SystemContext};
 use game_types::game_mode::{GameMode, GameModeState};
 
 use crate::{
@@ -854,7 +852,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
 
     // F to build block
     if interact {
-        let Some((material_uuid, mesh)) = ensure_build_block_assets(ctx.globals) else {
+        let Some((material_uuid, mesh)) = ensure_build_block_assets(world, &ctx.globals) else {
             return;
         };
 
@@ -929,206 +927,41 @@ fn player_editor_system(_ctx: &mut SystemContext, _commands: &mut Commands) {
 const BUILD_BLOCK_MATERIAL: &str = "Material.plxmat";
 const BUILD_BLOCK_MESH: &str = "Cube_Finished_Cube.plxmesh";
 
-fn ensure_build_block_assets(globals: &mut GlobalResources) -> Option<(Uuid, Handle<MeshAsset>)> {
-    if let (Some(material), Some(mesh)) = (
-        globals
-            .asset_manager
-            .get_by_name::<Material>(BUILD_BLOCK_MATERIAL),
-        globals.asset_manager.handle::<MeshAsset>(BUILD_BLOCK_MESH),
-    ) {
-        return Some((material.uuid, mesh));
-    }
-
+fn build_asset_dir() -> std::path::PathBuf {
     let asset_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("res")
         .join("imported");
-    let material_path = asset_dir.join(BUILD_BLOCK_MATERIAL);
-    let mesh_path = asset_dir.join(BUILD_BLOCK_MESH);
-
-    let mesh_header = match loader::load_header(&mesh_path) {
-        Ok(header) => header,
-        Err(error) => {
-            engine::game_warn!(
-                "Unable to build block: failed to read mesh header {mesh_path:?}: {error}"
-            );
-            return None;
-        }
-    };
-    let mesh = match loader::load_payload(&mesh_path) {
-        Ok(AssetPayload::Mesh(mesh)) => mesh,
-        Ok(_) => {
-            engine::game_warn!("Unable to build block: {mesh_path:?} is not a mesh asset");
-            return None;
-        }
-        Err(error) => {
-            engine::game_warn!("Unable to build block: failed to load mesh {mesh_path:?}: {error}");
-            return None;
-        }
-    };
-
-    let mesh_handle = globals.renderer.renderer_api.upload_mesh_asset(&mesh);
-    globals
-        .asset_manager
-        .paths
-        .insert(mesh_path.clone(), mesh.uuid);
-    globals.asset_manager.headers.insert(mesh.uuid, mesh_header);
-    register_asset_name::<MeshAsset>(globals, BUILD_BLOCK_MESH, mesh.uuid);
-    register_asset_name::<MeshAsset>(globals, &mesh.name, mesh.uuid);
-    globals.asset_manager.add_asset::<MeshAsset>(mesh.clone());
-
-    let material_header = match loader::load_header(&material_path) {
-        Ok(header) => header,
-        Err(error) => {
-            engine::game_warn!(
-                "Unable to build block: failed to read material header {material_path:?}: {error}"
-            );
-            return None;
-        }
-    };
-    let mut material = match loader::load_payload(&material_path) {
-        Ok(AssetPayload::Material(material)) => material,
-        Ok(_) => {
-            engine::game_warn!("Unable to build block: {material_path:?} is not a material asset");
-            return None;
-        }
-        Err(error) => {
-            engine::game_warn!(
-                "Unable to build block: failed to load material {material_path:?}: {error}"
-            );
-            return None;
-        }
-    };
-
-    upload_material_textures(globals, &material_path, &material);
-    material.set_vertex_layouts(vec![
-        mesh.vertex_layout.clone(),
-        TransformInstance::layout(),
-    ]);
-    material.material_index = globals
-        .renderer
-        .renderer_api
-        .upload_material_asset(&material, None);
-
-    let Some(camera_layout) = globals
-        .renderer
-        .render_graph
-        .get_node_mut::<GeometryPassNode>(engine::renderer::ids::graph_passes::GEOMETRY)
-        .and_then(|node| node.camera_bind_group_layout)
-    else {
-        engine::game_warn!(
-            "Unable to build block: geometry camera bind group layout is unavailable"
-        );
-        return None;
-    };
-    let Some(textures_layout) = globals
-        .renderer
-        .render_resources
-        .get_labeled::<FrameBindings>("frame_bindings")
-        .map(|bindings| bindings.textures_layout)
-    else {
-        engine::game_warn!("Unable to build block: frame texture bind group layout is unavailable");
-        return None;
-    };
-
-    let target_info = {
-        let descriptor = GeometryPassNode::pass_descriptor();
-        globals
-            .renderer
-            .renderer_api
-            .target_info_for_pass(&descriptor, &globals.renderer.render_graph.resources)
-    };
-    globals.renderer.renderer_api.create_pipeline(
-        &material,
-        engine::renderer::ids::material_passes::FORWARD_OPAQUE,
-        &[camera_layout, textures_layout],
-        &target_info,
-    );
-
-    let material_uuid = material.uuid;
-    globals
-        .asset_manager
-        .paths
-        .insert(material_path.clone(), material_uuid);
-    globals
-        .asset_manager
-        .headers
-        .insert(material_uuid, material_header);
-    register_asset_name::<Material>(globals, BUILD_BLOCK_MATERIAL, material_uuid);
-    globals.asset_manager.add_asset::<Material>(material);
-
-    Some((material_uuid, mesh_handle))
+    asset_dir
 }
 
-fn upload_material_textures(
-    globals: &mut GlobalResources,
-    material_path: &Path,
-    material: &Material,
-) {
-    for binding in &material.bindings {
-        let MaterialResource::Texture(texture_uuid) = binding.resource else {
-            continue;
-        };
-        if globals
-            .renderer
-            .renderer_api
-            .is_texture_asset_uploaded(texture_uuid)
-        {
-            continue;
-        }
-
-        let Some(texture_path) = find_sibling_asset_by_uuid(material_path, texture_uuid, "plxtex")
-        else {
-            engine::game_warn!(
-                "Unable to build block: material {material_path:?} references missing texture {texture_uuid}"
-            );
-            continue;
-        };
-        let Ok(AssetPayload::Texture(texture)) = loader::load_payload(&texture_path) else {
-            engine::game_warn!(
-                "Unable to build block: failed to load texture asset {texture_path:?}"
-            );
-            continue;
-        };
-
-        globals
-            .renderer
-            .renderer_api
-            .upload_texture_asset(&texture, None);
+pub fn preload_build_block_assets(server: Res<AssetServer>) {
+    let asset_dir = build_asset_dir();
+    let material = asset_dir.join(BUILD_BLOCK_MATERIAL);
+    let mesh = asset_dir.join(BUILD_BLOCK_MESH);
+    if material.exists() && mesh.exists() {
+        server.load::<Material>(material);
+        server.load::<MeshAsset>(mesh);
     }
 }
 
-fn find_sibling_asset_by_uuid(asset_path: &Path, uuid: Uuid, extension: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(asset_path.parent()?).ok()?;
+fn ensure_build_block_assets(
+    world: &engine::ecs::world::World,
+    globals: &GlobalResources,
+) -> Option<(Uuid, Handle<MeshAsset>)> {
+    let asset_dir = build_asset_dir();
+    let server = world.get_resource::<AssetServer>()?;
+    let material_handle = server.load::<Material>(asset_dir.join(BUILD_BLOCK_MATERIAL));
+    let mesh_handle = server.load::<MeshAsset>(asset_dir.join(BUILD_BLOCK_MESH));
+    drop(server);
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
-        {
-            continue;
-        }
-
-        let Ok(header) = loader::load_header(&path) else {
-            continue;
-        };
-        if header.uuid == uuid {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-fn register_asset_name<T: Asset + 'static>(globals: &mut GlobalResources, name: &str, uuid: Uuid) {
-    globals.asset_manager.names.insert(
-        (T::ASSET_TYPE, name.to_string()),
-        UntypedHandle {
-            uuid,
-            asset_type: T::ASSET_TYPE,
-            type_id: TypeId::of::<T>(),
-        },
-    );
+    let vertex_layout = world
+        .get_resource::<Assets<MeshAsset>>()?
+        .get(mesh_handle)?
+        .vertex_layout
+        .clone();
+    let mut materials = world.get_resource_mut::<Assets<Material>>()?;
+    let material = materials.get_mut(material_handle)?;
+    material.set_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
+    Some((material.uuid, globals.renderer.default_meshes().cube))
 }

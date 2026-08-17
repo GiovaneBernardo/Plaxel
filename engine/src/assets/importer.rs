@@ -1,17 +1,20 @@
 // NOTE: Importer converts outside formats into the engine formats
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use uuid::Uuid;
 
 use crate::{
     assets::{
-        manager::{AssetHeader, AssetManager},
+        manager::{AssetCatalog, AssetHeader},
         material::{Material, TextureAsset},
     },
     model::MeshAsset,
 };
 
-pub trait AssetImporter {
+pub trait AssetImporter: Send + Sync + 'static {
     fn id(&self) -> &'static str;
     fn version(&self) -> u32;
     fn extensions(&self) -> &[&'static str];
@@ -25,7 +28,7 @@ pub struct ImportContext<'a> {
 
     pub source_path: &'a Path,
     //pub source_hash: [u8; 32],
-    pub manager: &'a AssetManager,
+    pub catalog: &'a AssetCatalog,
     pub settings: &'a ImportSettings,
 }
 
@@ -44,11 +47,65 @@ pub enum TargetPlatform {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportedAsset {
     pub header: AssetHeader,
-    pub payload: AssetPayload,
+    pub extension: String,
+    pub payload: Vec<u8>,
 }
 
+#[derive(Default)]
+pub struct AssetImporterRegistry {
+    importers: Vec<Arc<dyn AssetImporter>>,
+}
+
+impl AssetImporterRegistry {
+    pub fn register<I: AssetImporter>(&mut self, importer: I) {
+        let id = importer.id();
+        self.importers.retain(|registered| registered.id() != id);
+        self.importers.push(Arc::new(importer));
+    }
+
+    pub fn importer_for(&self, path: &Path) -> Option<Arc<dyn AssetImporter>> {
+        let extension = path.extension()?.to_str()?;
+        self.importers
+            .iter()
+            .find(|importer| {
+                importer
+                    .extensions()
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+            })
+            .cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.importers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.importers.is_empty()
+    }
+}
+
+impl ImportedAsset {
+    pub fn from_asset<T: serde::Serialize>(
+        mut header: AssetHeader,
+        type_name: impl Into<String>,
+        extension: impl Into<String>,
+        asset: &T,
+    ) -> anyhow::Result<Self> {
+        header.version = 2;
+        header.type_name = Some(type_name.into());
+        Ok(Self {
+            header,
+            extension: extension.into(),
+            payload: bincode::serialize(asset)?,
+        })
+    }
+}
+
+/// Decoder representation for files produced before the extensible importer
+/// format. Never use this enum when defining a new asset type.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub enum AssetPayload {
+pub(crate) enum LegacyAssetPayload {
     Mesh(MeshAsset),
     Material(Material),
     Texture(TextureAsset),
@@ -76,7 +133,7 @@ impl<'a> ImportContext<'a> {
         Ok(path)
     }
 
-    pub fn asset_uuid(&self, stable_path: &PathBuf) -> Option<&Uuid> {
-        self.manager.uuid_for_path(stable_path)
+    pub fn asset_uuid(&self, stable_path: &PathBuf) -> Option<Uuid> {
+        self.catalog.uuid_for_path(stable_path)
     }
 }

@@ -13,6 +13,7 @@ pub mod profiling;
 pub mod reflect;
 pub mod renderer;
 
+use crate::assets::plugin::AssetPlugin;
 use crate::core::ecs::plugin::Plugin;
 use crate::core::ecs::resource::Resource;
 use crate::core::ecs::schedule::CoreSchedule;
@@ -481,6 +482,7 @@ impl Plugin for PlaxelDefaultPlugin {
             .insert_resource(crate::core::input::InputState::new())
             .add_plugin(WindowPlugin)
             .add_plugin(PhysicsPlugin)
+            .add_plugin(AssetPlugin)
             .add_plugin(RendererPlugin);
     }
 }

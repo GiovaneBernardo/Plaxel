@@ -1,10 +1,11 @@
 use engine::{
     assets::material::Material,
     core::components::core::TransformComponent,
+    core::components::renderer::MeshRendererComponent,
     ecs::{commands::Commands, entity::Entity, system::SystemContext},
-    math::{Mat4, Quat, Vec3, vec3},
+    math::{Quat, Vec3, vec3},
     model::{ModelVertex, TransformInstance, Vertex},
-    renderer::{CullMode, RenderObject, RenderObjectId, material_passes},
+    renderer::{CullMode, material_passes},
 };
 use game_types::universe::StarSystemComponent;
 
@@ -81,38 +82,22 @@ fn star_color(temperature: f64) -> Vec3 {
     vec3(0.0, 0.0, 0.0)
 }
 
-fn create_star_render_object(ctx: &mut SystemContext, star_entity: Entity) -> RenderObjectId {
-    let transform = ctx.world.get::<TransformComponent>(star_entity).unwrap();
-    let model_matrix = Mat4::from_translation(transform.position)
-        * Mat4::from_quat(transform.rotation)
-        * Mat4::from_scale(Vec3::new(
-            transform.scale.x,
-            transform.scale.y,
-            transform.scale.z,
-        ));
-
-    let mut star_material =
+fn create_star_render_object(ctx: &mut SystemContext, star_entity: Entity) {
+    let star_material =
         Material::for_pass("shaders/star.wgsl".into(), material_passes::FORWARD_OPAQUE)
             .with_vertex_layouts(vec![ModelVertex::layout(), TransformInstance::layout()])
             .with_cull(CullMode::Front);
-
-    star_material.material_index = ctx
-        .globals
-        .renderer
-        .renderer_api
-        .upload_material_asset(&star_material, None);
-
-    let transform = engine::model::TransformInstance {
-        model_matrix: model_matrix.to_cols_array_2d(),
-        material_index: star_material.material_index,
-    };
-
+    let material_uuid = star_material.uuid;
+    ctx.world
+        .get_resource::<engine::assets::server::AssetServer>()
+        .expect("AssetPlugin must be installed before GamePlugin")
+        .add(star_material);
     let mesh = ctx.globals.renderer.default_meshes().sphere;
-    let object_id: RenderObjectId =
-        ctx.globals
-            .renderer
-            .objects()
-            .insert(RenderObject::new(mesh, star_material, transform));
-
-    return object_id;
+    ctx.world.insert(
+        star_entity,
+        MeshRendererComponent {
+            material: material_uuid,
+            mesh,
+        },
+    );
 }

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     assets::{
-        importer::{AssetImporter, AssetPayload, ImportContext, ImportedAsset},
+        importer::{AssetImporter, ImportContext, ImportedAsset},
         manager::{AssetHeader, AssetType},
         material::{Material, MaterialBinding, MaterialResource, TextureAsset, TextureMip},
     },
@@ -91,18 +91,21 @@ impl AssetImporter for ObjImporter {
                 vertex_layout: ModelVertex::layout(),
             };
 
-            imported_assets.push(ImportedAsset {
-                header: AssetHeader {
-                    version: 0,
+            imported_assets.push(ImportedAsset::from_asset(
+                AssetHeader {
+                    version: 2,
                     uuid,
                     name: model.name.clone(),
                     asset_type: AssetType::Mesh,
+                    type_name: None,
                     file_path: source.to_path_buf(),
                     content_offset: 0,
                     content_size: 0,
                 },
-                payload: AssetPayload::Mesh(mesh),
-            });
+                std::any::type_name::<MeshAsset>(),
+                "plxmesh",
+                &mesh,
+            )?);
         }
 
         // Import materials
@@ -127,18 +130,21 @@ impl AssetImporter for ObjImporter {
                 imported_assets.push(imported_texture);
             }
 
-            imported_assets.push(ImportedAsset {
-                header: AssetHeader {
-                    version: 0,
+            imported_assets.push(ImportedAsset::from_asset(
+                AssetHeader {
+                    version: 2,
                     uuid,
                     name: material.name.clone(),
                     asset_type: AssetType::Material,
+                    type_name: None,
                     file_path: source.to_path_buf(),
                     content_offset: 0,
                     content_size: 0,
                 },
-                payload: AssetPayload::Material(my_material),
-            });
+                std::any::type_name::<Material>(),
+                "plxmat",
+                &my_material,
+            )?);
         }
 
         Ok(imported_assets)
@@ -173,28 +179,33 @@ impl ObjImporter {
         let data = img.as_raw();
 
         let uuid = Uuid::new_v4();
-        ImportedAsset {
-            header: AssetHeader {
-                version: 0,
-                uuid: uuid,
+        let texture = TextureAsset {
+            format: descriptor.format,
+            width,
+            height,
+            mip_levels: vec![TextureMip {
+                width,
+                height,
+                bytes: data.to_vec(),
+            }],
+            name: descriptor.label,
+            uuid,
+        };
+        ImportedAsset::from_asset(
+            AssetHeader {
+                version: 2,
+                uuid,
                 name: path.file_name().unwrap().to_string_lossy().into(),
                 asset_type: AssetType::Texture,
+                type_name: None,
                 file_path: path.to_path_buf(),
                 content_offset: 0,
                 content_size: 0,
             },
-            payload: AssetPayload::Texture(TextureAsset {
-                format: descriptor.format,
-                width: width,
-                height: height,
-                mip_levels: vec![TextureMip {
-                    width,
-                    height,
-                    bytes: data.to_vec(),
-                }],
-                name: descriptor.label,
-                uuid,
-            }),
-        }
+            std::any::type_name::<TextureAsset>(),
+            "plxtex",
+            &texture,
+        )
+        .expect("texture asset serialization should succeed")
     }
 }

@@ -164,6 +164,10 @@ impl RenderResources {
         self.get_labeled::<T>("")
     }
 
+    pub fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.get_labeled_mut::<T>("")
+    }
+
     pub fn get_labeled<T: 'static>(&self, label: &'static str) -> Option<&T> {
         self.map.get(&(TypeId::of::<T>(), label))?.downcast_ref()
     }
@@ -326,14 +330,10 @@ impl Renderer {
         &mut self.view_registry
     }
 
-    pub fn sync_render_database(
-        &mut self,
-        world: &mut World,
-        assets: &crate::assets::manager::AssetManager,
-    ) {
+    pub fn sync_render_database(&mut self, world: &mut World) {
         {
             crate::profile_scope!("render_database.sync_ecs");
-            self.render_database.sync_ecs(world, assets);
+            self.render_database.sync_ecs(world);
         }
         let dirty_ranges = {
             crate::profile_scope!("render_database.take_dirty_ranges");

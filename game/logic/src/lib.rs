@@ -33,7 +33,7 @@ pub mod sdf;
 mod systems;
 
 use game_types::game_mode::{GameMode, GameModeState};
-use systems::{InputMap, player_interaction_system};
+use systems::{InputMap, player_interaction_system, preload_build_block_assets};
 
 use crate::octree::depth_color;
 use crate::sdf::EarthHeightmap;
@@ -95,6 +95,7 @@ impl Plugin for GamePlugin {
             "game.universe_init",
             systems::planets::universe_system::universe_system_init,
         )
+        .add_system(CoreSchedule::Startup, preload_build_block_assets)
         .add_system(CoreSchedule::Startup, report_schedules_started)
         .add_named_legacy_system(
             CoreSchedule::Update,
