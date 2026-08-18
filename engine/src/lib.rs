@@ -622,6 +622,7 @@ fn handle_cursor_moved(&mut self, x: f64, y: f64) {
 
 pub mod prelude {
     pub use crate::assets::prelude::*;
+    pub use crate::core::components::prelude::*;
     pub use crate::ecs::prelude::*;
     pub use crate::global_resources::*;
     pub use crate::logging::prelude::*;
