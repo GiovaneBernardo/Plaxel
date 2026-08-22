@@ -750,10 +750,12 @@ impl RenderProducer for PlanetTerrainProducer {
         for command in &commands {
             match *command {
                 PlanetTerrainCommand::EnsurePlanet { planet, frame } => {
+                    engine::profile_scope!("terrain.render.prepare_frame.ensure_planet");
                     self.ensure_planet(ctx.api, planet, frame);
                 }
                 PlanetTerrainCommand::UpdatePlanetFrame { planet, frame } => {
                     if let Some(state) = self.planets.get(&planet) {
+                        engine::profile_scope!("terrain.render.prepare_frame.write_buffer");
                         ctx.api
                             .write_buffer(state.frame_buffer, bytemuck::bytes_of(&frame));
                     }
@@ -772,14 +774,19 @@ impl RenderProducer for PlanetTerrainProducer {
                     remove_all,
                     remove,
                     insert,
-                } => self.replace_chunks(ctx.api, planet, remove_all, remove, insert),
+                } => {
+                    engine::profile_scope!("terrain.render.prepare_frame.replace_chunks");
+                    self.replace_chunks(ctx.api, planet, remove_all, remove, insert)
+                }
                 PlanetTerrainCommand::RemovePlanet { planet } => {
+                    engine::profile_scope!("terrain.render.prepare_frame.remove_planet");
                     self.remove_planet(ctx.api, planet);
                 }
             }
         }
 
         if self.batches_dirty {
+            engine::profile_scope!("terrain.render.prepare_frame.rebuild_batches");
             self.rebuild_batches(ctx.api);
             self.batches_dirty = false;
         }

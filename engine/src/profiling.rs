@@ -21,6 +21,11 @@ pub const DEFAULT_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
 static SNAPSHOT_INTERVAL_US: AtomicU64 =
     AtomicU64::new(DEFAULT_SNAPSHOT_INTERVAL.as_micros() as u64);
+/// A non-zero value arms a one-shot capture of the first frame at or above the
+/// requested duration. The capture is kept separately from the rolling history so
+/// later frames cannot overwrite the scope data before the editor sees it.
+static FRAME_TIME_PAUSE_THRESHOLD_US: AtomicU64 = AtomicU64::new(0);
+static FRAME_TIME_PAUSE_REVISION: AtomicU64 = AtomicU64::new(0);
 // Terrain generation can fan out across many chunk jobs in one frame. Keep
 // enough samples to retain the nested phase scopes instead of silently making
 // late-running workers look uninstrumented.
@@ -92,6 +97,9 @@ pub struct ProfileSnapshot {
     pub latest_scopes: Vec<ScopeSummary>,
     pub average_frame_us: f64,
     pub max_frame_us: f64,
+    /// Threshold that selected `latest_frame`, when it was preserved by the
+    /// one-shot slow-frame trigger.
+    pub frame_time_pause_threshold_us: Option<f64>,
     pub cpu: cpu::CpuProfileSnapshot,
     pub gpu: gpu::GpuProfileSnapshot,
 }
@@ -107,6 +115,7 @@ impl Default for ProfileSnapshot {
             latest_scopes: Vec::new(),
             average_frame_us: 0.0,
             max_frame_us: 0.0,
+            frame_time_pause_threshold_us: None,
             cpu: cpu::CpuProfileSnapshot::default(),
             gpu: gpu::GpuProfileSnapshot::default(),
         }
@@ -119,6 +128,7 @@ struct Profiler {
     frame_start: Option<Instant>,
     frame_start_clock_us: u64,
     active_scopes: HashMap<u64, ActiveScope>,
+    frame_time_pause_capture: Option<(FrameSample, u64)>,
 }
 
 pub struct Scope {
@@ -144,6 +154,7 @@ impl Profiler {
             frame_start: None,
             frame_start_clock_us: 0,
             active_scopes: HashMap::new(),
+            frame_time_pause_capture: None,
         }
     }
 }
@@ -301,6 +312,17 @@ pub fn end_frame() {
                 ));
             }
         }
+        let threshold_us = FRAME_TIME_PAUSE_THRESHOLD_US.load(Ordering::Relaxed);
+        if threshold_us > 0
+            && total_us >= threshold_us as f64
+            && FRAME_TIME_PAUSE_THRESHOLD_US
+                .compare_exchange(threshold_us, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            profiler.frame_time_pause_capture = Some((frame.clone(), threshold_us));
+            FRAME_TIME_PAUSE_REVISION.fetch_add(1, Ordering::Release);
+        }
+
         profiler.frames.push_back(frame);
         while profiler.frames.len() > MAX_FRAMES {
             profiler.frames.pop_front();
@@ -340,7 +362,10 @@ pub fn snapshot() -> ProfileSnapshot {
             total_us: frame.total_us,
         })
         .collect::<Vec<_>>();
-    let latest_frame = profiler.frames.back().cloned();
+    let (latest_frame, frame_time_pause_threshold_us) = match &profiler.frame_time_pause_capture {
+        Some((frame, threshold_us)) => (Some(frame.clone()), Some(*threshold_us as f64)),
+        None => (profiler.frames.back().cloned(), None),
+    };
     drop(profiler);
 
     let latest_scopes = latest_frame
@@ -367,6 +392,7 @@ pub fn snapshot() -> ProfileSnapshot {
         latest_scopes,
         average_frame_us,
         max_frame_us,
+        frame_time_pause_threshold_us,
         cpu: cpu::snapshot(),
         gpu: gpu::snapshot(),
     }
@@ -381,20 +407,48 @@ pub fn set_snapshot_interval(interval: Duration) {
     SNAPSHOT_INTERVAL_US.store(interval.as_micros() as u64, Ordering::Relaxed);
 }
 
+/// Arm a one-shot capture of the first CPU frame whose total duration reaches
+/// `threshold`. This preserves that frame's scopes until the editor acknowledges it.
+pub fn arm_frame_time_pause(threshold: Duration) {
+    let threshold_us = threshold.as_micros().clamp(1, u128::from(u64::MAX)) as u64;
+    PROFILER.lock().unwrap().frame_time_pause_capture = None;
+    FRAME_TIME_PAUSE_THRESHOLD_US.store(threshold_us, Ordering::Relaxed);
+    FRAME_TIME_PAUSE_REVISION.fetch_add(1, Ordering::Release);
+}
+
+pub fn cancel_frame_time_pause() {
+    FRAME_TIME_PAUSE_THRESHOLD_US.store(0, Ordering::Relaxed);
+    PROFILER.lock().unwrap().frame_time_pause_capture = None;
+    FRAME_TIME_PAUSE_REVISION.fetch_add(1, Ordering::Release);
+}
+
+pub fn frame_time_pause_threshold() -> Option<Duration> {
+    let threshold_us = FRAME_TIME_PAUSE_THRESHOLD_US.load(Ordering::Relaxed);
+    (threshold_us > 0).then(|| Duration::from_micros(threshold_us))
+}
+
+/// Release a preserved capture after the UI has retained its `Arc`.
+pub fn clear_frame_time_pause_capture() {
+    PROFILER.lock().unwrap().frame_time_pause_capture = None;
+    FRAME_TIME_PAUSE_REVISION.fetch_add(1, Ordering::Release);
+}
+
 /// Snapshot shared with the editor. Rebuilt at most once per
 /// [`snapshot_interval`]; every other call clones an [`Arc`].
 pub fn shared_snapshot() -> Arc<ProfileSnapshot> {
-    static SHARED: LazyLock<Mutex<(Instant, Arc<ProfileSnapshot>)>> = LazyLock::new(|| {
+    static SHARED: LazyLock<Mutex<(Instant, Arc<ProfileSnapshot>, u64)>> = LazyLock::new(|| {
         Mutex::new((
             Instant::now() - DEFAULT_SNAPSHOT_INTERVAL,
             Arc::new(ProfileSnapshot::default()),
+            FRAME_TIME_PAUSE_REVISION.load(Ordering::Acquire),
         ))
     });
 
     let interval = snapshot_interval();
+    let revision = FRAME_TIME_PAUSE_REVISION.load(Ordering::Acquire);
     let mut shared = SHARED.lock().unwrap();
-    if interval.is_zero() || shared.0.elapsed() >= interval {
-        *shared = (Instant::now(), Arc::new(snapshot()));
+    if interval.is_zero() || shared.0.elapsed() >= interval || shared.2 != revision {
+        *shared = (Instant::now(), Arc::new(snapshot()), revision);
     }
     shared.1.clone()
 }

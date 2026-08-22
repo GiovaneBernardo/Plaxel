@@ -24,6 +24,8 @@ pub struct ProfilerState {
     #[cfg_attr(not(feature = "puffin-ui"), allow(dead_code))]
     show_puffin: bool,
     expanded_overlay: bool,
+    frame_time_threshold_ms: f64,
+    auto_paused_at_ms: Option<f64>,
 }
 
 impl ProfilerState {
@@ -34,6 +36,8 @@ impl ProfilerState {
             view: ProfilerView::default(),
             show_puffin: false,
             expanded_overlay: false,
+            frame_time_threshold_ms: 30.0,
+            auto_paused_at_ms: None,
         }
     }
 
@@ -51,6 +55,19 @@ impl ProfilerState {
     fn toggle_pause(&mut self, live: &Arc<ProfileSnapshot>) {
         self.paused = !self.paused;
         self.frozen = self.paused.then(|| live.clone());
+        self.auto_paused_at_ms = None;
+    }
+
+    fn catch_frame_time_pause(&mut self, live: &Arc<ProfileSnapshot>) {
+        let Some(threshold_us) = live.frame_time_pause_threshold_us else {
+            return;
+        };
+
+        // Retain the exact triggered Arc before releasing the engine-side capture.
+        self.paused = true;
+        self.frozen = Some(live.clone());
+        self.auto_paused_at_ms = Some(threshold_us / 1000.0);
+        engine::profiling::clear_frame_time_pause_capture();
     }
 }
 
@@ -272,11 +289,13 @@ fn compact_scope_name(name: &str) -> &str {
 
 pub fn draw_profiler(ui: &mut Ui, state: &mut EditorContext<'_>, profiler: &mut ProfilerState) {
     let live = state.global_resources.profiler_snapshot.clone();
+    profiler.catch_frame_time_pause(&live);
     let snapshot = profiler.displayed(&live);
     profiler.view.sync(&snapshot);
 
     theme::toolbar(ui, |ui| {
         pause_button(ui, profiler, &live);
+        frame_time_pause_controls(ui, profiler);
         if ui.button("Capture GPU frame").clicked() {
             state.global_resources.frame_capturer.request_capture();
         }
@@ -364,6 +383,7 @@ pub fn draw_performance_overlay(
     live: &Arc<ProfileSnapshot>,
     profiler: &mut ProfilerState,
 ) {
+    profiler.catch_frame_time_pause(live);
     let snapshot = profiler.displayed(live);
     profiler.view.sync(&snapshot);
 
@@ -375,6 +395,7 @@ pub fn draw_performance_overlay(
             if expanded { "Compact" } else { "Expand" },
         );
     });
+    ui.horizontal(|ui| frame_time_pause_controls(ui, profiler));
     ui.horizontal(|ui| refresh_rate_slider(ui));
     ui.add_space(4.0);
 
@@ -449,7 +470,49 @@ fn pause_button(ui: &mut Ui, profiler: &mut ProfilerState, live: &Arc<ProfileSna
         profiler.toggle_pause(live);
     }
     if profiler.paused {
-        theme::tag(ui, "PAUSED", theme::WARN);
+        let text = profiler.auto_paused_at_ms.map_or_else(
+            || "PAUSED".to_string(),
+            |threshold| format!("AUTO-PAUSED >= {threshold:.1} ms"),
+        );
+        theme::tag(ui, &text, theme::WARN);
+    }
+}
+
+fn frame_time_pause_controls(ui: &mut Ui, profiler: &mut ProfilerState) {
+    let armed = engine::profiling::frame_time_pause_threshold().is_some();
+    let label = if armed {
+        "Cancel slow-frame pause"
+    } else {
+        "Pause on CPU frame >="
+    };
+    let response = ui.button(label).on_hover_text(
+        "One-shot trigger: preserve the first CPU frame at or above the threshold and freeze \
+         this profiler view. The simulation keeps running.",
+    );
+    if response.clicked() {
+        if armed {
+            engine::profiling::cancel_frame_time_pause();
+        } else {
+            let threshold = std::time::Duration::from_secs_f64(
+                (profiler.frame_time_threshold_ms.max(0.1)) / 1000.0,
+            );
+            engine::profiling::arm_frame_time_pause(threshold);
+            profiler.auto_paused_at_ms = None;
+        }
+    }
+    if !armed {
+        ui.add(
+            egui::DragValue::new(&mut profiler.frame_time_threshold_ms)
+                .range(0.1..=1000.0)
+                .speed(0.5)
+                .suffix(" ms"),
+        );
+    } else if let Some(threshold) = engine::profiling::frame_time_pause_threshold() {
+        theme::tag(
+            ui,
+            &format!("ARMED {:.1} ms", threshold.as_secs_f64() * 1000.0),
+            theme::SUCCESS,
+        );
     }
 }
 
