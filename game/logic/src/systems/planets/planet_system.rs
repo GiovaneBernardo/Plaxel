@@ -2,8 +2,8 @@ use engine::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
 };
@@ -51,7 +51,7 @@ use crate::{
 
 use crossbeam_channel::{Receiver, Sender};
 
-type DensityGrid = Vec<Vec<Vec<f32>>>;
+pub type DensityGrid = Vec<f32>;
 const CHUNK_GRID_SAMPLE_COUNT: u32 = CHUNK_CELL_COUNT as u32 + 2;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -493,6 +493,9 @@ pub fn create_planet(
         let mut mesh_requests = Vec::with_capacity(leaf_nodes.len());
 
         for leaf in leaf_nodes {
+            if !leaf.has_surface {
+                continue;
+            }
             let mut request = PlanetMeshRequest {
                 planet_entity: new_planet,
                 node_key: leaf.key,
@@ -779,6 +782,9 @@ fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
         octree::collect_leaf_nodes(&octree_root, &mut leaves);
         let mut mesh_requests = Vec::with_capacity(leaves.len());
         for leaf in leaves {
+            if !leaf.has_surface {
+                continue;
+            }
             let mut request = PlanetMeshRequest {
                 planet_entity,
                 node_key: leaf.key,
@@ -1789,31 +1795,49 @@ fn get_or_build_base_grid(
     cancelled: Option<&AtomicBool>,
 ) -> Option<Arc<DensityGrid>> {
     profile_scope!("terrain.mesh.base_grid_cache");
-    if let Some(grid) = base_grid_cache
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&key).cloned())
     {
-        return Some(grid);
+        profile_scope!("terrain.mesh.lock_return");
+        if let Some(grid) = base_grid_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+        {
+            BASE_GRID_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            return Some(grid);
+        }
     }
+    BASE_GRID_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
 
-    let grid = Arc::new(generate_base_grid_from_min(
-        nx, ny, nz, resolution, min, terrain, cancelled,
-    )?);
+    {
+        profile_scope!("terrain.mesh.generate_base_grid_from_min");
+        let node_size = nx.saturating_sub(2) as f32 * resolution;
+        let _build_guard = GridBuildDebugGuard::begin(key, min, node_size);
 
-    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-        return None;
-    }
+        let grid = Arc::new(generate_base_grid_from_min(
+            nx, ny, nz, resolution, min, terrain, cancelled,
+        )?);
 
-    if let Ok(mut cache) = base_grid_cache.lock() {
-        Some(
-            cache
-                .entry(key)
-                .or_insert_with(|| Arc::clone(&grid))
-                .clone(),
-        )
-    } else {
-        Some(grid)
+        {
+            profile_scope!("terrain.mesh.cancelled");
+            if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return None;
+            }
+        }
+
+        {
+            profile_scope!("terrain.mesh.base_grid_cache_lock");
+
+            if let Ok(mut cache) = base_grid_cache.lock() {
+                Some(
+                    cache
+                        .entry(key)
+                        .or_insert_with(|| Arc::clone(&grid))
+                        .clone(),
+                )
+            } else {
+                Some(grid)
+            }
+        }
     }
 }
 
@@ -1829,14 +1853,12 @@ fn generate_base_grid_from_min(
     profile_scope!("terrain.mesh.sample_base_density");
     let local_min = min.as_dvec3() - terrain.planet_position.as_dvec3();
     let resolution = f64::from(resolution);
-    let mut grid = Vec::with_capacity(nx as usize);
+    let mut grid = Vec::with_capacity((nx * ny * nz) as usize);
     for xi in 0..nx {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return None;
         }
-        let mut plane = Vec::with_capacity(ny as usize);
         for yi in 0..ny {
-            let mut row = Vec::with_capacity(nz as usize);
             for zi in 0..nz {
                 let position = local_min
                     + engine::math::dvec3(
@@ -1844,15 +1866,167 @@ fn generate_base_grid_from_min(
                         f64::from(yi) * resolution,
                         f64::from(zi) * resolution,
                     );
-                row.push(terrain_sampler::sample_original_density_planet_local(
+                grid.push(terrain_sampler::sample_original_density_planet_local(
                     terrain, position,
                 ));
             }
-            plane.push(row);
         }
-        grid.push(plane);
     }
     Some(grid)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GridBuildDebugNode {
+    pub center: Vec3,
+    pub size: f32,
+    pub depth: u32,
+}
+
+struct GridBuildDebugEntry {
+    node: GridBuildDebugNode,
+    active_builds: usize,
+    last_started: Instant,
+}
+
+struct GridBuildDebugGuard {
+    key: BaseGridCacheKey,
+    debug_tracked: bool,
+}
+
+static GRID_BUILD_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+static BASE_GRID_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static BASE_GRID_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static BASE_GRID_DUPLICATE_BUILDS: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_BASE_GRID_BUILDS: LazyLock<Mutex<HashMap<BaseGridCacheKey, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GRID_BUILD_DEBUG_ENTRIES: LazyLock<Mutex<HashMap<BaseGridCacheKey, GridBuildDebugEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GRID_BUILD_DEBUG_LAST_REPORT: LazyLock<Mutex<Option<Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+const GRID_BUILD_DEBUG_RETENTION: Duration = Duration::from_secs(1);
+const GRID_BUILD_DEBUG_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+impl GridBuildDebugGuard {
+    fn begin(key: BaseGridCacheKey, min: Vec3, size: f32) -> Self {
+        let duplicate = {
+            let mut active_builds = ACTIVE_BASE_GRID_BUILDS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let count = active_builds.entry(key).or_insert(0);
+            let duplicate = *count > 0;
+            *count += 1;
+            duplicate
+        };
+        if duplicate {
+            BASE_GRID_DUPLICATE_BUILDS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let debug_tracked = GRID_BUILD_DEBUG_ENABLED.load(Ordering::Relaxed);
+        if debug_tracked {
+            let now = Instant::now();
+            let node = GridBuildDebugNode {
+                center: min + Vec3::splat(size * 0.5),
+                size,
+                depth: key.node_key.level.max(0) as u32,
+            };
+            let mut entries = GRID_BUILD_DEBUG_ENTRIES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            entries
+                .entry(key)
+                .and_modify(|entry| {
+                    entry.node = node;
+                    entry.active_builds += 1;
+                    entry.last_started = now;
+                })
+                .or_insert(GridBuildDebugEntry {
+                    node,
+                    active_builds: 1,
+                    last_started: now,
+                });
+        }
+
+        Self { key, debug_tracked }
+    }
+}
+
+impl Drop for GridBuildDebugGuard {
+    fn drop(&mut self) {
+        {
+            let mut active_builds = ACTIVE_BASE_GRID_BUILDS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(count) = active_builds.get_mut(&self.key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    active_builds.remove(&self.key);
+                }
+            }
+        }
+
+        if self.debug_tracked {
+            let mut entries = GRID_BUILD_DEBUG_ENTRIES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entry) = entries.get_mut(&self.key) {
+                entry.active_builds = entry.active_builds.saturating_sub(1);
+            }
+        }
+    }
+}
+
+pub(crate) fn set_grid_build_debug_enabled(enabled: bool) {
+    GRID_BUILD_DEBUG_ENABLED.store(enabled, Ordering::Relaxed);
+    BASE_GRID_CACHE_HITS.store(0, Ordering::Relaxed);
+    BASE_GRID_CACHE_MISSES.store(0, Ordering::Relaxed);
+    BASE_GRID_DUPLICATE_BUILDS.store(0, Ordering::Relaxed);
+    GRID_BUILD_DEBUG_ENTRIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    *GRID_BUILD_DEBUG_LAST_REPORT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = enabled.then(Instant::now);
+}
+
+pub(crate) fn recent_grid_build_debug_nodes() -> Vec<GridBuildDebugNode> {
+    let now = Instant::now();
+    let should_report = {
+        let mut last_report = GRID_BUILD_DEBUG_LAST_REPORT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last_report
+            .is_some_and(|last| now.duration_since(last) < GRID_BUILD_DEBUG_REPORT_INTERVAL)
+        {
+            false
+        } else {
+            *last_report = Some(now);
+            true
+        }
+    };
+    if should_report {
+        let hits = BASE_GRID_CACHE_HITS.load(Ordering::Relaxed);
+        let misses = BASE_GRID_CACHE_MISSES.load(Ordering::Relaxed);
+        let duplicate_builds = BASE_GRID_DUPLICATE_BUILDS.load(Ordering::Relaxed);
+        let lookups = hits + misses;
+        let hit_rate = if lookups == 0 {
+            0.0
+        } else {
+            hits as f64 / lookups as f64 * 100.0
+        };
+        game_info!(
+            "Base-grid cache | hits: {hits} | misses: {misses} | hit rate: {hit_rate:.1}% | duplicate concurrent builds: {duplicate_builds}"
+        );
+    }
+
+    let mut entries = GRID_BUILD_DEBUG_ENTRIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    entries.retain(|_, entry| {
+        entry.active_builds > 0
+            || now.duration_since(entry.last_started) <= GRID_BUILD_DEBUG_RETENTION
+    });
+    entries.values().map(|entry| entry.node).collect()
 }
 
 fn generate_grid_from_base(
@@ -1862,37 +2036,30 @@ fn generate_grid_from_base(
     terrain: &PlanetTerrainSamplerContext<'_>,
 ) -> DensityGrid {
     profile_scope!("terrain.mesh.sample_edit_density");
-    let nx = base_grid.len();
-    let ny = base_grid.first().map_or(0, Vec::len);
-    let nz = base_grid
-        .first()
-        .and_then(|plane| plane.first())
-        .map_or(0, Vec::len);
-    let mut grid = Vec::with_capacity(nx);
+    let size = CHUNK_GRID_SAMPLE_COUNT as usize;
+    debug_assert_eq!(base_grid.len(), size * size * size);
+    let mut grid = Vec::with_capacity(base_grid.len());
     let local_min = min.as_dvec3() - terrain.planet_position.as_dvec3();
     let resolution = f64::from(resolution);
 
-    for xi in 0..nx {
-        let mut plane = Vec::with_capacity(ny);
-        for yi in 0..ny {
-            let mut row = Vec::with_capacity(nz);
-            for zi in 0..nz {
+    for xi in 0..size {
+        for yi in 0..size {
+            for zi in 0..size {
                 let position = local_min
                     + engine::math::dvec3(
                         xi as f64 * resolution,
                         yi as f64 * resolution,
                         zi as f64 * resolution,
                     );
-                row.push(
-                    base_grid[xi][yi][zi]
+                let index = (xi * size + yi) * size + zi;
+                grid.push(
+                    base_grid[index]
                         + terrain_sampler::sample_terrain_edits_density_planet_local(
                             terrain, position,
                         ),
                 );
             }
-            plane.push(row);
         }
-        grid.push(plane);
     }
 
     grid
@@ -1955,7 +2122,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(first[0][0][0], 5.0);
+        assert_eq!(first[0], 5.0);
 
         let mut second_config = first_config.clone();
         second_config.radius = 20.0;
@@ -1998,8 +2165,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(next_generation[0][0][0], -5.0);
-        assert_eq!(other_planet[0][0][0], -5.0);
+        assert_eq!(next_generation[0], -5.0);
+        assert_eq!(other_planet[0], -5.0);
         assert_eq!(cache.lock().unwrap().len(), 3);
     }
 

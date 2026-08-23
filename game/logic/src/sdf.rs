@@ -327,7 +327,6 @@ pub fn base_sdf_planet_local(
     };
 
     if let Some(graph) = &terrain_config.field_graph {
-        return (dist_from_center - planet_radius) as f32;
         let sample = graph.evaluate(TerrainFieldContext {
             direction: dir,
             position: local_p,

@@ -65,6 +65,7 @@ struct GameState {
     empty_neighbor_signatures: HashMap<NodeKey, NeighborSignature>,
     update_octree: bool,
     terrain_physics_enabled: bool,
+    debug_grid_builds_only: bool,
     debug_nodes: Vec<(Vec3, f32, u32)>,
     debug_depth: u32,
     max_depth: u32,
@@ -372,6 +373,7 @@ fn initialize_game_state(
         empty_neighbor_signatures: HashMap::new(),
         update_octree: true,
         terrain_physics_enabled: true,
+        debug_grid_builds_only: false,
         debug_nodes: Vec::new(),
         debug_depth: 0,
         max_depth: 0,
@@ -714,6 +716,9 @@ fn sync_planet_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
 
     debug_pass_node.clear_wire_cubes();
     debug_pass_node.clear_cubes();
+    if game_state.debug_grid_builds_only {
+        return;
+    }
 
     for (center, size, depth) in game_state.debug_nodes.iter().take(MAX_DEBUG_BRICKS) {
         debug_pass_node.add_wire_cube(*center, *size, depth_color(*depth));
@@ -744,12 +749,30 @@ fn sync_physics_debug(renderer: &mut engine::renderer::Renderer, world: &World) 
 }
 
 fn sync_planet_octree_debug(renderer: &mut engine::renderer::Renderer, world: &World) {
+    let Some(game_state) = world.get_resource::<GameState>() else {
+        return;
+    };
+    if game_state.debug_grid_builds_only {
+        let nodes = systems::planets::recent_grid_build_debug_nodes();
+        let Some(debug_pass_node) = renderer
+            .render_graph
+            .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
+        else {
+            return;
+        };
+        for node in nodes.iter().take(MAX_DEBUG_BRICKS) {
+            debug_pass_node.add_wire_cube(node.center, node.size, depth_color(node.depth));
+            debug_pass_node.add_cube(
+                node.center + vec3(0.0, node.size / 2.0, 0.0),
+                1.0,
+                depth_color(node.depth + 1),
+            );
+        }
+        return;
+    }
+
     let mut query = engine::ecs::query::Query::<(&Planet,)>::new(world);
-    if world
-        .get_resource::<GameState>()
-        .unwrap()
-        .terrain_physics_enabled
-    {
+    if game_state.terrain_physics_enabled {
         return;
     }
     query.for_each(|_, (planet,)| {
@@ -865,6 +888,18 @@ fn handle_key_press(
                         }
                     }
                 }
+            }
+            KeyCode::KeyG => {
+                game_state.debug_grid_builds_only = !game_state.debug_grid_builds_only;
+                systems::planets::set_grid_build_debug_enabled(game_state.debug_grid_builds_only);
+                game_info!(
+                    "Grid-build octree debug: {}",
+                    if game_state.debug_grid_builds_only {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
             }
             KeyCode::KeyL => {
                 if let Some(physics) = physics.as_mut() {

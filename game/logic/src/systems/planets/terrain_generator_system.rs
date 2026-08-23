@@ -10,12 +10,15 @@ use game_types::{
 use crate::{
     CHUNK_CELL_COUNT, octree,
     sdf::terrain_height_bounds,
-    systems::terrain::terrain_sampler::{self, PlanetTerrainSamplerContext},
+    systems::{
+        DensityGrid,
+        terrain::terrain_sampler::{self, PlanetTerrainSamplerContext},
+    },
 };
 
 pub trait PlanetExt {
     fn dual_contour_grid(
-        grid: &[Vec<Vec<f32>>],
+        grid: &DensityGrid,
         offset: Vec3,
         resolution: f32,
         terrain: &PlanetTerrainSamplerContext<'_>,
@@ -33,6 +36,12 @@ pub trait PlanetExt {
 }
 
 type CellVertexGrid = Vec<Vec<Vec<Option<u32>>>>;
+const DENSITY_GRID_SIZE: usize = CHUNK_CELL_COUNT + 2;
+
+#[inline]
+fn density(grid: &DensityGrid, x: usize, y: usize, z: usize) -> f32 {
+    grid[(x * DENSITY_GRID_SIZE + y) * DENSITY_GRID_SIZE + z]
+}
 
 #[inline]
 fn append_quad(indices: &mut Vec<u32>, vertices: [u32; 4], flip_winding: bool) {
@@ -62,7 +71,7 @@ const CELL_EDGES: [(usize, usize); 12] = [
 // Avoid large Windows hotpatch stack frames.
 #[inline(never)]
 fn contour_cell_vertex(
-    grid: &[Vec<Vec<f32>>],
+    grid: &DensityGrid,
     x: usize,
     y: usize,
     z: usize,
@@ -72,14 +81,14 @@ fn contour_cell_vertex(
     terrain_config: &PlanetTerrainConfig,
 ) -> Option<PlanetVertex> {
     let corners = [
-        grid[x][y][z],
-        grid[x + 1][y][z],
-        grid[x][y + 1][z],
-        grid[x + 1][y + 1][z],
-        grid[x][y][z + 1],
-        grid[x + 1][y][z + 1],
-        grid[x][y + 1][z + 1],
-        grid[x + 1][y + 1][z + 1],
+        density(grid, x, y, z),
+        density(grid, x + 1, y, z),
+        density(grid, x, y + 1, z),
+        density(grid, x + 1, y + 1, z),
+        density(grid, x, y, z + 1),
+        density(grid, x + 1, y, z + 1),
+        density(grid, x, y + 1, z + 1),
+        density(grid, x + 1, y + 1, z + 1),
     ];
 
     let base_local = vec3(
@@ -242,14 +251,14 @@ fn select_surface_materials(
 
 #[inline(never)]
 fn append_x_edge_indices(
-    grid: &[Vec<Vec<f32>>],
+    grid: &DensityGrid,
     cell_vertex: &CellVertexGrid,
     indices: &mut Vec<u32>,
     face_neighbors: &[FaceNeighbor; 6],
 ) {
-    let size_x = grid.len();
-    let size_y = grid[0].len();
-    let size_z = grid[0][0].len();
+    let size_x = DENSITY_GRID_SIZE;
+    let size_y = DENSITY_GRID_SIZE;
+    let size_z = DENSITY_GRID_SIZE;
 
     // There is one positive-side ghost cell. It supplies boundary vertices but
     // does not own edge segments along the edge's direction.
@@ -261,7 +270,8 @@ fn append_x_edge_indices(
                 {
                     continue;
                 }
-                if grid[x][y][z] * grid[x + 1][y][z] >= 0.0 {
+                let start_density = density(grid, x, y, z);
+                if start_density * density(grid, x + 1, y, z) >= 0.0 {
                     continue;
                 }
 
@@ -272,7 +282,7 @@ fn append_x_edge_indices(
                     cell_vertex[x][y - 1][z - 1],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    append_quad(indices, [v0, v1, v2, v3], grid[x][y][z] > 0.0);
+                    append_quad(indices, [v0, v1, v2, v3], start_density > 0.0);
                 }
             }
         }
@@ -281,14 +291,14 @@ fn append_x_edge_indices(
 
 #[inline(never)]
 fn append_y_edge_indices(
-    grid: &[Vec<Vec<f32>>],
+    grid: &DensityGrid,
     cell_vertex: &CellVertexGrid,
     indices: &mut Vec<u32>,
     face_neighbors: &[FaceNeighbor; 6],
 ) {
-    let size_x = grid.len();
-    let size_y = grid[0].len();
-    let size_z = grid[0][0].len();
+    let size_x = DENSITY_GRID_SIZE;
+    let size_y = DENSITY_GRID_SIZE;
+    let size_z = DENSITY_GRID_SIZE;
 
     for x in 1..(size_x - 1) {
         for y in 0..(size_y - 2) {
@@ -298,7 +308,8 @@ fn append_y_edge_indices(
                 {
                     continue;
                 }
-                if grid[x][y][z] * grid[x][y + 1][z] >= 0.0 {
+                let start_density = density(grid, x, y, z);
+                if start_density * density(grid, x, y + 1, z) >= 0.0 {
                     continue;
                 }
 
@@ -309,7 +320,7 @@ fn append_y_edge_indices(
                     cell_vertex[x - 1][y][z - 1],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    append_quad(indices, [v0, v1, v2, v3], grid[x][y][z] < 0.0);
+                    append_quad(indices, [v0, v1, v2, v3], start_density < 0.0);
                 }
             }
         }
@@ -318,14 +329,14 @@ fn append_y_edge_indices(
 
 #[inline(never)]
 fn append_z_edge_indices(
-    grid: &[Vec<Vec<f32>>],
+    grid: &DensityGrid,
     cell_vertex: &CellVertexGrid,
     indices: &mut Vec<u32>,
     face_neighbors: &[FaceNeighbor; 6],
 ) {
-    let size_x = grid.len();
-    let size_y = grid[0].len();
-    let size_z = grid[0][0].len();
+    let size_x = DENSITY_GRID_SIZE;
+    let size_y = DENSITY_GRID_SIZE;
+    let size_z = DENSITY_GRID_SIZE;
 
     for x in 1..(size_x - 1) {
         for y in 1..(size_y - 1) {
@@ -335,7 +346,8 @@ fn append_z_edge_indices(
                 {
                     continue;
                 }
-                if grid[x][y][z] * grid[x][y][z + 1] >= 0.0 {
+                let start_density = density(grid, x, y, z);
+                if start_density * density(grid, x, y, z + 1) >= 0.0 {
                     continue;
                 }
 
@@ -346,7 +358,7 @@ fn append_z_edge_indices(
                     cell_vertex[x - 1][y - 1][z],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    append_quad(indices, [v0, v1, v2, v3], grid[x][y][z] > 0.0);
+                    append_quad(indices, [v0, v1, v2, v3], start_density > 0.0);
                 }
             }
         }
@@ -550,7 +562,7 @@ fn append_transition_edge(
 
 #[allow(clippy::too_many_arguments)]
 fn append_transition_faces(
-    grid: &[Vec<Vec<f32>>],
+    grid: &DensityGrid,
     fine_min: Vec3,
     fine_size: f32,
     fine_spacing: f32,
@@ -596,8 +608,8 @@ fn append_transition_faces(
                     sample[fixed_tangent] = fixed_sample;
                     let mut end_sample = sample;
                     end_sample[edge_axis] += 1;
-                    let density_at_start = grid[sample[0]][sample[1]][sample[2]];
-                    let density_at_end = grid[end_sample[0]][end_sample[1]][end_sample[2]];
+                    let density_at_start = density(grid, sample[0], sample[1], sample[2]);
+                    let density_at_end = density(grid, end_sample[0], end_sample[1], end_sample[2]);
                     if density_at_start * density_at_end >= 0.0 {
                         continue;
                     }
@@ -632,7 +644,7 @@ fn append_transition_faces(
 
 impl PlanetExt for Planet {
     fn dual_contour_grid(
-        grid: &[Vec<Vec<f32>>],
+        grid: &DensityGrid,
         offset: Vec3,
         resolution: f32,
         terrain: &PlanetTerrainSamplerContext<'_>,
@@ -642,9 +654,13 @@ impl PlanetExt for Planet {
         let mut vertices: Vec<PlanetVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
-        let size_x = grid.len();
-        let size_y = grid[0].len();
-        let size_z = grid[0][0].len();
+        debug_assert_eq!(
+            grid.len(),
+            DENSITY_GRID_SIZE * DENSITY_GRID_SIZE * DENSITY_GRID_SIZE
+        );
+        let size_x = DENSITY_GRID_SIZE;
+        let size_y = DENSITY_GRID_SIZE;
+        let size_z = DENSITY_GRID_SIZE;
 
         let mut cell_vertex = {
             engine::profile_scope!("terrain.contour.allocate_cells");
