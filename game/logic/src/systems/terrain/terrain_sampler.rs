@@ -135,7 +135,7 @@ mod tests {
     use engine::math::vec3;
 
     use super::*;
-    use crate::systems::planets::planet_system::default_planet_terrain_config;
+    use crate::systems::universe::planet_system::default_planet_terrain_config;
 
     fn empty_edits() -> PlanetTerrainEdits {
         PlanetTerrainEdits {

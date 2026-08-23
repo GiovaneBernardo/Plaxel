@@ -31,6 +31,7 @@ pub mod prelude {
     pub use super::core::{
         CameraData, FrameBindings, RenderGraph, RenderNode, RenderResources, Renderer,
     };
+    pub use super::default_meshes::DefaultMeshes;
     pub use super::gpu_mesh::{GpuMeshBinding, GpuMeshHandle, MeshUpload, MeshUploadError};
 
     pub use super::ids::*;

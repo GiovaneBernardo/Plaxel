@@ -502,7 +502,7 @@ fn spherical_terrain_height_f64(dir: DVec3, terrain_config: &PlanetTerrainConfig
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use crate::systems::planets::planet_system::default_planet_terrain_config;
+    use crate::systems::universe::planet_system::default_planet_terrain_config;
     use game_types::{
         octree::DensityRange,
         planet::{PlanetTerrainEdits, TerrainBrickKey},

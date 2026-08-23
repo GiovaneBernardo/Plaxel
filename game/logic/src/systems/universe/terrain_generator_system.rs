@@ -765,7 +765,7 @@ impl PlanetExt for Planet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::systems::planets::planet_system::default_planet_terrain_config;
+    use crate::systems::universe::planet_system::default_planet_terrain_config;
 
     #[test]
     fn material_below_sea_level_is_water() {

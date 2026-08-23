@@ -1217,7 +1217,7 @@ mod tests {
     use game_types::planet::PlanetTerrainEdits;
 
     use super::*;
-    use crate::systems::planets::planet_system::default_planet_terrain_config;
+    use crate::systems::universe::planet_system::default_planet_terrain_config;
 
     #[test]
     fn refinement_skips_intermediate_lod_replacements() {

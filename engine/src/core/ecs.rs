@@ -16,7 +16,8 @@ pub mod world;
 pub mod prelude {
     pub use super::{
         access::SystemAccess,
-        commands::Commands,
+        commands::{Bundle, Commands, EntityCommands},
+        entity::Entity,
         event::{
             Event, EventIterator, EventReader, EventWriter, Events, ManualEventReader,
             event_update_system,

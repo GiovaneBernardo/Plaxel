@@ -32,7 +32,6 @@ use game_types::{
         PlanetTerrainConfig,
         terrain_field::{TerrainFieldGraph, TerrainGraphApplyQueue},
     },
-    universe::StarSystemComponent,
 };
 use rand::Rng;
 use rayon::prelude::*;
@@ -44,8 +43,8 @@ use crate::{
         PendingTerrainChunk, PlanetTerrainCommand, PlanetTerrainRenderQueue,
     },
     systems::{
-        planets::PlanetExt,
         terrain::terrain_sampler::{self, PlanetTerrainSamplerContext, PlanetTerrainSnapshot},
+        universe::PlanetExt,
     },
 };
 
@@ -132,6 +131,13 @@ pub struct MeshJobResults {
     #[reflect(ignore)]
     pub prioritized_jobs: Vec<PrioritizedMeshJob>,
     pub generations: HashMap<Entity, u64>,
+}
+
+#[derive(Default, plaxel_reflect::Reflect)]
+#[reflect(from_reflect = false)]
+pub(crate) struct PendingPlanetMeshRequests {
+    #[reflect(ignore)]
+    requests: Vec<PlanetMeshRequest>,
 }
 
 pub struct PrioritizedMeshJob {
@@ -299,6 +305,7 @@ pub fn planet_system_init(ctx: &mut SystemContext, _commands: &mut Commands) {
         last_log: None,
         logs_emitted: 0,
     });
+    world.insert_resource(PendingPlanetMeshRequests::default());
 }
 
 fn log_camera_altitude(ctx: &mut SystemContext, camera_pos: Vec3) {
@@ -361,30 +368,22 @@ fn log_camera_altitude(ctx: &mut SystemContext, camera_pos: Vec3) {
 }
 
 pub fn create_planet(
-    ctx: &mut SystemContext,
-    _commands: &mut Commands,
+    camera: &mut GameCamera,
+    game_state: &GameState,
+    lod_settings: &PlanetLodSettings,
+    pending_mesh_requests: &mut PendingPlanetMeshRequests,
+    occupied_planet_positions: &mut Vec<Vec3>,
+    camera_transforms: &mut Query<(&mut TransformComponent,)>,
+    commands: &mut Commands,
     solar_system: Entity,
     forced_position: Option<Vec3>,
+    planet_index: usize,
 ) -> Option<Entity> {
     profile_scope!("terrain.planet.create");
-    let world = &mut ctx.world;
+    let camera_entity = camera.entity;
+    let mut camera_pos = camera_transforms.get(camera_entity)?.0.position;
 
-    let camera_entity = {
-        let Some(camera) = world.get_resource::<GameCamera>() else {
-            return None;
-        };
-        camera.entity
-    };
-
-    let mut camera_pos = world
-        .get::<TransformComponent>(camera_entity)
-        .unwrap()
-        .position;
-
-    let start_with_earth_like_terrain = world
-        .get_resource::<GameState>()
-        .is_some_and(|state| state.start_with_earth_like_terrain);
-    let terrain_config = Arc::new(if start_with_earth_like_terrain {
+    let terrain_config = Arc::new(if game_state.start_with_earth_like_terrain {
         earth_like_planet_terrain_config()
     } else {
         default_planet_terrain_config()
@@ -393,16 +392,8 @@ pub fn create_planet(
     let min_planet_distance = terrain_config.radius * 2.1;
     let mut rng = rand::thread_rng();
 
-    let mut planet_positions = Vec::new();
-    {
-        let mut query = Query::<(&Planet,)>::new(world);
-        query.for_each(|_, (planet,)| {
-            planet_positions.push(planet.position);
-        });
-    }
-
     let Some(mut planet_position) =
-        random_planet_position(&mut rng, &planet_positions, min_planet_distance)
+        random_planet_position(&mut rng, occupied_planet_positions, min_planet_distance)
     else {
         return None;
     };
@@ -410,24 +401,15 @@ pub fn create_planet(
     if forced_position.is_some() {
         planet_position = forced_position.unwrap();
     }
-    planet_positions.push(planet_position);
-    let new_planet = world.spawn();
-
-    world.insert(
-        new_planet,
-        TransformComponent {
-            position: planet_position,
-            rotation: Quat::IDENTITY,
-            scale: vec3(1.0, 1.0, 1.0),
-            velocity: vec3(0.0, 0.0, 0.0),
-        },
-    );
+    occupied_planet_positions.push(planet_position);
+    let new_planet = commands.spawn_empty().id();
 
     let terrain_edits = PlanetTerrainEdits {
         modified_chunks: HashMap::new(),
         modified_ranges: HashMap::new(),
     };
 
+    // Update camera position to follow planet
     if forced_position.is_some() {
         let spawn_direction = Vec3::Y;
         let terrain = PlanetTerrainSamplerContext {
@@ -444,21 +426,17 @@ pub fn create_planet(
             vec3(0.0, 0.0, -1.0),
         );
 
-        let mut camera_transform = world.get_mut::<TransformComponent>(camera_entity).unwrap();
+        let (camera_transform,) = camera_transforms.get(camera_entity)?;
         camera_transform.position = camera_pos;
         camera_transform.rotation = spawn_orientation;
-        drop(camera_transform);
-        if let Some(mut camera) = world.get_resource_mut::<GameCamera>() {
-            camera.camera.position = camera_pos;
-            camera.world_position = camera_pos.as_dvec3();
-            camera.previous_world_position = camera.world_position;
-            camera.camera.orientation = spawn_orientation;
-            camera.velocity_sample_pos = camera_pos;
-        }
+
+        camera.camera.position = camera_pos;
+        camera.world_position = camera_pos.as_dvec3();
+        camera.previous_world_position = camera.world_position;
+        camera.camera.orientation = spawn_orientation;
+        camera.velocity_sample_pos = camera_pos;
     }
-    let lod_strength = world
-        .get_resource::<PlanetLodSettings>()
-        .map_or(1.0, |settings| settings.strength);
+    let lod_strength = lod_settings.strength;
 
     let octree = {
         profile_scope!("terrain.planet.initial_octree");
@@ -474,14 +452,7 @@ pub fn create_planet(
 
     let planet = Planet {
         id: new_planet.index() as u64,
-        name: format!(
-            "Planet {}",
-            world
-                .get::<StarSystemComponent>(solar_system)
-                .unwrap()
-                .planets
-                .len()
-        ),
+        name: format!("Planet {planet_index}"),
         position: planet_position,
         octree_root: octree,
         solar_system,
@@ -510,21 +481,36 @@ pub fn create_planet(
         mesh_requests
     };
 
-    ctx.world.insert(new_planet, planet);
-    ctx.world.insert(new_planet, terrain_edits);
-    ctx.world.insert(new_planet, terrain_config);
+    commands.entity(new_planet).insert_bundle((
+        TransformComponent {
+            position: planet_position,
+            rotation: Quat::IDENTITY,
+            scale: vec3(1.0, 1.0, 1.0),
+            velocity: vec3(0.0, 0.0, 0.0),
+        },
+        planet,
+        terrain_edits,
+        terrain_config,
+    ));
 
-    {
-        profile_scope!("terrain.planet.submit_initial_requests");
-        for request in mesh_requests {
-            submit_requested_mesh(ctx, request);
-        }
-    }
+    //pending_mesh_requests.requests.extend(mesh_requests);
     Some(new_planet)
 }
 
 pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
     profile_scope!("terrain.planet.update");
+    let initial_mesh_requests = ctx
+        .world
+        .get_resource_mut::<PendingPlanetMeshRequests>()
+        .map(|mut pending| std::mem::take(&mut pending.requests))
+        .unwrap_or_default();
+    if !initial_mesh_requests.is_empty() {
+        profile_scope!("terrain.planet.submit_initial_requests");
+        for request in initial_mesh_requests {
+            submit_requested_mesh(ctx, request);
+        }
+    }
+
     let camera_entity = {
         let Some(camera) = ctx.world.get_resource::<GameCamera>() else {
             return;

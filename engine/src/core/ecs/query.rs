@@ -134,6 +134,10 @@ where
             }
         }
     }
+
+    pub fn get(&mut self, entity: Entity) -> Option<Q::Item<'_>> {
+        Q::get(self.fetch.as_mut()?, entity)
+    }
 }
 
 impl_query_tuple!(A);

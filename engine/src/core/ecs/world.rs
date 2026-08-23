@@ -4,7 +4,7 @@ use std::any::type_name;
 use crate::ecs::{
     change::{ChangeCursor, ChangeTick, WorldChange, WorldChangeKind},
     component::Component,
-    entity::{Entities, Entity},
+    entity::{Entities, Entity, EntityAllocator},
     event::{Event, Events},
     resource::{Resource, Resources},
     storage::{Storage, Storages},
@@ -31,6 +31,17 @@ impl World {
 
     pub fn spawn(&mut self) -> Entity {
         self.entities.allocate()
+    }
+
+    pub(crate) fn entity_allocator(&self) -> EntityAllocator {
+        self.entities.allocator()
+    }
+
+    pub(crate) fn spawn_reserved(&mut self, entity: Entity) {
+        assert!(
+            self.entities.activate_reserved(entity),
+            "reserved entity {entity:?} is stale or already active"
+        );
     }
 
     pub fn insert<T: Component + Reflect>(&mut self, entity: Entity, component: T) {

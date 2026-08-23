@@ -1,6 +1,7 @@
 use crate::ecs::system::SystemContext;
 use crate::model::MeshAsset;
 use crate::prelude::*;
+use crate::renderer::DefaultMeshes;
 
 pub struct RendererPlugin;
 impl Plugin for RendererPlugin {
@@ -125,9 +126,10 @@ fn prepare_mesh_assets(
     }
 }
 
-fn init_renderer(mut globals: GlobalsMut) {
+fn init_renderer(mut globals: GlobalsMut, commands: &mut Commands) {
     let renderer = &mut globals.renderer;
     renderer.init();
+    commands.insert_opaque_resource::<DefaultMeshes>(*renderer.default_meshes());
     renderer
         .render_resources
         .insert(GpuAssets::<TextureAsset, TextureHandle>::default());

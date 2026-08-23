@@ -97,7 +97,7 @@ struct GpuPlanetChunk {
     level: i32,
 }
 
-pub fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Commands) {
+fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Commands) {
     engine::profile_scope!("terrain.render.init");
     if ctx
         .globals
@@ -138,7 +138,7 @@ pub fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Com
         .expect("planet terrain producer must only be registered once");
 }
 
-pub fn planet_terrain_producer_update(ctx: &mut SystemContext, _commands: &mut Commands) {
+fn planet_terrain_producer_update(ctx: &mut SystemContext, _commands: &mut Commands) {
     engine::profile_scope!("terrain.render.queue_frames");
     let Some(queue) = ctx.world.get_resource::<PlanetTerrainRenderQueue>() else {
         return;
@@ -897,4 +897,20 @@ struct TerrainBatchKey {
     planet: Entity,
     vertex_buffer: BufferHandle,
     index_buffer: BufferHandle,
+}
+
+pub struct PlanetTerrainProducerPlugin;
+impl Plugin for PlanetTerrainProducerPlugin {
+    fn build(&self, app: &mut engine::App) {
+        app.add_named_legacy_system(
+            CoreSchedule::Startup,
+            "game.terrain_producer_init",
+            planet_terrain_producer_init,
+        )
+        .add_named_legacy_system(
+            CoreSchedule::Update,
+            "game.terrain_producer_update",
+            planet_terrain_producer_update,
+        );
+    }
 }

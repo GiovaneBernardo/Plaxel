@@ -189,13 +189,7 @@ unsafe impl<T: Resource> SystemParam for Res<'static, T> {
     type State = ();
     type Item<'world, 'state> = Res<'world, T>;
 
-    fn init(world: &mut World) -> Self::State {
-        assert!(
-            world.contains_resource::<T>(),
-            "required resource `{}` is missing",
-            type_name::<T>()
-        );
-    }
+    fn init(_world: &mut World) -> Self::State {}
 
     fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict> {
         access.add_resource_read(type_name::<T>())
@@ -216,13 +210,7 @@ unsafe impl<T: Resource> SystemParam for ResMut<'static, T> {
     type State = ();
     type Item<'world, 'state> = ResMut<'world, T>;
 
-    fn init(world: &mut World) -> Self::State {
-        assert!(
-            world.contains_resource::<T>(),
-            "required resource `{}` is missing",
-            type_name::<T>()
-        );
-    }
+    fn init(_world: &mut World) -> Self::State {}
 
     fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict> {
         access.add_resource_write(type_name::<T>())
@@ -447,8 +435,8 @@ unsafe impl SystemParam for &'static mut Commands {
     type State = Commands;
     type Item<'world, 'state> = &'state mut Commands;
 
-    fn init(_world: &mut World) -> Self::State {
-        Commands::new()
+    fn init(world: &mut World) -> Self::State {
+        Commands::for_world(world)
     }
 
     fn register_access(access: &mut SystemAccess) -> Result<(), AccessConflict> {
@@ -884,7 +872,9 @@ impl<Func> RunnableSystem for LegacyFunctionSystem<Func>
 where
     Func: for<'world> FnMut(&mut SystemContext<'world>, &mut Commands) + Send + 'static,
 {
-    fn initialize(&mut self, _world: &mut World) {}
+    fn initialize(&mut self, world: &mut World) {
+        self.commands.attach_world(world);
+    }
 
     fn access(&self) -> &SystemAccess {
         &self.access

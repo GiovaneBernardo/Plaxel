@@ -163,18 +163,7 @@ impl Physics {
         );
     }
 
-    /*/
-               physics.add_cuboid_collider(100.0, -0.5, 100.0);
-
-           let ball_rigid_body_handle = physics.add_rigid_body_dynamic();
-           physics.add_sphere_collider(params.radius, ball_rigid_body_handle);
-    */
-    #[inline(never)]
     pub fn create_missing_rapier_bodies_system(ctx: &mut SystemContext, commands: &mut Commands) {
-        Self::create_missing_rapier_bodies_system_impl(ctx, commands);
-    }
-
-    fn create_missing_rapier_bodies_system_impl(ctx: &mut SystemContext, commands: &mut Commands) {
         let world = &mut ctx.world;
         let Some(mut physics) = world.get_resource_mut::<Physics>() else {
             return;
