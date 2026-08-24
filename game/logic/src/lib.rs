@@ -106,8 +106,8 @@ impl Plugin for GamePlugin {
             .add_system(CoreSchedule::Update, handle_mouse_motion)
             .add_system(CoreSchedule::Update, handle_mouse_scroll)
             .add_system(CoreSchedule::Update, handle_resize)
-            .add_system(CoreSchedule::Update, camera_update_system)
-            .add_system(CoreSchedule::RenderExtract, sync_camera_to_renderer);
+            .add_system(CoreSchedule::RenderExtract, sync_camera_to_renderer)
+            .add_system(CoreSchedule::Update, camera_update_system);
     }
 }
 

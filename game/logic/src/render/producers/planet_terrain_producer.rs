@@ -908,7 +908,7 @@ impl Plugin for PlanetTerrainProducerPlugin {
             planet_terrain_producer_init,
         )
         .add_named_legacy_system(
-            CoreSchedule::Update,
+            CoreSchedule::RenderExtract,
             "game.terrain_producer_update",
             planet_terrain_producer_update,
         );
