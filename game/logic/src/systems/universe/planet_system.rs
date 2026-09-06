@@ -167,7 +167,9 @@ const TERRAIN_EDIT_LEVEL: u32 = 0;
 const PLANET_COUNT: usize = 128;
 const PLANET_SPAWN_RANGE: f32 = 50_000_000.0;
 const MAX_PLANET_SPAWN_ATTEMPTS: usize = 256;
-const INITIAL_CAMERA_ALTITUDE: f32 = 256.0;
+const INITIAL_CAMERA_ALTITUDE: f32 = 32.0;
+
+const INITIAL_CAMERA_DISTANCE_MULTIPLIER: f32 = 4.0;
 
 pub fn default_planet_terrain_config() -> PlanetTerrainConfig {
     PlanetTerrainConfig {
@@ -420,7 +422,9 @@ pub fn create_planet(
         let point_at_base_radius = planet_position + spawn_direction * terrain_config.radius;
         let surface_radius = terrain_config.radius
             - terrain_sampler::sample_original_density(&terrain, point_at_base_radius);
-        camera_pos = planet_position + spawn_direction * (surface_radius + INITIAL_CAMERA_ALTITUDE);
+        camera_pos = planet_position
+            + spawn_direction
+                * (surface_radius * INITIAL_CAMERA_DISTANCE_MULTIPLIER + INITIAL_CAMERA_ALTITUDE);
         let spawn_orientation = engine::camera::Camera::look_at(
             vec3(0.01, -1.0, 0.0).normalize(),
             vec3(0.0, 0.0, -1.0),
@@ -456,29 +460,6 @@ pub fn create_planet(
         position: planet_position,
         octree_root: octree,
         solar_system,
-    };
-    let mesh_requests = {
-        profile_scope!("terrain.planet.prepare_initial_requests");
-        let mut leaf_nodes = Vec::new();
-        octree::collect_leaf_nodes(&planet.octree_root, &mut leaf_nodes);
-        let mut mesh_requests = Vec::with_capacity(leaf_nodes.len());
-
-        for leaf in leaf_nodes {
-            if !leaf.has_surface {
-                continue;
-            }
-            let mut request = PlanetMeshRequest {
-                planet_entity: new_planet,
-                node_key: leaf.key,
-                planet_position: planet.position,
-                node_min_corner: leaf.min,
-                node_size: leaf.size,
-                face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
-            };
-            octree::annotate_mesh_request(&planet.octree_root, &mut request);
-            mesh_requests.push(request);
-        }
-        mesh_requests
     };
 
     commands.entity(new_planet).insert_bundle((
@@ -896,14 +877,15 @@ fn try_build_requested_mesh(
         z: min_corner.z as i32,
         level: request.node_key.level,
     };
+    let base_grid_key = BaseGridCacheKey {
+        planet_entity: request.planet_entity,
+        generation,
+        node_key: key,
+    };
     let base_grid = {
         profile_scope!("terrain.mesh.base_density_grid");
         get_or_build_base_grid(
-            BaseGridCacheKey {
-                planet_entity: request.planet_entity,
-                generation,
-                node_key: key,
-            },
+            base_grid_key,
             CHUNK_GRID_SAMPLE_COUNT,
             CHUNK_GRID_SAMPLE_COUNT,
             CHUNK_GRID_SAMPLE_COUNT,
@@ -927,6 +909,7 @@ fn try_build_requested_mesh(
         };
         &grid
     };
+    update_grid_build_debug_classification(base_grid_key, grid_ref);
     let (vertices, indices) = {
         profile_scope!("terrain.mesh.dual_contour");
         Planet::dual_contour_grid(
@@ -1797,11 +1780,12 @@ fn get_or_build_base_grid(
     {
         profile_scope!("terrain.mesh.generate_base_grid_from_min");
         let node_size = nx.saturating_sub(2) as f32 * resolution;
-        let _build_guard = GridBuildDebugGuard::begin(key, min, node_size);
+        let mut build_guard = GridBuildDebugGuard::begin(key, min, node_size);
 
-        let grid = Arc::new(generate_base_grid_from_min(
-            nx, ny, nz, resolution, min, terrain, cancelled,
-        )?);
+        let generated_grid =
+            generate_base_grid_from_min(nx, ny, nz, resolution, min, terrain, cancelled)?;
+        build_guard.complete(&generated_grid);
+        let grid = Arc::new(generated_grid);
 
         {
             profile_scope!("terrain.mesh.cancelled");
@@ -1861,22 +1845,37 @@ fn generate_base_grid_from_min(
     Some(grid)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GridBuildDebugKind {
+    Sampling,
+    Mixed,
+    EmptyAir,
+    Solid,
+    Cancelled,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct GridBuildDebugNode {
+    pub planet_entity: Entity,
+    pub key: NodeKey,
     pub center: Vec3,
     pub size: f32,
-    pub depth: u32,
+    pub kind: GridBuildDebugKind,
+    pub build_count: u32,
 }
 
 struct GridBuildDebugEntry {
     node: GridBuildDebugNode,
     active_builds: usize,
-    last_started: Instant,
+    result: Option<GridBuildDebugKind>,
+    cancelled_builds: u32,
 }
 
 struct GridBuildDebugGuard {
     key: BaseGridCacheKey,
     debug_tracked: bool,
+    completed: bool,
 }
 
 static GRID_BUILD_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1889,8 +1888,44 @@ static GRID_BUILD_DEBUG_ENTRIES: LazyLock<Mutex<HashMap<BaseGridCacheKey, GridBu
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static GRID_BUILD_DEBUG_LAST_REPORT: LazyLock<Mutex<Option<Instant>>> =
     LazyLock::new(|| Mutex::new(None));
-const GRID_BUILD_DEBUG_RETENTION: Duration = Duration::from_secs(1);
 const GRID_BUILD_DEBUG_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+fn classify_density_grid(grid: &[f32]) -> GridBuildDebugKind {
+    if grid.is_empty() {
+        return GridBuildDebugKind::Invalid;
+    }
+
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    for &density in grid {
+        if !density.is_finite() {
+            return GridBuildDebugKind::Invalid;
+        }
+        minimum = minimum.min(density);
+        maximum = maximum.max(density);
+    }
+
+    if minimum <= 0.0 && maximum >= 0.0 {
+        GridBuildDebugKind::Mixed
+    } else if minimum > 0.0 {
+        GridBuildDebugKind::EmptyAir
+    } else {
+        GridBuildDebugKind::Solid
+    }
+}
+
+fn update_grid_build_debug_classification(key: BaseGridCacheKey, grid: &[f32]) {
+    if !GRID_BUILD_DEBUG_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let kind = classify_density_grid(grid);
+    let mut entries = GRID_BUILD_DEBUG_ENTRIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = entries.get_mut(&key) {
+        entry.result = Some(kind);
+    }
+}
 
 impl GridBuildDebugGuard {
     fn begin(key: BaseGridCacheKey, min: Vec3, size: f32) -> Self {
@@ -1909,11 +1944,13 @@ impl GridBuildDebugGuard {
 
         let debug_tracked = GRID_BUILD_DEBUG_ENABLED.load(Ordering::Relaxed);
         if debug_tracked {
-            let now = Instant::now();
             let node = GridBuildDebugNode {
+                planet_entity: key.planet_entity,
+                key: key.node_key,
                 center: min + Vec3::splat(size * 0.5),
                 size,
-                depth: key.node_key.level.max(0) as u32,
+                kind: GridBuildDebugKind::Sampling,
+                build_count: 1,
             };
             let mut entries = GRID_BUILD_DEBUG_ENTRIES
                 .lock()
@@ -1921,18 +1958,32 @@ impl GridBuildDebugGuard {
             entries
                 .entry(key)
                 .and_modify(|entry| {
+                    let build_count = entry.node.build_count.saturating_add(1);
                     entry.node = node;
                     entry.active_builds += 1;
-                    entry.last_started = now;
+                    entry.node.build_count = build_count;
                 })
                 .or_insert(GridBuildDebugEntry {
                     node,
                     active_builds: 1,
-                    last_started: now,
+                    result: None,
+                    cancelled_builds: 0,
                 });
         }
 
-        Self { key, debug_tracked }
+        Self {
+            key,
+            debug_tracked,
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self, grid: &[f32]) {
+        self.completed = true;
+        if !self.debug_tracked {
+            return;
+        }
+        update_grid_build_debug_classification(self.key, grid);
     }
 }
 
@@ -1956,6 +2007,9 @@ impl Drop for GridBuildDebugGuard {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(entry) = entries.get_mut(&self.key) {
                 entry.active_builds = entry.active_builds.saturating_sub(1);
+                if !self.completed {
+                    entry.cancelled_builds = entry.cancelled_builds.saturating_add(1);
+                }
             }
         }
     }
@@ -1990,6 +2044,23 @@ pub(crate) fn recent_grid_build_debug_nodes() -> Vec<GridBuildDebugNode> {
             true
         }
     };
+    let entries = GRID_BUILD_DEBUG_ENTRIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let nodes: Vec<_> = entries
+        .values()
+        .map(|entry| {
+            let mut node = entry.node;
+            node.kind = if entry.active_builds > 0 {
+                GridBuildDebugKind::Sampling
+            } else {
+                entry.result.unwrap_or(GridBuildDebugKind::Cancelled)
+            };
+            node
+        })
+        .collect();
+    drop(entries);
+
     if should_report {
         let hits = BASE_GRID_CACHE_HITS.load(Ordering::Relaxed);
         let misses = BASE_GRID_CACHE_MISSES.load(Ordering::Relaxed);
@@ -2003,16 +2074,20 @@ pub(crate) fn recent_grid_build_debug_nodes() -> Vec<GridBuildDebugNode> {
         game_info!(
             "Base-grid cache | hits: {hits} | misses: {misses} | hit rate: {hit_rate:.1}% | duplicate concurrent builds: {duplicate_builds}"
         );
+        let count = |kind| nodes.iter().filter(|node| node.kind == kind).count();
+        let total_builds: u64 = nodes.iter().map(|node| u64::from(node.build_count)).sum();
+        let mixed = count(GridBuildDebugKind::Mixed);
+        let empty_air = count(GridBuildDebugKind::EmptyAir);
+        let solid = count(GridBuildDebugKind::Solid);
+        let active = count(GridBuildDebugKind::Sampling);
+        let cancelled = count(GridBuildDebugKind::Cancelled);
+        let invalid = count(GridBuildDebugKind::Invalid);
+        game_info!(
+            "Full-grid capture | builds: {total_builds} | unique nodes: {} | mixed: {mixed} | empty air: {empty_air} | solid: {solid} | active: {active} | cancelled: {cancelled} | invalid: {invalid}",
+            nodes.len()
+        );
     }
-
-    let mut entries = GRID_BUILD_DEBUG_ENTRIES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    entries.retain(|_, entry| {
-        entry.active_builds > 0
-            || now.duration_since(entry.last_started) <= GRID_BUILD_DEBUG_RETENTION
-    });
-    entries.values().map(|entry| entry.node).collect()
+    nodes
 }
 
 fn generate_grid_from_base(
@@ -2064,6 +2139,26 @@ mod tests {
             modified_chunks: HashMap::new(),
             modified_ranges: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn debug_grid_classification_distinguishes_surface_air_and_solid() {
+        assert_eq!(
+            classify_density_grid(&[-2.0, 3.0]),
+            GridBuildDebugKind::Mixed
+        );
+        assert_eq!(
+            classify_density_grid(&[0.25, 4.0]),
+            GridBuildDebugKind::EmptyAir
+        );
+        assert_eq!(
+            classify_density_grid(&[-4.0, -0.25]),
+            GridBuildDebugKind::Solid
+        );
+        assert_eq!(
+            classify_density_grid(&[f32::NAN]),
+            GridBuildDebugKind::Invalid
+        );
     }
 
     #[test]

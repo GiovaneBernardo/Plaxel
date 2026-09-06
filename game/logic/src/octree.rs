@@ -94,12 +94,13 @@ fn build_node_at_level(
     level: i8,
 ) -> OctreeNode {
     let density_range = node_density_range(min, size, planet_center, terrain_config, terrain_edits);
-    let has_surface = density_range.contains_zero();
-    let _is_behind_horizon = is_behind_horizon(
-        min + vec3(size * 0.5, size * 0.5, size * 0.5),
-        vec3(camera_position.x, camera_position.y, camera_position.z),
-        planet_center,
-    );
+    //let has_surface = density_range.contains_zero();
+    //let _is_behind_horizon = is_behind_horizon(
+    //    min + vec3(size * 0.5, size * 0.5, size * 0.5),
+    //    vec3(camera_position.x, camera_position.y, camera_position.z),
+    //    planet_center,
+    //);
+    let has_surface = min.length() <= size;
     let key = NodeKey {
         level,
         x: min.x as i32,
