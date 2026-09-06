@@ -749,7 +749,7 @@ impl PlanetExt for Planet {
         if node.children.iter().count() == 0 {
             let half = node.size / 2.0;
             let center = Vec3::new(node.min.x + half, node.min.y + half, node.min.z + half);
-            if node.has_surface {
+            if node.may_contain_surface {
                 out.push((center, node.size, current_depth));
             }
         } else {

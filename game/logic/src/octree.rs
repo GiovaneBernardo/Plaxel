@@ -94,13 +94,7 @@ fn build_node_at_level(
     level: i8,
 ) -> OctreeNode {
     let density_range = node_density_range(min, size, planet_center, terrain_config, terrain_edits);
-    //let has_surface = density_range.contains_zero();
-    //let _is_behind_horizon = is_behind_horizon(
-    //    min + vec3(size * 0.5, size * 0.5, size * 0.5),
-    //    vec3(camera_position.x, camera_position.y, camera_position.z),
-    //    planet_center,
-    //);
-    let has_surface = min.length() <= size;
+    let may_contain_surface = density_range.contains_zero();
     let key = NodeKey {
         level,
         x: min.x as i32,
@@ -116,11 +110,11 @@ fn build_node_at_level(
             children: None,
             vertex: None,
             density_range,
-            has_surface,
+            may_contain_surface,
             state: NodeState::Leaf,
         };
 
-        if !has_surface {
+        if !may_contain_surface {
             return leaf;
         }
 
@@ -138,7 +132,7 @@ fn build_node_at_level(
                 children: None,
                 vertex: None,
                 density_range,
-                has_surface,
+                may_contain_surface,
                 state: NodeState::Leaf,
             };
         }
@@ -260,7 +254,7 @@ fn build_node_at_level(
         children: Some(children),
         vertex: None,
         density_range,
-        has_surface,
+        may_contain_surface: has_surface,
         state: NodeState::Internal,
     }
 }
@@ -696,7 +690,7 @@ fn topology_target_changed(
 
     match node.children.as_ref() {
         None => {
-            (is_root_node && node.has_surface)
+            (is_root_node && node.may_contain_surface)
                 || should_split(node, camera_pos, min_node_size, lod_strength)
         }
         Some(children) => {
@@ -826,7 +820,7 @@ pub fn create_children(
             children: None,
             vertex: None,
             density_range,
-            has_surface: density_range.contains_zero(),
+            may_contain_surface: density_range.contains_zero(),
             state: NodeState::Leaf,
         }
     };
@@ -919,7 +913,7 @@ pub fn refresh_density_ranges_in_bounds(
         );
     }
 
-    node.has_surface = node.density_range.contains_zero();
+    node.may_contain_surface = node.density_range.contains_zero();
 }
 
 pub fn should_split(
@@ -938,7 +932,7 @@ pub fn should_split(
         return false;
     }
 
-    if !node.has_surface {
+    if !node.may_contain_surface {
         return false;
     }
 
@@ -1067,7 +1061,7 @@ fn collect_surface_leaf_requests(
     for child in children {
         if let Some(grandchildren) = child.children.as_ref() {
             collect_surface_leaf_requests(grandchildren, planet_entity, planet_position, requests);
-        } else if child.has_surface {
+        } else if child.may_contain_surface {
             requests.push(mesh_request(child, planet_entity, planet_position));
         }
     }
@@ -1085,7 +1079,7 @@ fn merge_node(
         collect_leaf_keys(children, &mut keys_to_remove);
     }
 
-    let requests = if node.has_surface {
+    let requests = if node.may_contain_surface {
         vec![mesh_request(node, planet_entity, planet_position)]
     } else {
         Vec::new()
@@ -1108,7 +1102,7 @@ fn collect_leaf_keys(children: &[Box<OctreeNode>; 8], output: &mut Vec<NodeKey>)
     for child in children {
         match &child.children {
             Some(children) => collect_leaf_keys(children, output),
-            None if child.has_surface => output.push(child.key),
+            None if child.may_contain_surface => output.push(child.key),
             None => {}
         }
     }
@@ -1186,7 +1180,7 @@ pub fn traverse_octree(
     }
 
     let Some(children) = node.children.as_ref() else {
-        if node.has_surface {
+        if node.may_contain_surface {
             *best_t = t_enter;
         }
         return;
@@ -1248,7 +1242,7 @@ mod tests {
             children: None,
             vertex: None,
             density_range,
-            has_surface: density_range.contains_zero(),
+            may_contain_surface: density_range.contains_zero(),
             state: NodeState::Leaf,
         };
         let edits = PlanetTerrainEdits {

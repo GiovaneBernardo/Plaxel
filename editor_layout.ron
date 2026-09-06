@@ -88,7 +88,7 @@
                                 y: 1345.3438,
                             ),
                         ),
-                        fraction: 0.55447257,
+                        fraction: 0.5404949,
                         fully_collapsed: false,
                         collapsed_leaf_count: 0,
                     )),
@@ -118,7 +118,7 @@
                             Resources,
                             Terrain,
                         ],
-                        active: (1),
+                        active: (2),
                         scroll: 0.0,
                         collapsed: false,
                     )),
@@ -159,7 +159,7 @@
                                 y: 954.0,
                             ),
                             max: (
-                                x: 925.3333,
+                                x: 902.0,
                                 y: 1345.3438,
                             ),
                         ),
@@ -169,7 +169,7 @@
                                 y: 980.0,
                             ),
                             max: (
-                                x: 925.34375,
+                                x: 902.0,
                                 y: 1345.3438,
                             ),
                         ),
@@ -188,7 +188,7 @@
                     Leaf((
                         rect: (
                             min: (
-                                x: 926.0,
+                                x: 902.6667,
                                 y: 954.0,
                             ),
                             max: (
@@ -198,7 +198,7 @@
                         ),
                         viewport: (
                             min: (
-                                x: 926.0,
+                                x: 902.65625,
                                 y: 980.0,
                             ),
                             max: (
@@ -218,7 +218,7 @@
                     Empty,
                     Empty,
                 ],
-                focused_node: Some((9)),
+                focused_node: Some((5)),
                 collapsed: false,
                 collapsed_leaf_count: 0,
             )),

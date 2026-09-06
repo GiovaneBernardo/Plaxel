@@ -91,9 +91,8 @@ impl Plugin for GamePlugin {
         );
 
         app.add_plugin(UniversePlugin)
-            .add_named_legacy_system(
+            .add_system(
                 CoreSchedule::Update,
-                "game.planet_update",
                 systems::universe::planet_system_update,
             )
             .add_named_legacy_system(

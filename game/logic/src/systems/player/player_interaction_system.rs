@@ -788,7 +788,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                                             neighbor.size as i32,
                                         );
                                         if neighbor.size == dirty.node_size
-                                            || !neighbor.has_surface
+                                            || !neighbor.may_contain_surface
                                             || !scheduled.insert(key)
                                         {
                                             continue;

@@ -159,7 +159,7 @@ pub struct OctreeNode {
     /// Conservative minimum and maximum density anywhere inside this node.
     pub density_range: DensityRange,
     /// Cached equivalent of `density_range.contains_zero()`.
-    pub has_surface: bool,
+    pub may_contain_surface: bool,
     pub state: NodeState,
 }
 

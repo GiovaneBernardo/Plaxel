@@ -15,7 +15,7 @@ use engine::{
     model::Vertex,
     multithreading::job_system::JobPriorityHandle,
     profile_scope,
-    renderer::AtmospherePassNode,
+    renderer::{AtmospherePassNode, DebugPassNode},
 };
 use engine::{
     ecs::entity::Entity,
@@ -478,57 +478,41 @@ pub fn create_planet(
     Some(new_planet)
 }
 
-pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
+pub fn planet_system_update(
+    asset_server: Res<AssetServer>,
+    default_meshes: Res<DefaultMeshes>,
+    mut camera: ResMut<GameCamera>,
+    game_state: Res<GameState>,
+    lod_settings: Res<PlanetLodSettings>,
+    mut pending_mesh_requests: ResMut<PendingPlanetMeshRequests>,
+    mut transforms: Query<(&mut TransformComponent,)>,
+    mut planets_query: Query<(&mut Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>,
+    mut globals: GlobalsMut,
+    commands: &mut Commands,
+) {
     profile_scope!("terrain.planet.update");
-    let initial_mesh_requests = ctx
-        .world
-        .get_resource_mut::<PendingPlanetMeshRequests>()
-        .map(|mut pending| std::mem::take(&mut pending.requests))
-        .unwrap_or_default();
-    if !initial_mesh_requests.is_empty() {
-        profile_scope!("terrain.planet.submit_initial_requests");
-        for request in initial_mesh_requests {
-            submit_requested_mesh(ctx, request);
-        }
-    }
+    let camera_entity = camera.entity;
 
-    let camera_entity = {
-        let Some(camera) = ctx.world.get_resource::<GameCamera>() else {
-            return;
-        };
-        camera.entity
-    };
+    let update_octree = game_state.update_octree;
 
-    let update_octree = ctx.world.get_resource::<GameState>().unwrap().update_octree;
-
-    let mut camera_pos = ctx
-        .world
-        .get::<TransformComponent>(camera_entity)
-        .unwrap()
-        .position;
-    apply_pending_terrain_graphs(ctx, camera_pos);
-    camera_pos = ctx
-        .world
-        .get::<TransformComponent>(camera_entity)
-        .unwrap()
-        .position;
-    log_camera_altitude(ctx, camera_pos);
+    let mut camera_pos = transforms.get(camera_entity).unwrap().0.position;
     //let heightmap = ctx
     //    .world
     //    .get_resource::<Arc<EarthHeightmap>>()
     //    .map(|heightmap| Arc::clone(&heightmap));
 
     let mut changes = Vec::new();
-    let lod_strength = ctx
-        .world
-        .get_resource::<PlanetLodSettings>()
-        .map_or(1.0, |settings| settings.strength);
+    let lod_strength = lod_settings.strength;
     let mut atmosphere_planet = None;
+    let mut debug_pass = globals
+        .renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG);
+    if let Some(debug_pass) = debug_pass.as_mut() {
+        debug_pass.clear_cubes();
+    }
     {
-        let mut query = Query::<(&mut Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>::new(
-            &mut ctx.world,
-        );
-        query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
+        planets_query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
             let change_start = changes.len();
             if update_octree {
                 {
@@ -546,81 +530,20 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
                 }
             }
 
-            profile_scope!("terrain.planet.prepare_lod_changes");
-            let planet_changes: Vec<_> = changes.drain(change_start..).collect();
-            let mut transitions = Vec::new();
-            let mut keys_to_remove = Vec::new();
-            let mut requests = Vec::new();
-            let mut passthrough_changes = Vec::new();
-            for change in planet_changes {
-                match change {
-                    OctreeChanges::ReplaceMeshes {
-                        transition_key,
-                        completed_state,
-                        additional_transitions,
-                        keys_to_remove: removed,
-                        requests: replacement_requests,
-                        ..
-                    } => {
-                        transitions.push((transition_key, completed_state));
-                        transitions.extend(additional_transitions);
-                        keys_to_remove.extend(removed);
-                        requests.extend(replacement_requests);
-                    }
-                    other => passthrough_changes.push(other),
-                }
-            }
-
-            let mut scheduled_keys = HashSet::new();
-            requests.retain(|request| scheduled_keys.insert(mesh_request_key(request)));
-            for &(key, _) in &transitions {
-                let min = vec3(key.x as f32, key.y as f32, key.z as f32);
-                let size = planet.octree_root.size / 2.0_f32.powi(i32::from(key.level));
-                let mut neighbors = Vec::new();
-                octree::collect_face_neighbor_leaves(
-                    &planet.octree_root,
-                    min,
-                    size,
-                    &mut neighbors,
-                );
-                for neighbor in neighbors {
-                    if !neighbor.has_surface || !scheduled_keys.insert(neighbor.key) {
-                        continue;
-                    }
-                    let mut request = PlanetMeshRequest {
-                        planet_entity: entity,
-                        node_key: neighbor.key,
-                        planet_position: planet.position,
-                        node_min_corner: neighbor.min,
-                        node_size: neighbor.size,
-                        face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
-                    };
-                    octree::annotate_mesh_request(&planet.octree_root, &mut request);
-                    requests.push(request);
-                }
-            }
-
-            for request in &mut requests {
-                octree::annotate_mesh_request(&planet.octree_root, request);
-            }
-            keys_to_remove.sort_unstable();
-            keys_to_remove.dedup();
-            if let Some((transition_key, completed_state)) = transitions.first().copied() {
-                changes.push(OctreeChanges::ReplaceMeshes {
-                    planet_entity: entity,
-                    transition_key,
-                    completed_state,
-                    additional_transitions: transitions[1..].to_vec(),
-                    keys_to_remove,
-                    requests,
-                });
-            }
-            for mut change in passthrough_changes {
-                if let OctreeChanges::AddMesh { request } = &mut change {
-                    octree::annotate_mesh_request(&planet.octree_root, request);
-                }
-                changes.push(change);
-            }
+            //if let Some(debug_pass) = debug_pass.as_mut() {
+            //    let mut leaves = Vec::new();
+            //    octree::collect_leaf_nodes(&planet.octree_root, &mut leaves);
+            //    for leaf in leaves {
+            //        if !leaf.may_contain_surface {
+            //            continue;
+            //        }
+            //        debug_pass.add_cube(
+            //            leaf.min + Vec3::splat(leaf.size * 0.5),
+            //            leaf.size,
+            //            octree::depth_color(leaf.key.level as u32),
+            //        );
+            //    }
+            //}
 
             if atmosphere_planet.is_none() {
                 atmosphere_planet = Some((planet.clone(), terrain_config.radius));
@@ -628,52 +551,25 @@ pub fn planet_system_update(ctx: &mut SystemContext, _commands: &mut Commands) {
         });
     }
 
-    if atmosphere_planet.is_some() {
-        let (plan, planet_radius) = atmosphere_planet.unwrap();
-        let planet_position = plan.position;
-        let sun_position = ctx
-            .world
-            .get::<TransformComponent>(plan.solar_system)
-            .unwrap()
-            .position;
-
-        let settings = &mut ctx
-            .globals
-            .renderer
-            .render_graph
-            .get_node_mut::<AtmospherePassNode>(engine::renderer::ids::graph_passes::ATMOSPHERE)
-            .unwrap()
-            .settings;
-        settings.set_planet(planet_position.into(), planet_radius);
-        settings.sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
-            - vec3(planet_position.x, planet_position.y, planet_position.z))
-        .normalize()
-        .into();
-    }
-
-    changes.sort_by(|a, b| {
-        let size_a = change_node_size(a);
-        let size_b = change_node_size(b);
-
-        // Smaller chunks—deeper octree levels—first.
-        size_a.total_cmp(&size_b)
-    });
-
-    {
-        profile_scope!("terrain.planet.apply_lod_changes");
-        for change in changes {
-            apply_change(ctx, &change);
-        }
-    }
-
-    {
-        profile_scope!("terrain.planet.drain_meshes");
-        drain_generated_meshes(ctx);
-    }
-    {
-        profile_scope!("terrain.planet.reprioritize_jobs");
-        reprioritize_mesh_jobs(ctx, camera_pos);
-    }
+    // TODO: Reenable this (not sure what it does, might be to sync the sun direction when planet moves)
+    //if atmosphere_planet.is_some() {
+    //    let (plan, planet_radius) = atmosphere_planet.unwrap();
+    //    let planet_position = plan.position;
+    //    let sun_position = transforms.get(plan.solar_system).unwrap().0.position;
+    //
+    //    let settings = &mut ctx
+    //        .globals
+    //        .renderer
+    //        .render_graph
+    //        .get_node_mut::<AtmospherePassNode>(engine::renderer::ids::graph_passes::ATMOSPHERE)
+    //        .unwrap()
+    //        .settings;
+    //    settings.set_planet(planet_position.into(), planet_radius);
+    //    settings.sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
+    //        - vec3(planet_position.x, planet_position.y, planet_position.z))
+    //    .normalize()
+    //    .into();
+    //}
 }
 
 fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
@@ -749,7 +645,7 @@ fn apply_pending_terrain_graphs(ctx: &mut SystemContext, camera_pos: Vec3) {
         octree::collect_leaf_nodes(&octree_root, &mut leaves);
         let mut mesh_requests = Vec::with_capacity(leaves.len());
         for leaf in leaves {
-            if !leaf.has_surface {
+            if !leaf.may_contain_surface {
                 continue;
             }
             let mut request = PlanetMeshRequest {
