@@ -91,10 +91,6 @@ impl Plugin for GamePlugin {
         );
 
         app.add_plugin(UniversePlugin)
-            .add_system(
-                CoreSchedule::Update,
-                systems::universe::planet_system_update,
-            )
             .add_named_legacy_system(
                 CoreSchedule::Update,
                 "game.player_interaction",
@@ -106,7 +102,6 @@ impl Plugin for GamePlugin {
             .add_system(CoreSchedule::Update, handle_mouse_scroll)
             .add_system(CoreSchedule::Update, handle_resize)
             .add_system(CoreSchedule::RenderExtract, sync_camera_to_renderer)
-            .add_system(CoreSchedule::RenderExtract, sync_grid_build_debug)
             .add_system(CoreSchedule::Update, camera_update_system);
     }
 }
@@ -335,52 +330,6 @@ fn collect_octree_topology(
     }
 }
 
-fn sync_grid_build_debug(
-    game_state: Res<GameState>,
-    mut planets: Query<(&Planet,)>,
-    mut globals: GlobalsMut,
-) {
-    let nodes = if game_state.debug_grid_builds_only {
-        systems::universe::recent_grid_build_debug_nodes()
-    } else {
-        Vec::new()
-    };
-    let captured_planets: HashSet<_> = nodes.iter().map(|node| node.planet_entity).collect();
-    let mut topology = HashMap::new();
-    planets.for_each(|planet_entity, (planet,)| {
-        if captured_planets.contains(&planet_entity) {
-            collect_octree_topology(&planet.octree_root, planet_entity, &mut topology);
-        }
-    });
-    let Some(debug_pass) = globals
-        .renderer
-        .render_graph
-        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
-    else {
-        return;
-    };
-    debug_pass.clear_wire_cubes();
-
-    for node in nodes {
-        use systems::universe::GridBuildDebugKind;
-
-        let current_node_is_internal = topology.get(&(node.planet_entity, node.key)).copied();
-        let color = match node.kind {
-            GridBuildDebugKind::Sampling => [1.0, 0.85, 0.05, 1.0],
-            GridBuildDebugKind::EmptyAir => [1.0, 0.1, 0.1, 1.0],
-            GridBuildDebugKind::Solid => [0.1, 0.4, 1.0, 1.0],
-            GridBuildDebugKind::Cancelled => [0.55, 0.55, 0.55, 1.0],
-            GridBuildDebugKind::Invalid => [1.0, 0.0, 1.0, 1.0],
-            GridBuildDebugKind::Mixed => match current_node_is_internal {
-                Some(true) => [1.0, 0.4, 0.05, 1.0],
-                Some(false) => [0.1, 1.0, 0.25, 1.0],
-                None => [0.8, 0.1, 0.9, 1.0],
-            },
-        };
-        debug_pass.add_wire_cube(node.center, node.size, color);
-    }
-}
-
 fn handle_key_press(
     mut events: EventReader<KeyboardInput>,
     camera: Option<ResMut<GameCamera>>,
@@ -439,7 +388,6 @@ fn handle_key_press(
             }
             KeyCode::KeyG => {
                 game_state.debug_grid_builds_only = !game_state.debug_grid_builds_only;
-                systems::universe::set_grid_build_debug_enabled(game_state.debug_grid_builds_only);
                 game_info!(
                     "Full-grid debug capture: {}",
                     if game_state.debug_grid_builds_only {

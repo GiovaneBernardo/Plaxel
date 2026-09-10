@@ -1,5 +1,7 @@
 pub mod galaxy_system;
 pub mod planet_debug;
+pub mod planet_mesher;
+pub mod planet_octree_update;
 pub mod planet_physics_system;
 pub mod planet_system;
 pub mod plugin;

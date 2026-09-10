@@ -8,7 +8,7 @@ use game_types::{octree::PlanetLodSettings, planet::Planet};
 
 use crate::{
     GameCamera, GameState,
-    systems::planet_system::{self, PendingPlanetMeshRequests},
+    systems::planet_system::{self},
 };
 
 pub fn create_star_system(
@@ -17,7 +17,6 @@ pub fn create_star_system(
     mut camera: ResMut<GameCamera>,
     game_state: Res<GameState>,
     lod_settings: Res<PlanetLodSettings>,
-    mut pending_mesh_requests: ResMut<PendingPlanetMeshRequests>,
     mut planets: Query<(&Planet,)>,
     mut camera_transforms: Query<(&mut TransformComponent,)>,
     commands: &mut Commands,
@@ -48,7 +47,6 @@ pub fn create_star_system(
             &mut camera,
             &game_state,
             &lod_settings,
-            &mut pending_mesh_requests,
             &mut occupied_planet_positions,
             &mut camera_transforms,
             commands,

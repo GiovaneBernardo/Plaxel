@@ -29,10 +29,7 @@ use game_types::game_mode::{GameMode, GameModeState};
 use crate::{
     GameCamera, GameState, octree,
     sdf::{TERRAIN_EDIT_CELL_COUNT, TERRAIN_EDIT_SAMPLE_COUNT, resample_terrain_edit_brick},
-    systems::{
-        terrain::terrain_sampler::{self, PlanetTerrainSamplerContext},
-        universe::submit_requested_mesh_urgent,
-    },
+    systems::terrain::terrain_sampler::{self, PlanetTerrainSamplerContext},
 };
 
 #[allow(dead_code)]
@@ -821,7 +818,8 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
 
                             commands.push(move |ctx| {
                                 for request in dirty_mesh_requests {
-                                    submit_requested_mesh_urgent(ctx, request);
+                                    // TODO: REENABLE DENSITY FIELD EDITS
+                                    //submit_requested_mesh_urgent(ctx, request);
                                 }
                             });
                         }
