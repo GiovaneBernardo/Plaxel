@@ -1,12 +1,15 @@
 use std::{collections::HashMap, sync::Arc};
 
 use engine::{
-    multithreading::job_system::JobSystem, prelude::*, profile_scope, renderer::DebugPassNode,
+    game_info, multithreading::job_system::JobSystem, prelude::*, profile_scope,
+    renderer::DebugPassNode,
 };
 use game_types::{
-    octree::{GeneratedMesh, NodeKey, NodeState, OctreeChanges, PlanetLodSettings},
+    octree::{
+        GeneratedMesh, NodeKey, NodeState, OctreeChanges, PlanetLodSettings, PlanetMeshRequest,
+    },
     planet::{Planet, PlanetTerrainEdits},
-    terrain::PlanetTerrainConfig,
+    terrain::{self, PlanetTerrainConfig},
 };
 use plaxel_reflect::Reflect;
 
@@ -40,7 +43,6 @@ pub fn planet_octree_update(
 
     let mut changes = Vec::new();
     let lod_strength = lod_settings.strength;
-    let mut atmosphere_planet = None;
     let mut debug_pass = globals
         .renderer
         .render_graph
@@ -68,8 +70,8 @@ pub fn planet_octree_update(
             }
 
             let planet_changes: Vec<_> = changes.drain(change_start..).collect();
-            for mut change in planet_changes {
-                match &mut change {
+            for change in planet_changes {
+                match &change {
                     OctreeChanges::ReplaceMeshes {
                         planet_entity,
                         transition_key,
@@ -78,6 +80,17 @@ pub fn planet_octree_update(
                         keys_to_remove,
                         requests,
                     } => {
+                        game_info!("Testeeee 2");
+                        //for key in keys_to_remove {
+                        //    generation.debug_nodes.remove(&(*planet_entity, *key));
+                        //}
+                        //
+                        //for request in requests {
+                        //    generation
+                        //        .debug_nodes
+                        //        .insert((request.planet_entity, request.node_key), *request);
+                        //}
+
                         let min = vec3(
                             transition_key.x as f32,
                             transition_key.y as f32,
@@ -92,10 +105,22 @@ pub fn planet_octree_update(
                             &mut generation,
                             &globals.job_system,
                             terrain_config,
+                            &terrain_edits,
                         );
                     }
                     OctreeChanges::AddMesh { request } => {
+                        generation
+                            .debug_nodes
+                            .insert((request.planet_entity, request.node_key), *request);
                         submit_addition(change);
+                    }
+                    OctreeChanges::RemoveMeshes { planet_entity, key } => {
+                        generation.debug_nodes.remove(&(*planet_entity, *key));
+                    }
+                    OctreeChanges::CancelPlanetReplacements { planet_entity } => {
+                        //generation
+                        //    .debug_nodes
+                        //    .retain(|(entity, _), _| entity != planet_entity);
                     }
                     _ => {}
                 };
@@ -115,11 +140,27 @@ pub fn planet_octree_update(
             //        );
             //    }
             //}
-
-            if atmosphere_planet.is_none() {
-                atmosphere_planet = Some((planet.clone(), terrain_config.radius));
-            }
         });
+    }
+
+    // Update debug drawing
+    if let Some(debug_pass) = globals
+        .renderer
+        .render_graph
+        .get_node_mut::<DebugPassNode>(engine::renderer::ids::graph_passes::DEBUG)
+    {
+        debug_pass.clear_cubes();
+        debug_pass.clear_wire_cubes();
+
+        for request in generation.debug_nodes.values() {
+            let center = request.node_min_corner + Vec3::splat(request.node_size * 0.5);
+
+            debug_pass.add_cube(
+                center,
+                request.node_size,
+                octree::depth_color(request.node_key.level as u32),
+            );
+        }
     }
 
     // TODO: Reenable this (not sure what it does, might be to sync the sun direction when planet moves)
@@ -148,6 +189,7 @@ fn submit_replacement(
     generation: &mut PlanetMeshGeneration,
     job_system: &JobSystem,
     terrain_config: &Arc<PlanetTerrainConfig>,
+    edits: &Arc<PlanetTerrainEdits>,
 ) {
     let OctreeChanges::ReplaceMeshes {
         planet_entity,
@@ -181,10 +223,11 @@ fn submit_replacement(
     for request in requests {
         let tx = generation.completed_tx.clone();
         let terrain_config = Arc::clone(&terrain_config);
+        let edits = Arc::clone(&edits);
 
         job_system
             .spawn_prioritized_named("planet.mesh.generate", 100, move || {
-                let mesh = generate_planet_node_mesh(&request, terrain_config);
+                let mesh = generate_planet_node_mesh(&request, terrain_config, edits);
 
                 let _ = tx.send(CompletedMesh {
                     replacement_id,
@@ -272,6 +315,8 @@ pub struct PlanetMeshGeneration {
     pub completed_tx: crossbeam_channel::Sender<CompletedMesh>,
     #[reflect(ignore)]
     pub completed_rx: crossbeam_channel::Receiver<CompletedMesh>,
+
+    pub debug_nodes: HashMap<(Entity, NodeKey), PlanetMeshRequest>,
 }
 
 impl Default for PlanetMeshGeneration {
@@ -283,6 +328,7 @@ impl Default for PlanetMeshGeneration {
             replacements: HashMap::new(),
             completed_tx,
             completed_rx,
+            debug_nodes: HashMap::new(),
         }
     }
 }

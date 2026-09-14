@@ -1,3 +1,17 @@
+// Set to false and hot reload to restore normal terrain shading.
+const DEBUG_LOD: bool = true;
+
+const LOD_COLORS = array<vec3<f32>, 8>(
+    vec3<f32>(1.0, 0.15, 0.15), // 0: red
+    vec3<f32>(0.15, 1.0, 0.15), // 1: green
+    vec3<f32>(0.2, 0.4, 1.0),   // 2: blue
+    vec3<f32>(1.0, 1.0, 0.15),  // 3: yellow
+    vec3<f32>(1.0, 0.15, 1.0),  // 4: magenta
+    vec3<f32>(0.15, 1.0, 1.0),  // 5: cyan
+    vec3<f32>(1.0, 0.5, 0.1),   // 6: orange
+    vec3<f32>(0.65, 0.3, 1.0),  // 7: purple; palette repeats every 8 levels
+);
+
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
@@ -26,33 +40,53 @@ var<uniform> shadow: ShadowUniform;
 var shadow_depth_map: texture_depth_2d;
 
 struct InstanceInput {
-    @location(5) model_matrix_0: vec4<f32>,
-    @location(6) model_matrix_1: vec4<f32>,
-    @location(7) model_matrix_2: vec4<f32>,
-    @location(8) model_matrix_3: vec4<f32>,
+    @location(5)
+    model_matrix_0: vec4<f32>,
+    @location(6)
+    model_matrix_1: vec4<f32>,
+    @location(7)
+    model_matrix_2: vec4<f32>,
+    @location(8)
+    model_matrix_3: vec4<f32>,
 };
 
 // Packed to match PlanetVertex in game/types/src/planet.rs:
 //   mats  = mat_a | (mat_b << 16)
 //   blend = low byte holds the 0..255 blend factor
 struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) mats: u32,
-    @location(3) blend_packed: u32,
-    @location(4) chunk_index: u32,
+    @location(0)
+    position: vec3<f32>,
+    @location(1)
+    normal: vec3<f32>,
+    @location(2)
+    mats: u32,
+    @location(3)
+    blend_packed: u32,
+    @location(4)
+    chunk_index: u32,
 };
 
 struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) normal: vec3<f32>,
-    @location(1) world_position: vec3<f32>,
-    @location(2) @interpolate(flat) mat_a: u32,
-    @location(3) @interpolate(flat) mat_b: u32,
-    @location(4) blend: f32,
-    @location(5) camera_position: vec3<f32>,
-    @location(6) shadow_position: vec4<f32>,
-    @location(7) texture_position: vec3<f32>,
+    @builtin(position)
+    clip_position: vec4<f32>,
+    @location(0)
+    normal: vec3<f32>,
+    @location(1)
+    world_position: vec3<f32>,
+    @location(2) @interpolate(flat)
+    mat_a: u32,
+    @location(3) @interpolate(flat)
+    mat_b: u32,
+    @location(4)
+    blend: f32,
+    @location(5)
+    camera_position: vec3<f32>,
+    @location(6)
+    shadow_position: vec4<f32>,
+    @location(7)
+    texture_position: vec3<f32>,
+    @location(8) @interpolate(flat)
+    level: i32,
 };
 
 struct GpuPlanetTerrainMaterial {
@@ -94,6 +128,7 @@ fn vs_main(
     out.blend = f32(model.blend_packed & 0xFFu) / 255.0;
     out.camera_position = vec3<f32>(0.0);
     out.shadow_position = shadow.view_proj * camera_relative;
+    out.level = chunk.level;
 
     return out;
 }
@@ -327,5 +362,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let end = 15000.0;
     var fog_factor = clamp((distance - start) / (end - start), 0.0, 1.0);
 
-    return vec4<f32>(mix(albedo.rgb * lighting, vec3f(0.1, 0.2, 0.3), 0.0), albedo.a);
+    let color = vec4<f32>(mix(albedo.rgb * lighting, vec3f(0.1, 0.2, 0.3), 0.0), albedo.a);
+
+    if DEBUG_LOD {
+        return color * vec4<f32>(LOD_COLORS[u32(max(in.level, 0)) % 8u], 1.0);
+    }
+
+    return color;
 }
