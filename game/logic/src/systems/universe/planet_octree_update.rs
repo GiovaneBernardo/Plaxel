@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use engine::{
     game_info, multithreading::job_system::JobSystem, prelude::*, profile_scope,
@@ -15,7 +18,12 @@ use plaxel_reflect::Reflect;
 
 use crate::{
     GameCamera, GameState, octree,
-    systems::planet_mesher::{generate_planet_node_mesh, remove_mesh, upload_mesh},
+    render::producers::planet_terrain_producer::{
+        PendingTerrainChunk, PlanetTerrainCommand, PlanetTerrainRenderQueue,
+    },
+    systems::planet_mesher::{
+        cache::DensityCache, generate_planet_node_mesh, remove_mesh, upload_mesh,
+    },
 };
 
 pub fn planet_octree_update(
@@ -42,6 +50,7 @@ pub fn planet_octree_update(
     //    .map(|heightmap| Arc::clone(&heightmap));
 
     let mut changes = Vec::new();
+    let mut active_planets = HashSet::new();
     let lod_strength = lod_settings.strength;
     let mut debug_pass = globals
         .renderer
@@ -52,6 +61,7 @@ pub fn planet_octree_update(
     }
     {
         planets_query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
+            active_planets.insert(entity);
             let change_start = changes.len();
             if update_octree {
                 {
@@ -69,6 +79,7 @@ pub fn planet_octree_update(
                 }
             }
 
+            let edits = Arc::new(terrain_edits.clone());
             let planet_changes: Vec<_> = changes.drain(change_start..).collect();
             for change in planet_changes {
                 match &change {
@@ -80,7 +91,6 @@ pub fn planet_octree_update(
                         keys_to_remove,
                         requests,
                     } => {
-                        game_info!("Testeeee 2");
                         //for key in keys_to_remove {
                         //    generation.debug_nodes.remove(&(*planet_entity, *key));
                         //}
@@ -105,7 +115,7 @@ pub fn planet_octree_update(
                             &mut generation,
                             &globals.job_system,
                             terrain_config,
-                            &terrain_edits,
+                            &edits,
                         );
                     }
                     OctreeChanges::AddMesh { request } => {
@@ -142,6 +152,10 @@ pub fn planet_octree_update(
             //}
         });
     }
+
+    generation
+        .density_caches
+        .retain(|entity, _| active_planets.contains(entity));
 
     // Update debug drawing
     if let Some(debug_pass) = globals
@@ -220,14 +234,25 @@ fn submit_replacement(
         },
     );
 
+    // Jobs share a cache for this planet's immutable configuration snapshot.
+    // Existing jobs keep their old snapshot alive when the config is replaced.
+    let cache = generation
+        .density_caches
+        .entry(planet_entity)
+        .or_insert_with(|| Arc::new(DensityCache::new(Arc::clone(terrain_config))));
+    if !Arc::ptr_eq(&cache.config, terrain_config) {
+        *cache = Arc::new(DensityCache::new(Arc::clone(terrain_config)));
+    }
+
     for request in requests {
         let tx = generation.completed_tx.clone();
         let terrain_config = Arc::clone(&terrain_config);
         let edits = Arc::clone(&edits);
+        let cache = Arc::clone(cache);
 
         job_system
             .spawn_prioritized_named("planet.mesh.generate", 100, move || {
-                let mesh = generate_planet_node_mesh(&request, terrain_config, edits);
+                let mesh = generate_planet_node_mesh(&request, terrain_config, edits, &cache);
 
                 let _ = tx.send(CompletedMesh {
                     replacement_id,
@@ -240,7 +265,10 @@ fn submit_replacement(
 
 fn submit_addition(replacement: OctreeChanges) {}
 
-pub fn drain_completed_requests(mut generation: ResMut<PlanetMeshGeneration>) {
+pub fn drain_completed_requests(
+    mut generation: ResMut<PlanetMeshGeneration>,
+    queue: Res<PlanetTerrainRenderQueue>,
+) {
     while let Ok(completed) = generation.completed_rx.try_recv() {
         let Some(replacement) = generation.replacements.get_mut(&completed.replacement_id) else {
             continue;
@@ -264,19 +292,39 @@ pub fn drain_completed_requests(mut generation: ResMut<PlanetMeshGeneration>) {
     for replacement_id in completed_replacements {
         let replacement = generation.replacements.remove(&replacement_id).unwrap();
 
+        ////
+        //// New first.
+        ////
+        //for mesh in &replacement.meshes {
+        //    upload_mesh(mesh);
+        //}
         //
-        // New first.
-        //
-        for mesh in &replacement.meshes {
-            upload_mesh(mesh);
-        }
+        ////
+        //// Old second.
+        ////
+        //for key in &replacement.keys_to_remove {
+        //    remove_mesh(replacement.planet_entity, *key);
+        //}
 
-        //
-        // Old second.
-        //
-        for key in &replacement.keys_to_remove {
-            remove_mesh(replacement.planet_entity, *key);
-        }
+        let insert = replacement
+            .meshes
+            .into_iter()
+            .map(|mesh| PendingTerrainChunk {
+                key: mesh.key,
+                node_origin_planet: mesh.node_origin_planet,
+                vertices: mesh.vertices,
+                indices: mesh.indices,
+            })
+            .collect();
+
+        queue
+            .send(PlanetTerrainCommand::ReplaceChunks {
+                planet: replacement.planet_entity,
+                remove_all: false,
+                remove: replacement.keys_to_remove,
+                insert,
+            })
+            .expect("terrain renderer must remain connected");
 
         //finish_octree_transition(
         //    replacement.transition_key,
@@ -309,6 +357,9 @@ pub struct CompletedMesh {
 pub struct PlanetMeshGeneration {
     pub next_replacement_id: u64,
 
+    #[reflect(ignore)]
+    density_caches: HashMap<Entity, Arc<DensityCache>>,
+
     pub replacements: HashMap<u64, PendingReplacement>,
 
     #[reflect(ignore)]
@@ -325,6 +376,7 @@ impl Default for PlanetMeshGeneration {
 
         Self {
             next_replacement_id: 0,
+            density_caches: HashMap::new(),
             replacements: HashMap::new(),
             completed_tx,
             completed_rx,

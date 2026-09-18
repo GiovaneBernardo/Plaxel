@@ -1,3 +1,5 @@
+pub mod bounds;
+pub mod compiled;
 use std::collections::HashSet;
 
 use engine::ecs::entity::Entity;
@@ -591,6 +593,10 @@ impl TerrainValueRange {
         }
     }
 
+    fn maximum_magnitude(self) -> f64 {
+        self.minimum.abs().max(self.maximum.abs())
+    }
+
     fn add(self, other: Self) -> Self {
         Self::new(self.minimum + other.minimum, self.maximum + other.maximum)
     }
@@ -636,6 +642,14 @@ impl TerrainValueRange {
 }
 
 impl TerrainFieldMask {
+    fn range(&self, channels: &[TerrainValueRange; TERRAIN_CHANNEL_COUNT]) -> TerrainValueRange {
+        // Remapping and smoothing are monotone; inversion reverses the endpoints.
+        TerrainValueRange::new(
+            self.evaluate(&channels.map(|range| range.minimum)),
+            self.evaluate(&channels.map(|range| range.maximum)),
+        )
+    }
+
     fn evaluate(&self, channels: &[f64; TERRAIN_CHANNEL_COUNT]) -> f64 {
         let mut value = remap01(channels[self.channel.index()], self.minimum, self.maximum);
         if self.smooth {

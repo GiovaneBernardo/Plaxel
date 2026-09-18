@@ -1,3 +1,5 @@
+#![feature(portable_simd)]
+
 pub mod assembly;
 pub mod block;
 pub mod game_mode;
