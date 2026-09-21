@@ -5,12 +5,14 @@ use crate::{
     },
 };
 use engine::prelude::*;
+use game_types::terrain::terrain_field::TerrainGraphApplyQueue;
 
 pub struct UniversePlugin;
 impl Plugin for UniversePlugin {
     fn build(&self, app: &mut engine::App) {
         app.add_plugin(PlanetTerrainProducerPlugin)
             .init_resource::<PlanetMeshGeneration>()
+            .init_resource::<TerrainGraphApplyQueue>()
             .add_system(CoreSchedule::Startup, create_star_system)
             .add_system(
                 CoreSchedule::Update,
@@ -19,6 +21,10 @@ impl Plugin for UniversePlugin {
             .add_system(
                 CoreSchedule::Update,
                 systems::planet_octree_update::drain_completed_requests,
+            )
+            .add_system(
+                CoreSchedule::Update,
+                systems::planet_octree_update::apply_terrain_graph_changes,
             )
             .add_system(
                 CoreSchedule::Update,

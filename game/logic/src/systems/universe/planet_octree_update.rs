@@ -12,7 +12,7 @@ use game_types::{
         GeneratedMesh, NodeKey, NodeState, OctreeChanges, PlanetLodSettings, PlanetMeshRequest,
     },
     planet::{Planet, PlanetTerrainEdits},
-    terrain::{self, PlanetTerrainConfig},
+    terrain::{self, PlanetTerrainConfig, terrain_field::TerrainGraphApplyQueue},
 };
 use plaxel_reflect::Reflect;
 
@@ -244,6 +244,106 @@ pub fn planet_octree_update(
     //    .normalize()
     //    .into();
     //}
+}
+
+pub fn apply_terrain_graph_changes(
+    mut generation: ResMut<PlanetMeshGeneration>,
+    mut apply_queue: ResMut<TerrainGraphApplyQueue>,
+    queue: Res<PlanetTerrainRenderQueue>,
+    game_state: Res<GameState>,
+    mut planets: Query<(
+        &mut Planet,
+        &PlanetTerrainEdits,
+        &mut Arc<PlanetTerrainConfig>,
+    )>,
+) {
+    // Do not clear visible terrain while rebuilding is paused.
+    if !game_state.update_octree {
+        return;
+    }
+    let mut latest = HashMap::new();
+    for request in std::mem::take(&mut apply_queue.requests) {
+        latest.insert(request.target, request);
+    }
+    for request in latest.into_values() {
+        let Some((planet, edits, config)) = planets.get(request.target) else {
+            continue;
+        };
+        if generation
+            .replacements
+            .values()
+            .any(|r| r.planet_entity == request.target)
+        {
+            apply_queue.requests.push(request);
+            continue;
+        }
+        if let Some(error) = request.graph.validate().first() {
+            engine::game_error!("Apply terrain graph failed: {}", error.message);
+            continue;
+        }
+        let mut updated = (**config).clone();
+        updated.seed = request.graph.seed;
+        updated.radius = request.graph.radius as f32;
+        updated.sea_level = request.graph.sea_level as f32;
+        updated.field_graph = Some(request.graph);
+        let Some(root) = fresh_terrain_root(planet.position, &updated, edits) else {
+            engine::game_error!("Apply terrain graph failed: planet bounds exceed supported size");
+            continue;
+        };
+        // All previous jobs/uploads for this planet have been acknowledged.
+        if queue
+            .send(PlanetTerrainCommand::ReplaceChunks {
+                planet: request.target,
+                replacement_id: None,
+                remove_all: true,
+                remove: Vec::new(),
+                insert: Vec::new(),
+            })
+            .is_err()
+        {
+            engine::game_error!("Apply terrain graph failed: terrain renderer disconnected");
+            continue;
+        }
+        *config = Arc::new(updated);
+        planet.octree_root = root;
+        generation.density_caches.remove(&request.target);
+        generation
+            .debug_nodes
+            .retain(|(entity, _), _| *entity != request.target);
+    }
+}
+
+fn fresh_terrain_root(
+    position: Vec3,
+    config: &PlanetTerrainConfig,
+    edits: &PlanetTerrainEdits,
+) -> Option<game_types::octree::OctreeNode> {
+    let (_, max_height) = crate::sdf::terrain_height_bounds(config, None);
+    let diameter = (config.radius + max_height) * 2.0;
+    if !diameter.is_finite() || diameter <= 0.0 || !config.sea_level.is_finite() {
+        return None;
+    }
+    // A root split should produce cells at least as large as the 32 m minimum.
+    let size = (diameter.ceil() as u32)
+        .max(64)
+        .checked_next_power_of_two()? as f32;
+    let min = position - Vec3::splat(size * 0.5);
+    let density_range = octree::node_density_range(min, size, position, config, edits);
+    Some(game_types::octree::OctreeNode {
+        key: NodeKey {
+            level: 0,
+            x: min.x as i32,
+            y: min.y as i32,
+            z: min.z as i32,
+        },
+        min,
+        size,
+        children: None,
+        vertex: None,
+        density_range,
+        may_contain_surface: density_range.contains_zero(),
+        state: NodeState::Leaf,
+    })
 }
 
 fn submit_replacement(
@@ -490,6 +590,72 @@ impl Default for PlanetMeshGeneration {
             completed_tx,
             completed_rx,
             debug_nodes: HashMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    #[test]
+    fn changed_graph_resets_bounds_and_starts_mesh_generation() {
+        let mut config =
+            crate::systems::universe::planet_system::earth_like_planet_terrain_config();
+        let graph = config.field_graph.as_mut().unwrap();
+        graph.layers.clear();
+        graph.radius = 1000.0;
+        config.radius = 1000.0;
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        let position = vec3(10000.0, -5000.0, 2000.0);
+        let old = fresh_terrain_root(position, &config, &edits).unwrap();
+        config.radius = 4000.0;
+        config.field_graph.as_mut().unwrap().radius = 4000.0;
+        let mut root = fresh_terrain_root(position, &config, &edits).unwrap();
+        assert!(root.size > old.size);
+        assert!(root.children.is_none() && matches!(root.state, NodeState::Leaf));
+        assert!(root.may_contain_surface);
+        assert!(
+            (position - Vec3::splat(config.radius))
+                .cmpge(root.min)
+                .all()
+        );
+        assert!(
+            (position + Vec3::splat(config.radius))
+                .cmple(root.min + Vec3::splat(root.size))
+                .all()
+        );
+        let mut changes = Vec::new();
+        octree::update(
+            &mut root,
+            position + Vec3::X * 4010.0,
+            Entity::PLACEHOLDER,
+            position,
+            &config,
+            1.0,
+            &mut changes,
+            &edits,
+        );
+        let [OctreeChanges::ReplaceMeshes { requests, .. }] = changes.as_slice() else {
+            panic!("reset root must start rebuilding through the normal replacement path");
+        };
+        assert!(!requests.is_empty());
+        assert!(root.children.is_some() && matches!(root.state, NodeState::Splitting));
+    }
+
+    #[test]
+    fn unsupported_radius_does_not_create_a_root() {
+        let mut config = crate::systems::universe::planet_system::default_planet_terrain_config();
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        for radius in [f32::INFINITY, f32::MAX, 3_000_000_000.0] {
+            config.radius = radius;
+            assert!(fresh_terrain_root(Vec3::ZERO, &config, &edits).is_none());
         }
     }
 }

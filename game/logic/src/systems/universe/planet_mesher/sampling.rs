@@ -40,31 +40,34 @@ pub(super) fn generate(
         .collect();
     let mut positions = Vec::with_capacity(256);
     let mut values = vec![0.0; 256];
-    for indices in required.chunks(256) {
-        positions.clear();
-        for &i in indices {
-            positions.push(
-                local_min
-                    + DVec3::new(
-                        (i / (size * size)) as f64,
-                        (i / size % size) as f64,
-                        (i % size) as f64,
-                    ) * resolution,
-            );
-        }
-        if let Some(compiled) = compiled {
-            compiled.densities(
-                &positions,
-                f64::from(terrain.config.radius),
-                &mut values[..indices.len()],
-            );
-        } else {
-            for (&p, value) in positions.iter().zip(&mut values) {
-                *value = terrain_sampler::sample_original_density_planet_local(terrain, p);
+    {
+        engine::profile_scope!("terrain.grid.indices");
+        for indices in required.chunks(256) {
+            positions.clear();
+            for &i in indices {
+                positions.push(
+                    local_min
+                        + DVec3::new(
+                            (i / (size * size)) as f64,
+                            (i / size % size) as f64,
+                            (i % size) as f64,
+                        ) * resolution,
+                );
             }
-        }
-        for (&i, &value) in indices.iter().zip(&values) {
-            grid[i] = value;
+            if let Some(compiled) = compiled {
+                compiled.densities(
+                    &positions,
+                    f64::from(terrain.config.radius),
+                    &mut values[..indices.len()],
+                );
+            } else {
+                for (&p, value) in positions.iter().zip(&mut values) {
+                    *value = terrain_sampler::sample_original_density_planet_local(terrain, p);
+                }
+            }
+            for (&i, &value) in indices.iter().zip(&values) {
+                grid[i] = value;
+            }
         }
     }
     (grid, required.len())
