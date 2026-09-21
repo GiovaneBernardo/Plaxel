@@ -13,11 +13,13 @@ pub(super) fn generate(
     exact_grid: bool,
     compiled: Option<&CompiledTerrainField>,
 ) -> (Vec<f32>, usize) {
+    engine::profile_scope!("terrain.grid.generate");
     let size = CHUNK_CELL_COUNT + 2;
     let length = size * size * size;
     let mut grid = vec![0.0; length];
     let mut exact = vec![false; length];
     if let Some(graph) = terrain.config.field_graph.as_ref().filter(|_| !exact_grid) {
+        engine::profile_scope!("terrain.grid.classify");
         let mut classifier = Classifier {
             graph,
             radius: f64::from(terrain.config.radius),
@@ -131,6 +133,49 @@ impl Classifier<'_> {
             });
             if (0..3).all(|axis| a[axis] < b[axis]) {
                 self.visit(a, b);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "manual terrain sampling benchmark"]
+    fn measure_coarse_grid_sampling() {
+        let config = crate::systems::universe::planet_system::earth_like_planet_terrain_config();
+        let edits = game_types::planet::PlanetTerrainEdits {
+            modified_chunks: Default::default(),
+            modified_ranges: Default::default(),
+        };
+        let terrain = PlanetTerrainSamplerContext {
+            config: &config,
+            edits: &edits,
+            planet_position: engine::math::Vec3::ZERO,
+        };
+        let compiled = config.field_graph.as_ref().unwrap().compile_density();
+        for size in [32.0, 1024.0, 32768.0, 1048576.0] {
+            let origin = DVec3::new(
+                f64::from(config.radius) - size * 0.5,
+                -size * 0.5,
+                -size * 0.5,
+            );
+            for exact in [false, true] {
+                let start = std::time::Instant::now();
+                let (grid, samples) = generate(
+                    origin,
+                    size / CHUNK_CELL_COUNT as f64,
+                    &terrain,
+                    exact,
+                    Some(&compiled),
+                );
+                std::hint::black_box(grid);
+                println!(
+                    "size={size} exact={exact} samples={samples} elapsed={:?}",
+                    start.elapsed()
+                );
             }
         }
     }

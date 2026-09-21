@@ -19,7 +19,8 @@ use plaxel_reflect::Reflect;
 use crate::{
     GameCamera, GameState, octree,
     render::producers::planet_terrain_producer::{
-        PendingTerrainChunk, PlanetTerrainCommand, PlanetTerrainRenderQueue,
+        PendingTerrainChunk, PlanetTerrainCommand, PlanetTerrainEvent, PlanetTerrainEvents,
+        PlanetTerrainRenderQueue,
     },
     systems::planet_mesher::{
         cache::DensityCache, generate_planet_node_mesh, remove_mesh, upload_mesh,
@@ -35,6 +36,7 @@ pub fn planet_octree_update(
     mut transforms: Query<(&mut TransformComponent,)>,
     mut planets_query: Query<(&mut Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>,
     mut generation: ResMut<PlanetMeshGeneration>,
+    queue: Res<PlanetTerrainRenderQueue>,
     mut globals: GlobalsMut,
     commands: &mut Commands,
 ) {
@@ -63,25 +65,62 @@ pub fn planet_octree_update(
         planets_query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
             active_planets.insert(entity);
             let change_start = changes.len();
-            if update_octree {
-                {
-                    profile_scope!("terrain.planet.update_octree");
-                    octree::update(
-                        &mut planet.octree_root,
-                        camera_pos,
-                        entity,
-                        planet.position,
-                        terrain_config.as_ref(),
-                        lod_strength,
-                        &mut changes,
-                        terrain_edits,
-                    );
-                }
+            if update_octree
+                && !generation
+                    .replacements
+                    .values()
+                    .any(|r| r.planet_entity == entity)
+            {
+                profile_scope!("terrain.planet.update_octree");
+                octree::update(
+                    &mut planet.octree_root,
+                    camera_pos,
+                    entity,
+                    planet.position,
+                    terrain_config.as_ref(),
+                    lod_strength,
+                    &mut changes,
+                    terrain_edits,
+                );
+            }
+
+            if changes.len() == change_start {
+                return;
             }
 
             let edits = Arc::new(terrain_edits.clone());
             let planet_changes: Vec<_> = changes.drain(change_start..).collect();
-            for change in planet_changes {
+            for mut change in planet_changes {
+                if let OctreeChanges::ReplaceMeshes { requests, .. } = &mut change {
+                    // Existing neighbors also need new seam ownership after a split/merge.
+                    let mut neighbors = Vec::new();
+                    for request in requests.iter() {
+                        octree::collect_face_neighbor_leaves(
+                            &planet.octree_root,
+                            request.node_min_corner,
+                            request.node_size,
+                            &mut neighbors,
+                        );
+                    }
+                    let mut keys: HashSet<_> = requests.iter().map(|r| r.node_key).collect();
+                    for node in neighbors {
+                        if node.may_contain_surface && keys.insert(node.key) {
+                            requests.push(PlanetMeshRequest {
+                                planet_entity: entity,
+                                node_key: node.key,
+                                planet_position: planet.position,
+                                node_min_corner: node.min,
+                                node_size: node.size,
+                                face_neighbors: [game_types::octree::FaceNeighbor::SAME_OR_ABSENT;
+                                    6],
+                            });
+                        }
+                    }
+                    for request in requests {
+                        octree::annotate_mesh_request(&planet.octree_root, request);
+                    }
+                }
+
                 match &change {
                     OctreeChanges::ReplaceMeshes {
                         planet_entity,
@@ -126,6 +165,15 @@ pub fn planet_octree_update(
                     }
                     OctreeChanges::RemoveMeshes { planet_entity, key } => {
                         generation.debug_nodes.remove(&(*planet_entity, *key));
+                        queue
+                            .send(PlanetTerrainCommand::ReplaceChunks {
+                                planet: *planet_entity,
+                                remove_all: false,
+                                remove: vec![*key],
+                                insert: Vec::new(),
+                                replacement_id: None,
+                            })
+                            .expect("terrain renderer connected");
                     }
                     OctreeChanges::CancelPlanetReplacements { planet_entity } => {
                         //generation
@@ -228,6 +276,7 @@ fn submit_replacement(
             completed_state,
             additional_transitions,
             keys_to_remove,
+            submitted: false,
 
             expected_meshes: requests.len(),
             meshes: Vec::with_capacity(requests.len()),
@@ -268,7 +317,52 @@ fn submit_addition(replacement: OctreeChanges) {}
 pub fn drain_completed_requests(
     mut generation: ResMut<PlanetMeshGeneration>,
     queue: Res<PlanetTerrainRenderQueue>,
+    events: Res<PlanetTerrainEvents>,
+    mut planets: Query<(&mut Planet,)>,
 ) {
+    for event in events.try_iter() {
+        match event {
+            PlanetTerrainEvent::ReplacementApplied {
+                replacement_id: Some(id),
+                rendered_keys,
+                ..
+            } => {
+                if let Some(replacement) = generation.replacements.remove(&id) {
+                    if let Some((planet,)) = planets.get(replacement.planet_entity) {
+                        finish_transition(
+                            &mut planet.octree_root,
+                            replacement.transition_key,
+                            replacement.completed_state,
+                        );
+                        for (key, state) in replacement.additional_transitions {
+                            finish_transition(&mut planet.octree_root, key, state);
+                        }
+                        let rendered: HashSet<_> = rendered_keys.into_iter().collect();
+                        if let Some((ancestor, descendant)) =
+                            octree::rendered_overlap(&planet.octree_root, &rendered)
+                        {
+                            engine::game_error!(
+                                "Overlapping terrain LODs: {ancestor:?} and {descendant:?}"
+                            );
+                        }
+                        let mut leaves = Vec::new();
+                        octree::collect_leaf_nodes(&planet.octree_root, &mut leaves);
+                        let valid: HashSet<_> = leaves.iter().map(|node| node.key).collect();
+                        if let Some(stale) = rendered.difference(&valid).next() {
+                            engine::game_error!(
+                                "Rendered terrain chunk is not a current leaf: {stale:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            PlanetTerrainEvent::ReplacementFailed { reason, .. } => {
+                engine::game_error!("Terrain replacement failed: {reason}");
+            }
+            _ => {}
+        }
+    }
+
     while let Ok(completed) = generation.completed_rx.try_recv() {
         let Some(replacement) = generation.replacements.get_mut(&completed.replacement_id) else {
             continue;
@@ -281,16 +375,18 @@ pub fn drain_completed_requests(
         .replacements
         .iter()
         .filter_map(|(&id, replacement)| {
-            if replacement.meshes.len() == replacement.expected_meshes {
+            if !replacement.submitted && replacement.meshes.len() == replacement.expected_meshes {
                 Some(id)
             } else {
                 None
             }
         })
+        .take(1) // One small atomic GPU upload batch per frame.
         .collect();
 
     for replacement_id in completed_replacements {
-        let replacement = generation.replacements.remove(&replacement_id).unwrap();
+        let replacement = generation.replacements.get_mut(&replacement_id).unwrap();
+        replacement.submitted = true;
 
         ////
         //// New first.
@@ -306,8 +402,7 @@ pub fn drain_completed_requests(
         //    remove_mesh(replacement.planet_entity, *key);
         //}
 
-        let insert = replacement
-            .meshes
+        let insert = std::mem::take(&mut replacement.meshes)
             .into_iter()
             .map(|mesh| PendingTerrainChunk {
                 key: mesh.key,
@@ -320,8 +415,9 @@ pub fn drain_completed_requests(
         queue
             .send(PlanetTerrainCommand::ReplaceChunks {
                 planet: replacement.planet_entity,
+                replacement_id: Some(replacement_id),
                 remove_all: false,
-                remove: replacement.keys_to_remove,
+                remove: replacement.keys_to_remove.clone(), //remove: replacement.keys_to_remove,
                 insert,
             })
             .expect("terrain renderer must remain connected");
@@ -334,6 +430,18 @@ pub fn drain_completed_requests(
     }
 }
 
+fn finish_transition(node: &mut game_types::octree::OctreeNode, key: NodeKey, state: NodeState) {
+    if node.key == key {
+        node.state = state;
+        return;
+    }
+    if let Some(children) = &mut node.children {
+        for child in children {
+            finish_transition(child, key, state);
+        }
+    }
+}
+
 #[derive(Reflect)]
 pub struct PendingReplacement {
     pub planet_entity: Entity,
@@ -341,6 +449,7 @@ pub struct PendingReplacement {
     pub completed_state: NodeState,
     pub additional_transitions: Vec<(NodeKey, NodeState)>,
     pub keys_to_remove: Vec<NodeKey>,
+    pub submitted: bool,
 
     pub expected_meshes: usize,
     pub meshes: Vec<GeneratedMesh>,

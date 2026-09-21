@@ -640,20 +640,8 @@ pub fn update(
     changes: &mut Vec<OctreeChanges>,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    const MIN_NODE_SIZE: f32 = 32.0;
-
     if has_pending_transition(node) {
-        // Merges discard their old child topology, so let those short atomic
-        // transitions finish. Splits retain the rendered ancestor and can be
-        // rolled back safely when the camera asks for a different target.
-        if has_pending_merge(node)
-            || !topology_target_changed(node, camera_pos, MIN_NODE_SIZE, lod_strength, true)
-        {
-            return;
-        }
-
-        rollback_pending_splits(node);
-        changes.push(OctreeChanges::CancelPlanetReplacements { planet_entity });
+        return;
     }
 
     update_node(
@@ -728,64 +716,64 @@ fn update_node(
     terrain_edits: &PlanetTerrainEdits,
     is_root_node: bool,
 ) {
-    let min_node_size = 32.0;
-
-    // Do not refine a topology that has not become visible yet. Otherwise a
-    // child replacement can supersede its parent replacement before anything
-    // takes responsibility for removing the currently rendered ancestor.
-    if matches!(node.state, NodeState::Splitting | NodeState::Merging) {
+    let Some((key, split)) = next_lod_change(node, camera_pos, lod_strength) else {
         return;
-    }
+    };
 
-    if is_root_node && node.children.is_none() {
+    let target = find_node_mut(node, key).expect("selected node exists");
+
+    if split {
         split_node(
-            node,
-            camera_pos,
-            min_node_size,
-            lod_strength,
+            target,
             changes,
             planet_entity,
             planet_position,
             terrain_config,
             terrain_edits,
         );
-        return;
-    }
-
-    if should_split(node, camera_pos, min_node_size, lod_strength) {
-        split_node(
-            node,
-            camera_pos,
-            min_node_size,
-            lod_strength,
-            changes,
-            planet_entity,
-            planet_position,
-            terrain_config,
-            terrain_edits,
-        );
-        return;
-    }
-
-    if !is_root_node && should_merge(node, camera_pos, min_node_size, lod_strength) {
-        merge_node(node, changes, planet_entity, planet_position);
-        return;
-    }
-
-    if let Some(children) = node.children.as_mut() {
-        for child in children.iter_mut() {
-            update_node(
-                child,
-                camera_pos,
+    } else {
+        let mut merges = Vec::new();
+        merge_node(target, &mut merges, planet_entity, planet_position);
+        // Plan against the evolving topology, but expose all merges in one GPU swap.
+        for _ in 1..8 {
+            let Some((key, false)) = next_lod_change(node, camera_pos, lod_strength) else {
+                break;
+            };
+            merge_node(
+                find_node_mut(node, key).unwrap(),
+                &mut merges,
                 planet_entity,
                 planet_position,
-                terrain_config,
-                lod_strength,
-                changes,
-                terrain_edits,
-                false,
             );
         }
+        let mut removals = Vec::new();
+        let mut requests = Vec::new();
+        let mut transitions = Vec::new();
+        for merge in merges {
+            if let OctreeChanges::ReplaceMeshes {
+                transition_key,
+                keys_to_remove,
+                requests: insert,
+                ..
+            } = merge
+            {
+                removals.extend(keys_to_remove);
+                requests.extend(insert);
+                transitions.push((transition_key, NodeState::Leaf));
+            }
+        }
+        // A later merge may absorb an earlier one: never generate that intermediate mesh.
+        requests.retain(|request| find_node_mut(node, request.node_key).is_some());
+        transitions.retain(|(key, _)| find_node_mut(node, *key).is_some());
+        let (transition_key, completed_state) = transitions.remove(0);
+        changes.push(OctreeChanges::ReplaceMeshes {
+            planet_entity,
+            transition_key,
+            completed_state,
+            additional_transitions: transitions,
+            keys_to_remove: removals,
+            requests,
+        });
     }
 }
 
@@ -981,27 +969,13 @@ fn mesh_request(
 
 fn split_node(
     node: &mut OctreeNode,
-    camera_pos: Vec3,
-    min_node_size: f32,
-    lod_strength: f32,
     changes: &mut Vec<OctreeChanges>,
     planet_entity: Entity,
     planet_position: Vec3,
     terrain_config: &PlanetTerrainConfig,
     terrain_edits: &PlanetTerrainEdits,
 ) {
-    let mut children = create_children(node, planet_position, terrain_config, terrain_edits);
-    for child in &mut children {
-        refine_new_subtree(
-            child,
-            camera_pos,
-            min_node_size,
-            lod_strength,
-            planet_position,
-            terrain_config,
-            terrain_edits,
-        );
-    }
+    let children = create_children(node, planet_position, terrain_config, terrain_edits);
 
     let mut requests = Vec::new();
     collect_surface_leaf_requests(&children, planet_entity, planet_position, &mut requests);
@@ -1205,6 +1179,120 @@ pub fn traverse_octree(
     }
 }
 
+pub fn find_node_mut(node: &mut OctreeNode, key: NodeKey) -> Option<&mut OctreeNode> {
+    if node.key == key {
+        return Some(node);
+    }
+    node.children
+        .as_mut()?
+        .iter_mut()
+        .find_map(|child| find_node_mut(child, key))
+}
+
+pub fn next_lod_change(root: &OctreeNode, camera: Vec3, strength: f32) -> Option<(NodeKey, bool)> {
+    engine::profile_scope!("terrain.octree.select_lod");
+    fn gather<'a>(
+        node: &'a OctreeNode,
+        root: NodeKey,
+        camera: Vec3,
+        strength: f32,
+        candidates: &mut Vec<(f32, &'a OctreeNode, bool)>,
+    ) {
+        let distance = node_bounds(node)
+            .distance_to_point(camera)
+            .max(node.size * 0.25);
+        if node.children.is_none() {
+            if (node.key == root && node.may_contain_surface)
+                || should_split(node, camera, 32.0, strength)
+            {
+                candidates.push((node.size / distance, node, true));
+            }
+        } else {
+            if node.key != root && should_merge(node, camera, 32.0, strength) {
+                // Prefer a large eligible subtree over rebuilding its intermediate LODs.
+                // The inverse ratio favored tiny distant merges and serialized the retreat.
+                candidates.push((node.size / distance, node, false));
+            }
+            for child in node.children.as_ref().unwrap() {
+                gather(child, root, camera, strength, candidates);
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    gather(root, root.key, camera, strength, &mut candidates);
+    // Coarsening must not wait behind refinement elsewhere on the planet.
+    candidates.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| b.0.total_cmp(&a.0))
+            .then_with(|| a.1.key.cmp(&b.1.key))
+    });
+    for (_, node, split) in candidates {
+        if !split {
+            let mut neighbors = Vec::new();
+            collect_face_neighbor_leaves(root, node.min, node.size, &mut neighbors);
+            // A merged leaf must not touch leaves more than one level finer.
+            if neighbors.iter().all(|n| n.size >= node.size * 0.5) {
+                return Some((node.key, false));
+            }
+        } else {
+            return Some((balanced_split_target(root, node).key, true));
+        }
+    }
+    // Repair legacy gaps only after useful camera-driven work. Previously this
+    // scanned every face before every merge and forced refinement while retreating.
+    engine::profile_scope!("terrain.octree.repair_balance");
+    let mut leaves = Vec::new();
+    collect_leaf_nodes(root, &mut leaves);
+    for leaf in leaves {
+        let mut neighbors = Vec::new();
+        collect_face_neighbor_leaves(root, leaf.min, leaf.size, &mut neighbors);
+        if let Some(coarse) = neighbors.into_iter().find(|n| n.size > leaf.size * 2.0) {
+            return Some((balanced_split_target(root, coarse).key, true));
+        }
+    }
+    None
+}
+
+fn balanced_split_target<'a>(root: &'a OctreeNode, mut node: &'a OctreeNode) -> &'a OctreeNode {
+    loop {
+        let mut neighbors = Vec::new();
+        collect_face_neighbor_leaves(root, node.min, node.size, &mut neighbors);
+        if let Some(coarser) = neighbors
+            .into_iter()
+            .filter(|n| n.size > node.size)
+            .max_by(|a, b| a.size.total_cmp(&b.size))
+        {
+            node = coarser;
+        } else {
+            return node;
+        }
+    }
+}
+
+pub fn rendered_overlap(
+    root: &OctreeNode,
+    rendered: &std::collections::HashSet<NodeKey>,
+) -> Option<(NodeKey, NodeKey)> {
+    fn visit(
+        node: &OctreeNode,
+        rendered: &std::collections::HashSet<NodeKey>,
+        ancestor: Option<NodeKey>,
+    ) -> Option<(NodeKey, NodeKey)> {
+        let mut ancestor = ancestor;
+        if rendered.contains(&node.key) {
+            if let Some(parent) = ancestor {
+                return Some((parent, node.key));
+            }
+            ancestor = Some(node.key);
+        }
+        node.children
+            .as_ref()?
+            .iter()
+            .find_map(|child| visit(child, rendered, ancestor))
+    }
+    visit(root, rendered, None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1214,8 +1302,340 @@ mod tests {
     use super::*;
     use crate::systems::universe::planet_system::default_planet_terrain_config;
 
+    fn test_leaf(min: Vec3, size: f32, level: i8) -> OctreeNode {
+        OctreeNode {
+            key: NodeKey {
+                level,
+                x: min.x as i32,
+                y: min.y as i32,
+                z: min.z as i32,
+            },
+            min,
+            size,
+            children: None,
+            vertex: None,
+            density_range: DensityRange::new(-1.0, 1.0),
+            may_contain_surface: true,
+            state: NodeState::Leaf,
+        }
+    }
+
     #[test]
-    fn refinement_skips_intermediate_lod_replacements() {
+    #[ignore = "manual surface-to-space scheduling benchmark"]
+    fn measure_surface_to_space_scheduling() {
+        let config = crate::systems::universe::planet_system::earth_like_planet_terrain_config();
+        let edits = PlanetTerrainEdits {
+            modified_chunks: Default::default(),
+            modified_ranges: Default::default(),
+        };
+        let start = std::time::Instant::now();
+        let mut root = build_node(
+            Vec3::splat(-8388608.0),
+            16777216.0,
+            32.0,
+            true,
+            &vec3(config.radius + 32.0, 0.0, 0.0),
+            Vec3::ZERO,
+            &config,
+            1.0,
+            &edits,
+        );
+        println!("initial build {:?}", start.elapsed());
+        for (phase, camera) in [
+            ("surface", vec3(config.radius + 32.0, 0.0, 0.0)),
+            ("space", vec3(config.radius * 2.0, 0.0, 0.0)),
+        ] {
+            let mut splits = 0;
+            let mut merges = 0;
+            let start = std::time::Instant::now();
+            for batch in 0..2000 {
+                let mut changes = Vec::new();
+                update(
+                    &mut root,
+                    camera,
+                    Entity::PLACEHOLDER,
+                    Vec3::ZERO,
+                    &config,
+                    1.0,
+                    &mut changes,
+                    &edits,
+                );
+                if changes.is_empty() {
+                    println!(
+                        "{phase} converged at {batch}: splits={splits} merges={merges} {:?}",
+                        start.elapsed()
+                    );
+                    break;
+                }
+                for change in changes {
+                    if let OctreeChanges::ReplaceMeshes {
+                        transition_key,
+                        completed_state,
+                        additional_transitions,
+                        ..
+                    } = change
+                    {
+                        if matches!(completed_state, NodeState::Internal) {
+                            splits += 1;
+                        } else {
+                            merges += 1 + additional_transitions.len();
+                        }
+                        find_node_mut(&mut root, transition_key).unwrap().state = completed_state;
+                        for (key, state) in additional_transitions {
+                            find_node_mut(&mut root, key).unwrap().state = state;
+                        }
+                    }
+                }
+                if batch % 100 == 0 {
+                    println!(
+                        "{phase} batch={batch} splits={splits} merges={merges} {:?}",
+                        start.elapsed()
+                    );
+                }
+            }
+        }
+    }
+
+    fn test_split(node: &mut OctreeNode) {
+        let size = node.size * 0.5;
+        node.children = Some(std::array::from_fn(|i| {
+            Box::new(test_leaf(
+                node.min
+                    + vec3((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32) * size,
+                size,
+                node.key.level + 1,
+            ))
+        }));
+        node.state = NodeState::Internal;
+    }
+
+    #[test]
+    fn lod_priority_follows_camera_instead_of_child_order() {
+        let mut root = test_leaf(Vec3::ZERO, 128.0, 0);
+        test_split(&mut root);
+        let last = root.children.as_ref().unwrap()[7].key;
+        assert_eq!(
+            next_lod_change(&root, Vec3::splat(112.0), 1.0),
+            Some((last, true))
+        );
+    }
+
+    #[test]
+    fn retreat_merges_eligible_ancestor_before_intermediate_levels() {
+        let mut root = test_leaf(Vec3::ZERO, 512.0, 0);
+        test_split(&mut root);
+        let parent = &mut root.children.as_mut().unwrap()[0];
+        test_split(parent);
+        test_split(&mut parent.children.as_mut().unwrap()[0]);
+        let expected = parent.key;
+        assert_eq!(
+            next_lod_change(&root, Vec3::splat(10000.0), 1.0),
+            Some((expected, false))
+        );
+    }
+
+    #[test]
+    fn retreat_batches_merges_and_preserves_all_removals() {
+        let mut root = test_leaf(Vec3::ZERO, 512.0, 0);
+        test_split(&mut root);
+        for child in root.children.as_mut().unwrap() {
+            test_split(child);
+        }
+        let mut old_leaves = Vec::new();
+        collect_leaf_nodes(&root, &mut old_leaves);
+        let old_keys: std::collections::HashSet<_> = old_leaves.iter().map(|n| n.key).collect();
+        let config = default_planet_terrain_config();
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        let mut changes = Vec::new();
+        update(
+            &mut root,
+            Vec3::splat(10000.0),
+            Entity::PLACEHOLDER,
+            Vec3::ZERO,
+            &config,
+            1.0,
+            &mut changes,
+            &edits,
+        );
+        let [
+            OctreeChanges::ReplaceMeshes {
+                keys_to_remove,
+                requests,
+                additional_transitions,
+                ..
+            },
+        ] = changes.as_slice()
+        else {
+            panic!("coarsening must produce one atomic batch");
+        };
+        assert_eq!(requests.len(), 8);
+        assert_eq!(additional_transitions.len(), 7);
+        assert_eq!(
+            keys_to_remove
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            old_keys
+        );
+        assert!(
+            root.children
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|n| n.children.is_none())
+        );
+        assert!(
+            has_pending_transition(&root),
+            "wait for the GPU acknowledgment"
+        );
+    }
+
+    #[test]
+    fn repeated_merge_batches_leave_no_stale_meshes_or_level_gaps() {
+        let mut root = test_leaf(Vec3::ZERO, 512.0, 0);
+        test_split(&mut root);
+        for child in root.children.as_mut().unwrap() {
+            test_split(child);
+            for grandchild in child.children.as_mut().unwrap() {
+                test_split(grandchild);
+            }
+        }
+        let mut leaves = Vec::new();
+        collect_leaf_nodes(&root, &mut leaves);
+        let mut rendered: std::collections::HashSet<_> = leaves.iter().map(|n| n.key).collect();
+        let config = default_planet_terrain_config();
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        for _ in 0..10 {
+            let mut changes = Vec::new();
+            update(
+                &mut root,
+                Vec3::splat(10000.0),
+                Entity::PLACEHOLDER,
+                Vec3::ZERO,
+                &config,
+                1.0,
+                &mut changes,
+                &edits,
+            );
+            for change in changes {
+                let OctreeChanges::ReplaceMeshes {
+                    transition_key,
+                    additional_transitions,
+                    keys_to_remove,
+                    requests,
+                    ..
+                } = change
+                else {
+                    panic!()
+                };
+                for key in keys_to_remove {
+                    rendered.remove(&key);
+                }
+                rendered.extend(requests.iter().map(|r| r.node_key));
+                for key in std::iter::once(transition_key)
+                    .chain(additional_transitions.into_iter().map(|(key, _)| key))
+                {
+                    find_node_mut(&mut root, key).unwrap().state = NodeState::Leaf;
+                }
+            }
+            assert_eq!(rendered_overlap(&root, &rendered), None);
+            let mut leaves = Vec::new();
+            collect_leaf_nodes(&root, &mut leaves);
+            assert_eq!(rendered, leaves.iter().map(|n| n.key).collect());
+            for leaf in leaves {
+                let mut neighbors = Vec::new();
+                collect_face_neighbor_leaves(&root, leaf.min, leaf.size, &mut neighbors);
+                assert!(
+                    neighbors
+                        .iter()
+                        .all(|n| (n.key.level - leaf.key.level).abs() <= 1)
+                );
+            }
+        }
+        assert_eq!(
+            rendered.len(),
+            8,
+            "retreat should reach the eight root children within ten batches"
+        );
+    }
+
+    #[test]
+    fn lod_changes_preserve_face_balance_as_camera_moves() {
+        let mut root = test_leaf(Vec3::ZERO, 512.0, 0);
+        test_split(&mut root);
+        let mut splits = 0;
+        let mut merges = 0;
+        for camera in [Vec3::splat(240.0), Vec3::splat(400.0), Vec3::splat(10000.0)] {
+            for _ in 0..64 {
+                let Some((key, split)) = next_lod_change(&root, camera, 0.5) else {
+                    break;
+                };
+                let node = find_node_mut(&mut root, key).unwrap();
+                if split {
+                    test_split(node);
+                    splits += 1;
+                } else {
+                    node.children = None;
+                    node.state = NodeState::Leaf;
+                    merges += 1;
+                }
+                let mut leaves = Vec::new();
+                collect_leaf_nodes(&root, &mut leaves);
+                for leaf in leaves {
+                    let mut neighbors = Vec::new();
+                    collect_face_neighbor_leaves(&root, leaf.min, leaf.size, &mut neighbors);
+                    assert!(
+                        neighbors
+                            .iter()
+                            .all(|n| (n.key.level - leaf.key.level).abs() <= 1)
+                    );
+                }
+            }
+        }
+        assert!(splits > 0 && merges > 0);
+    }
+
+    #[test]
+    fn rendered_overlap_detects_ancestor_but_allows_adjacent_leaves() {
+        let mut root = test_leaf(Vec3::ZERO, 128.0, 0);
+        test_split(&mut root);
+        let children = root.children.as_ref().unwrap();
+        let mut rendered = std::collections::HashSet::from([children[0].key, children[1].key]);
+        assert_eq!(rendered_overlap(&root, &rendered), None);
+        rendered.insert(root.key);
+        assert_eq!(
+            rendered_overlap(&root, &rendered),
+            Some((root.key, children[0].key))
+        );
+    }
+
+    #[test]
+    fn retreat_coarsens_instead_of_refining_to_repair_an_old_gap() {
+        let mut root = test_leaf(Vec3::ZERO, 512.0, 0);
+        test_split(&mut root);
+        test_split(&mut root.children.as_mut().unwrap()[0]);
+        test_split(
+            &mut root.children.as_mut().unwrap()[0]
+                .children
+                .as_mut()
+                .unwrap()[1],
+        );
+        let (key, split) = next_lod_change(&root, Vec3::splat(10000.0), 1.0).unwrap();
+        assert!(
+            !split,
+            "an eligible merge should replace unnecessary refinement"
+        );
+        assert_eq!(key.level, 1, "coarsen the detailed subtree directly");
+    }
+
+    #[test]
+    fn refinement_is_bounded_and_waits_for_visible_replacement() {
         let config = default_planet_terrain_config();
         let planet_position = Vec3::ZERO;
         let size = 4_096.0;
@@ -1268,9 +1688,10 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|request| request.node_key.level >= node.key.level + 3),
-            "the replacement should target the required deep LOD directly"
+                .all(|request| request.node_key.level == node.key.level + 1),
+            "each replacement should refine just one level"
         );
+        assert!(requests.len() <= 8);
 
         changes.clear();
         update(
@@ -1284,18 +1705,10 @@ mod tests {
             &edits,
         );
 
-        assert!(matches!(
-            changes.first(),
-            Some(OctreeChanges::CancelPlanetReplacements { .. })
-        ));
-        let Some(OctreeChanges::ReplaceMeshes { requests, .. }) = changes.get(1) else {
-            panic!("moving away should replace the obsolete pending LOD target");
-        };
         assert!(
-            requests
-                .iter()
-                .all(|request| request.node_key.level == node.key.level + 1),
-            "the replacement should be rebuilt for the latest camera position"
+            changes.is_empty(),
+            "camera motion must not supersede an unacknowledged replacement"
         );
+        assert!(matches!(node.state, NodeState::Splitting));
     }
 }

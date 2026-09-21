@@ -18,11 +18,11 @@ impl Plugin for UniversePlugin {
             )
             .add_system(
                 CoreSchedule::Update,
-                systems::planet_octree_update::planet_octree_update,
+                systems::planet_octree_update::drain_completed_requests,
             )
             .add_system(
                 CoreSchedule::Update,
-                systems::planet_octree_update::drain_completed_requests,
+                systems::planet_octree_update::planet_octree_update,
             );
     }
 }

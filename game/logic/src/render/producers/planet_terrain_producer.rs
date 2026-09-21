@@ -575,6 +575,7 @@ impl PlanetTerrainProducer {
         &mut self,
         api: &mut dyn RendererAPI,
         planet: Entity,
+        replacement_id: Option<u64>,
         remove_all: bool,
         remove: Vec<NodeKey>,
         insert: Vec<PendingTerrainChunk>,
@@ -640,7 +641,12 @@ impl PlanetTerrainProducer {
         }
 
         self.batches_dirty = true;
-        self.emit_event(PlanetTerrainEvent::ReplacementApplied { planet });
+        let rendered_keys = state.chunks.keys().copied().collect();
+        self.emit_event(PlanetTerrainEvent::ReplacementApplied {
+            planet,
+            replacement_id,
+            rendered_keys,
+        });
     }
 
     fn remove_planet(&mut self, api: &mut dyn RendererAPI, planet: Entity) {
@@ -771,12 +777,13 @@ impl RenderProducer for PlanetTerrainProducer {
                 | PlanetTerrainCommand::UpdatePlanetFrame { .. } => {}
                 PlanetTerrainCommand::ReplaceChunks {
                     planet,
+                    replacement_id,
                     remove_all,
                     remove,
                     insert,
                 } => {
                     engine::profile_scope!("terrain.render.prepare_frame.replace_chunks");
-                    self.replace_chunks(ctx.api, planet, remove_all, remove, insert)
+                    self.replace_chunks(ctx.api, planet, replacement_id, remove_all, remove, insert)
                 }
                 PlanetTerrainCommand::RemovePlanet { planet } => {
                     engine::profile_scope!("terrain.render.prepare_frame.remove_planet");
@@ -842,6 +849,7 @@ pub(crate) enum PlanetTerrainCommand {
     },
     ReplaceChunks {
         planet: Entity,
+        replacement_id: Option<u64>,
         remove_all: bool,
         remove: Vec<NodeKey>,
         insert: Vec<PendingTerrainChunk>,
@@ -874,8 +882,15 @@ impl PlanetTerrainRenderQueue {
 }
 
 pub(crate) enum PlanetTerrainEvent {
-    ReplacementApplied { planet: Entity },
-    ReplacementFailed { planet: Entity, reason: String },
+    ReplacementApplied {
+        planet: Entity,
+        replacement_id: Option<u64>,
+        rendered_keys: Vec<NodeKey>,
+    },
+    ReplacementFailed {
+        planet: Entity,
+        reason: String,
+    },
 }
 
 #[derive(plaxel_reflect::Reflect)]
