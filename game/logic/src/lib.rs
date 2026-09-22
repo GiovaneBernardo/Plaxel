@@ -247,7 +247,7 @@ fn initialize_game_state(
     world.insert(
         camera_entity,
         CameraComponent {
-            speed: 1.0,
+            speed: 35000.0,
             fov: 75.0,
             far_plane: 15000.0,
             near_plane: 0.001,

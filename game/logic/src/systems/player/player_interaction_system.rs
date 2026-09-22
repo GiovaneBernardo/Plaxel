@@ -10,6 +10,7 @@ use engine::core::components::renderer::MeshRendererComponent;
 use engine::ecs::entity::Entity;
 use engine::ecs::query::Query;
 use engine::ecs::resource::Res;
+use engine::ecs::world::World;
 use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::DefaultMeshes;
@@ -19,7 +20,7 @@ use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use game_types::terrain::PlanetTerrainConfig;
 use rand::Rng;
 
-use engine::math::{Quat, Vec3, vec3};
+use engine::math::{DVec3, Quat, UVec2, Vec2, Vec3, vec3};
 
 use engine::core::input::{InputState, KeyCode, MouseButton};
 use engine::ecs::commands::{Commands, PhysicalSphereParams};
@@ -468,8 +469,7 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
         drop(camera_component);
 
         if sprint {
-            let distance = camera_world_position.length() as f32;
-            final_speed *= distance.sqrt() * 0.1;
+            final_speed *= 5.0;
         }
 
         if right_mouse_pressed
@@ -525,312 +525,28 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
                 .world_position = camera_world_position;
         }
 
-        let terrain_ok = run_terrain_edit_phase(|| {
-            // Deform with left click
-            if left_mouse_pressed && is_mouse_over_game_view {
-                if let Some((mouse_position_x, mouse_position_y)) = mouse_position {
-                    let current_camera = engine::camera::Camera {
-                        position: engine::math::vec3(
-                            camera_transform.position.x,
-                            camera_transform.position.y,
-                            camera_transform.position.z,
-                        ),
-                        orientation: camera_transform.rotation,
-                        aspect: camera_aspect,
-                        fovy: camera_field_of_view,
-                        znear: camera_near_plane,
-                        zfar: camera_far_plane,
-                    };
-
-                    if let Some((ray_origin, ray_direction)) = ray_from_mouse_position(
-                        &current_camera,
-                        mouse_position_x,
-                        mouse_position_y,
-                        viewport_size.x as f32,
-                        viewport_size.y as f32,
-                    ) {
-                        let mut closest_hit = None;
-                        let mut query = Query::<(
-                            &Planet,
-                            &PlanetTerrainEdits,
-                            &Arc<PlanetTerrainConfig>,
-                        )>::new(world);
-
-                        query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
-                            let Some((planet_entry_distance, planet_exit_distance)) =
-                                octree::ray_intersects(
-                                    &planet.octree_root,
-                                    ray_origin,
-                                    ray_direction,
-                                )
-                            else {
-                                return;
-                            };
-
-                            let terrain = PlanetTerrainSamplerContext {
-                                config: terrain_config.as_ref(),
-                                edits: terrain_edits,
-                                planet_position: planet.position,
-                            };
-                            let Some((surface_distance, surface_position)) = trace_terrain_surface(
-                                ray_origin,
-                                ray_direction,
-                                planet_entry_distance,
-                                planet_exit_distance,
-                                &terrain,
-                            ) else {
-                                return;
-                            };
-
-                            if closest_hit
-                                .is_none_or(|(_, hit_distance, _)| surface_distance < hit_distance)
-                            {
-                                closest_hit = Some((entity, surface_distance, surface_position));
-                            }
-                        });
-
-                        drop(query);
-
-                        if let Some((hit_entity, _hit_distance, hit_pos)) = closest_hit {
-                            let hit_planet = world.get::<Planet>(hit_entity).unwrap();
-
-                            let hit_world = hit_pos;
-                            let planet_position = hit_planet.position;
-                            let hit_local = hit_world - planet_position;
-
-                            let brick_size = 32.0;
-                            let level = 0;
-                            let brush_strength = if inverse_deformation { -32.0 } else { 32.0 };
-                            let min_brick = TerrainBrickKey {
-                                x: ((hit_local.x - brush_radius) / brick_size).floor() as i32,
-                                y: ((hit_local.y - brush_radius) / brick_size).floor() as i32,
-                                z: ((hit_local.z - brush_radius) / brick_size).floor() as i32,
-                                level,
-                            };
-                            let max_brick = TerrainBrickKey {
-                                x: ((hit_local.x + brush_radius) / brick_size).floor() as i32,
-                                y: ((hit_local.y + brush_radius) / brick_size).floor() as i32,
-                                z: ((hit_local.z + brush_radius) / brick_size).floor() as i32,
-                                level,
-                            };
-                            drop(hit_planet);
-
-                            if world.get::<PlanetTerrainEdits>(hit_entity).is_none() {
-                                engine::game_warn!("Planet terrain edits not found!");
-                                return false;
-                            }
-
-                            let sample_count = TERRAIN_EDIT_SAMPLE_COUNT;
-                            let mut terrain_edits =
-                                world.get_mut::<PlanetTerrainEdits>(hit_entity).unwrap();
-                            let PlanetTerrainEdits {
-                                modified_chunks,
-                                modified_ranges,
-                            } = &mut *terrain_edits;
-
-                            for brick_x in min_brick.x..=max_brick.x {
-                                for brick_y in min_brick.y..=max_brick.y {
-                                    for brick_z in min_brick.z..=max_brick.z {
-                                        let key = TerrainBrickKey {
-                                            x: brick_x,
-                                            y: brick_y,
-                                            z: brick_z,
-                                            level,
-                                        };
-                                        let brick =
-                                            modified_chunks.entry(key).or_insert_with(|| {
-                                                Arc::new(vec![
-                                                    vec![
-                                                        vec![0.0; sample_count];
-                                                        sample_count
-                                                    ];
-                                                    sample_count
-                                                ])
-                                            });
-                                        if brick.len() != sample_count
-                                            || brick.iter().any(|plane| {
-                                                plane.len() != sample_count
-                                                    || plane
-                                                        .iter()
-                                                        .any(|row| row.len() != sample_count)
-                                            })
-                                        {
-                                            *brick = Arc::new(resample_terrain_edit_brick(
-                                                brick.as_ref(),
-                                                sample_count,
-                                            ));
-                                        }
-                                        let brick = Arc::make_mut(brick);
-
-                                        let brick_min = vec3(
-                                            key.x as f32 * brick_size,
-                                            key.y as f32 * brick_size,
-                                            key.z as f32 * brick_size,
-                                        );
-                                        let sample_spacing =
-                                            brick_size / TERRAIN_EDIT_CELL_COUNT as f32;
-                                        let mut range_min = f32::INFINITY;
-                                        let mut range_max = f32::NEG_INFINITY;
-
-                                        for sample_x in 0..sample_count {
-                                            for sample_y in 0..sample_count {
-                                                for sample_z in 0..sample_count {
-                                                    let sample_position = brick_min
-                                                        + vec3(
-                                                            sample_x as f32 * sample_spacing,
-                                                            sample_y as f32 * sample_spacing,
-                                                            sample_z as f32 * sample_spacing,
-                                                        );
-                                                    let distance_from_hit =
-                                                        (sample_position - hit_local).length();
-
-                                                    if distance_from_hit <= brush_radius {
-                                                        let normalized_distance =
-                                                            distance_from_hit / brush_radius;
-                                                        let brush_influence =
-                                                            1.0 - normalized_distance;
-                                                        let smooth_influence = brush_influence
-                                                            * brush_influence
-                                                            * (2.2 - 2.0 * brush_influence);
-
-                                                        brick[sample_x][sample_y][sample_z] +=
-                                                            brush_strength * smooth_influence;
-                                                    }
-
-                                                    let value = brick[sample_x][sample_y][sample_z];
-                                                    range_min = range_min.min(value);
-                                                    range_max = range_max.max(value);
-                                                }
-                                            }
-                                        }
-
-                                        modified_ranges
-                                            .insert(key, DensityRange::new(range_min, range_max));
-                                    }
-                                }
-                            }
-                            drop(terrain_edits);
-
-                            // Refresh the hierarchy after the edit data changes.
-                            // Use whole edited-brick bounds so interpolation and
-                            // leaves touching a brick boundary are included.
-                            let dirty_bounds_min = planet_position
-                                + vec3(
-                                    min_brick.x as f32 * brick_size,
-                                    min_brick.y as f32 * brick_size,
-                                    min_brick.z as f32 * brick_size,
-                                );
-                            let dirty_bounds_max = planet_position
-                                + vec3(
-                                    (max_brick.x + 1) as f32 * brick_size,
-                                    (max_brick.y + 1) as f32 * brick_size,
-                                    (max_brick.z + 1) as f32 * brick_size,
-                                );
-                            let mut dirty_mesh_requests = Vec::new();
-                            let mut query = Query::<(
-                                &mut Planet,
-                                &PlanetTerrainEdits,
-                                &Arc<PlanetTerrainConfig>,
-                            )>::new(world);
-                            query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
-                                if entity != hit_entity {
-                                    return;
-                                }
-
-                                octree::refresh_density_ranges_in_bounds(
-                                    &mut planet.octree_root,
-                                    dirty_bounds_min,
-                                    dirty_bounds_max,
-                                    planet.position,
-                                    terrain_config.as_ref(),
-                                    terrain_edits,
-                                );
-                                collect_dirty_mesh_requests(
-                                    &planet.octree_root,
-                                    hit_entity,
-                                    planet.position,
-                                    dirty_bounds_min,
-                                    dirty_bounds_max,
-                                    &mut dirty_mesh_requests,
-                                );
-                                // A transition polygon contains dual vertices from both
-                                // sides of an LOD boundary. If deformation changes either
-                                // side, remesh the opposite-resolution leaves as well.
-                                let dirty_snapshot = dirty_mesh_requests.clone();
-                                let mut scheduled: HashSet<(i32, i32, i32, i32)> =
-                                    dirty_mesh_requests
-                                        .iter()
-                                        .map(|request| {
-                                            (
-                                                request.node_min_corner.x as i32,
-                                                request.node_min_corner.y as i32,
-                                                request.node_min_corner.z as i32,
-                                                request.node_size as i32,
-                                            )
-                                        })
-                                        .collect();
-                                for dirty in dirty_snapshot {
-                                    let mut neighbors = Vec::new();
-                                    octree::collect_face_neighbor_leaves(
-                                        &planet.octree_root,
-                                        dirty.node_min_corner,
-                                        dirty.node_size,
-                                        &mut neighbors,
-                                    );
-                                    for neighbor in neighbors {
-                                        let key = (
-                                            neighbor.min.x as i32,
-                                            neighbor.min.y as i32,
-                                            neighbor.min.z as i32,
-                                            neighbor.size as i32,
-                                        );
-                                        if neighbor.size == dirty.node_size
-                                            || !neighbor.may_contain_surface
-                                            || !scheduled.insert(key)
-                                        {
-                                            continue;
-                                        }
-                                        dirty_mesh_requests.push(PlanetMeshRequest {
-                                            planet_entity: hit_entity,
-                                            node_key: neighbor.key,
-                                            planet_position: planet.position,
-                                            node_min_corner: neighbor.min,
-                                            node_size: neighbor.size,
-                                            face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
-                                        });
-                                    }
-                                }
-                                for request in &mut dirty_mesh_requests {
-                                    octree::annotate_mesh_request(&planet.octree_root, request);
-                                }
-                            });
-                            drop(query);
-
-                            dirty_mesh_requests.sort_unstable_by(|a, b| {
-                                let a_center = a.node_min_corner
-                                    + vec3(a.node_size, a.node_size, a.node_size) * 0.5;
-                                let b_center = b.node_min_corner
-                                    + vec3(b.node_size, b.node_size, b.node_size) * 0.5;
-                                (a_center - hit_world)
-                                    .length_squared()
-                                    .total_cmp(&(b_center - hit_world).length_squared())
-                            });
-
-                            commands.push(move |ctx| {
-                                for request in dirty_mesh_requests {
-                                    // TODO: REENABLE DENSITY FIELD EDITS
-                                    //submit_requested_mesh_urgent(ctx, request);
-                                }
-                            });
-                        }
-                    }
-                }
+        drop(camera_transform);
+        if left_mouse_pressed && is_mouse_over_game_view {
+            let terrain_ok = run_terrain_edit_phase(|| {
+                return deform(
+                    mouse_position,
+                    camera_entity,
+                    camera_world_position,
+                    camera_aspect,
+                    camera_near_plane,
+                    camera_far_plane,
+                    camera_field_of_view,
+                    viewport_size,
+                    brush_radius,
+                    world,
+                    inverse_deformation,
+                    commands,
+                );
+            });
+            if !terrain_ok {
+                return;
             }
-            true
-        });
-        if !terrain_ok {
-            return;
-        }
+        };
 
         // Interact (spawn spheres for now)
         if interact {
@@ -883,9 +599,9 @@ fn player_walking_system_body(ctx: &mut SystemContext, commands: &mut Commands) 
     }
 
     if open_menu {
-        commands.push(|ctx| {
-            ctx.world.get_resource_mut::<GameModeState>().unwrap().mode = GameMode::Menu;
-        });
+        //commands.push(|ctx| {
+        //    ctx.world.get_resource_mut::<GameModeState>().unwrap().mode = GameMode::Menu;
+        //});
     }
 }
 
@@ -962,4 +678,304 @@ fn ensure_build_block_assets(
     let material = materials.get_mut(material_handle)?;
     material.set_vertex_layouts(vec![vertex_layout, TransformInstance::layout()]);
     Some((material.uuid, globals.renderer.default_meshes().cube))
+}
+
+pub fn deform(
+    mouse_position: Option<(f32, f32)>,
+    //camera_transform: &TransformComponent,
+    camera_entity: Entity,
+    camera_position: DVec3,
+    camera_aspect: f32,
+    camera_near_plane: f32,
+    camera_far_plane: f32,
+    camera_field_of_view: f32,
+    viewport_size: UVec2,
+    brush_radius: f32,
+    world: &mut World,
+    inverse_deformation: bool,
+    commands: &mut Commands,
+) -> bool {
+    // Deform with left click
+
+    let Some(mut camera_transform) = world.get_mut::<TransformComponent>(camera_entity) else {
+        return false;
+    };
+
+    if let Some((mouse_position_x, mouse_position_y)) = mouse_position {
+        let current_camera = engine::camera::Camera {
+            position: engine::math::vec3(
+                camera_transform.position.x,
+                camera_transform.position.y,
+                camera_transform.position.z,
+            ),
+            orientation: camera_transform.rotation,
+            aspect: camera_aspect,
+            fovy: camera_field_of_view,
+            znear: camera_near_plane,
+            zfar: camera_far_plane,
+        };
+
+        if let Some((ray_origin, ray_direction)) = ray_from_mouse_position(
+            &current_camera,
+            mouse_position_x,
+            mouse_position_y,
+            viewport_size.x as f32,
+            viewport_size.y as f32,
+        ) {
+            let mut closest_hit = None;
+            let mut query =
+                Query::<(&Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>::new(world);
+
+            query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
+                let Some((planet_entry_distance, planet_exit_distance)) =
+                    octree::ray_intersects(&planet.octree_root, ray_origin, ray_direction)
+                else {
+                    return;
+                };
+
+                let terrain = PlanetTerrainSamplerContext {
+                    config: terrain_config.as_ref(),
+                    edits: terrain_edits,
+                    planet_position: planet.position,
+                };
+                let Some((surface_distance, surface_position)) = trace_terrain_surface(
+                    ray_origin,
+                    ray_direction,
+                    planet_entry_distance,
+                    planet_exit_distance,
+                    &terrain,
+                ) else {
+                    return;
+                };
+
+                if closest_hit.is_none_or(|(_, hit_distance, _)| surface_distance < hit_distance) {
+                    closest_hit = Some((entity, surface_distance, surface_position));
+                }
+            });
+
+            drop(query);
+
+            if let Some((hit_entity, _hit_distance, hit_pos)) = closest_hit {
+                let hit_planet = world.get::<Planet>(hit_entity).unwrap();
+
+                let hit_world = hit_pos;
+                let planet_position = hit_planet.position;
+                let hit_local = hit_world - planet_position;
+
+                let brick_size = 32.0;
+                let level = 0;
+                let brush_strength = if inverse_deformation { -32.0 } else { 32.0 };
+                let min_brick = TerrainBrickKey {
+                    x: ((hit_local.x - brush_radius) / brick_size).floor() as i32,
+                    y: ((hit_local.y - brush_radius) / brick_size).floor() as i32,
+                    z: ((hit_local.z - brush_radius) / brick_size).floor() as i32,
+                    level,
+                };
+                let max_brick = TerrainBrickKey {
+                    x: ((hit_local.x + brush_radius) / brick_size).floor() as i32,
+                    y: ((hit_local.y + brush_radius) / brick_size).floor() as i32,
+                    z: ((hit_local.z + brush_radius) / brick_size).floor() as i32,
+                    level,
+                };
+                drop(hit_planet);
+
+                if world.get::<PlanetTerrainEdits>(hit_entity).is_none() {
+                    engine::game_warn!("Planet terrain edits not found!");
+                    return false;
+                }
+
+                let sample_count = TERRAIN_EDIT_SAMPLE_COUNT;
+                let mut terrain_edits = world.get_mut::<PlanetTerrainEdits>(hit_entity).unwrap();
+                let PlanetTerrainEdits {
+                    modified_chunks,
+                    modified_ranges,
+                } = &mut *terrain_edits;
+
+                for brick_x in min_brick.x..=max_brick.x {
+                    for brick_y in min_brick.y..=max_brick.y {
+                        for brick_z in min_brick.z..=max_brick.z {
+                            let key = TerrainBrickKey {
+                                x: brick_x,
+                                y: brick_y,
+                                z: brick_z,
+                                level,
+                            };
+                            let brick = modified_chunks.entry(key).or_insert_with(|| {
+                                Arc::new(vec![
+                                    vec![vec![0.0; sample_count]; sample_count];
+                                    sample_count
+                                ])
+                            });
+                            if brick.len() != sample_count
+                                || brick.iter().any(|plane| {
+                                    plane.len() != sample_count
+                                        || plane.iter().any(|row| row.len() != sample_count)
+                                })
+                            {
+                                *brick = Arc::new(resample_terrain_edit_brick(
+                                    brick.as_ref(),
+                                    sample_count,
+                                ));
+                            }
+                            let brick = Arc::make_mut(brick);
+
+                            let brick_min = vec3(
+                                key.x as f32 * brick_size,
+                                key.y as f32 * brick_size,
+                                key.z as f32 * brick_size,
+                            );
+                            let sample_spacing = brick_size / TERRAIN_EDIT_CELL_COUNT as f32;
+                            let mut range_min = f32::INFINITY;
+                            let mut range_max = f32::NEG_INFINITY;
+
+                            for sample_x in 0..sample_count {
+                                for sample_y in 0..sample_count {
+                                    for sample_z in 0..sample_count {
+                                        let sample_position = brick_min
+                                            + vec3(
+                                                sample_x as f32 * sample_spacing,
+                                                sample_y as f32 * sample_spacing,
+                                                sample_z as f32 * sample_spacing,
+                                            );
+                                        let distance_from_hit =
+                                            (sample_position - hit_local).length();
+
+                                        if distance_from_hit <= brush_radius {
+                                            let normalized_distance =
+                                                distance_from_hit / brush_radius;
+                                            let brush_influence = 1.0 - normalized_distance;
+                                            let smooth_influence = brush_influence
+                                                * brush_influence
+                                                * (2.2 - 2.0 * brush_influence);
+
+                                            brick[sample_x][sample_y][sample_z] +=
+                                                brush_strength * smooth_influence;
+                                        }
+
+                                        let value = brick[sample_x][sample_y][sample_z];
+                                        range_min = range_min.min(value);
+                                        range_max = range_max.max(value);
+                                    }
+                                }
+                            }
+
+                            modified_ranges.insert(key, DensityRange::new(range_min, range_max));
+                        }
+                    }
+                }
+                drop(terrain_edits);
+
+                // Refresh the hierarchy after the edit data changes.
+                // Use whole edited-brick bounds so interpolation and
+                // leaves touching a brick boundary are included.
+                let dirty_bounds_min = planet_position
+                    + vec3(
+                        min_brick.x as f32 * brick_size,
+                        min_brick.y as f32 * brick_size,
+                        min_brick.z as f32 * brick_size,
+                    );
+                let dirty_bounds_max = planet_position
+                    + vec3(
+                        (max_brick.x + 1) as f32 * brick_size,
+                        (max_brick.y + 1) as f32 * brick_size,
+                        (max_brick.z + 1) as f32 * brick_size,
+                    );
+                let mut dirty_mesh_requests = Vec::new();
+                let mut query =
+                    Query::<(&mut Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>::new(
+                        world,
+                    );
+                query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
+                    if entity != hit_entity {
+                        return;
+                    }
+
+                    octree::refresh_density_ranges_in_bounds(
+                        &mut planet.octree_root,
+                        dirty_bounds_min,
+                        dirty_bounds_max,
+                        planet.position,
+                        terrain_config.as_ref(),
+                        terrain_edits,
+                    );
+                    collect_dirty_mesh_requests(
+                        &planet.octree_root,
+                        hit_entity,
+                        planet.position,
+                        dirty_bounds_min,
+                        dirty_bounds_max,
+                        &mut dirty_mesh_requests,
+                    );
+                    // A transition polygon contains dual vertices from both
+                    // sides of an LOD boundary. If deformation changes either
+                    // side, remesh the opposite-resolution leaves as well.
+                    let dirty_snapshot = dirty_mesh_requests.clone();
+                    let mut scheduled: HashSet<(i32, i32, i32, i32)> = dirty_mesh_requests
+                        .iter()
+                        .map(|request| {
+                            (
+                                request.node_min_corner.x as i32,
+                                request.node_min_corner.y as i32,
+                                request.node_min_corner.z as i32,
+                                request.node_size as i32,
+                            )
+                        })
+                        .collect();
+                    for dirty in dirty_snapshot {
+                        let mut neighbors = Vec::new();
+                        octree::collect_face_neighbor_leaves(
+                            &planet.octree_root,
+                            dirty.node_min_corner,
+                            dirty.node_size,
+                            &mut neighbors,
+                        );
+                        for neighbor in neighbors {
+                            let key = (
+                                neighbor.min.x as i32,
+                                neighbor.min.y as i32,
+                                neighbor.min.z as i32,
+                                neighbor.size as i32,
+                            );
+                            if neighbor.size == dirty.node_size
+                                || !neighbor.may_contain_surface
+                                || !scheduled.insert(key)
+                            {
+                                continue;
+                            }
+                            dirty_mesh_requests.push(PlanetMeshRequest {
+                                planet_entity: hit_entity,
+                                node_key: neighbor.key,
+                                planet_position: planet.position,
+                                node_min_corner: neighbor.min,
+                                node_size: neighbor.size,
+                                face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+                            });
+                        }
+                    }
+                    for request in &mut dirty_mesh_requests {
+                        octree::annotate_mesh_request(&planet.octree_root, request);
+                    }
+                });
+                drop(query);
+
+                dirty_mesh_requests.sort_unstable_by(|a, b| {
+                    let a_center =
+                        a.node_min_corner + vec3(a.node_size, a.node_size, a.node_size) * 0.5;
+                    let b_center =
+                        b.node_min_corner + vec3(b.node_size, b.node_size, b.node_size) * 0.5;
+                    (a_center - hit_world)
+                        .length_squared()
+                        .total_cmp(&(b_center - hit_world).length_squared())
+                });
+
+                commands.push(move |ctx| {
+                    for request in dirty_mesh_requests {
+                        // TODO: REENABLE DENSITY FIELD EDITS
+                        //submit_requested_mesh_urgent(ctx, request);
+                    }
+                });
+            }
+        }
+    }
+    true
 }
