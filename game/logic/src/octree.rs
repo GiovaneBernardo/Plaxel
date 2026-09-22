@@ -654,7 +654,80 @@ pub fn update(
         changes,
         terrain_edits,
         true,
+        &[],
+        true,
     );
+}
+
+// The runtime may plan disjoint batches while previous batches await GPU acknowledgment.
+pub fn update_reserved(
+    node: &mut OctreeNode,
+    camera_pos: Vec3,
+    planet_entity: Entity,
+    planet_position: Vec3,
+    terrain_config: &PlanetTerrainConfig,
+    lod_strength: f32,
+    changes: &mut Vec<OctreeChanges>,
+    terrain_edits: &PlanetTerrainEdits,
+    reserved: &[Aabb],
+    repair_balance: bool,
+) {
+    update_node(
+        node,
+        camera_pos,
+        planet_entity,
+        planet_position,
+        terrain_config,
+        lod_strength,
+        changes,
+        terrain_edits,
+        true,
+        reserved,
+        repair_balance,
+    );
+}
+
+fn touches(a: &Aabb, b: &Aabb) -> bool {
+    a.min.cmple(b.max).all() && b.min.cmple(a.max).all()
+}
+
+fn transition_footprint(root: &OctreeNode, node: &OctreeNode) -> Vec<Aabb> {
+    let mut neighbors = Vec::new();
+    collect_face_neighbor_leaves(root, node.min, node.size, &mut neighbors);
+    std::iter::once(node_bounds(node))
+        .chain(neighbors.into_iter().map(node_bounds))
+        .collect()
+}
+
+pub fn replacement_footprint(root: &OctreeNode, change: &OctreeChanges) -> Vec<Aabb> {
+    let OctreeChanges::ReplaceMeshes {
+        transition_key,
+        additional_transitions,
+        requests,
+        ..
+    } = change
+    else {
+        return Vec::new();
+    };
+    let mut regions = Vec::new();
+    for key in
+        std::iter::once(transition_key).chain(additional_transitions.iter().map(|(key, _)| key))
+    {
+        let size = root.size / 2.0_f32.powi(i32::from(key.level - root.key.level));
+        let min = vec3(key.x as f32, key.y as f32, key.z as f32);
+        regions.push(Aabb {
+            min,
+            max: min + Vec3::splat(size),
+        });
+        let mut neighbors = Vec::new();
+        collect_face_neighbor_leaves(root, min, size, &mut neighbors);
+        regions.extend(neighbors.into_iter().map(node_bounds));
+    }
+    regions.extend(requests.iter().map(|r| Aabb {
+        min: r.node_min_corner,
+        max: r.node_min_corner + Vec3::splat(r.node_size),
+    }));
+    regions
 }
 
 fn has_pending_merge(node: &OctreeNode) -> bool {
@@ -705,6 +778,7 @@ fn rollback_pending_splits(node: &mut OctreeNode) {
     }
 }
 
+const SPLITS_PER_REPLACEMENT: usize = 4;
 fn update_node(
     node: &mut OctreeNode,
     camera_pos: Vec3,
@@ -715,28 +789,117 @@ fn update_node(
     changes: &mut Vec<OctreeChanges>,
     terrain_edits: &PlanetTerrainEdits,
     is_root_node: bool,
+    reserved: &[Aabb],
+    repair_balance: bool,
 ) {
-    let Some((key, split)) = next_lod_change(node, camera_pos, lod_strength) else {
+    let Some((key, split)) =
+        next_lod_change_reserved(node, camera_pos, lod_strength, reserved, repair_balance)
+    else {
         return;
     };
 
-    let target = find_node_mut(node, key).expect("selected node exists");
-
     if split {
+        // Capture old leaves before splitting so their rendered meshes get removed.
+        let original_leaves = {
+            let mut leaves = Vec::new();
+            collect_leaf_nodes(node, &mut leaves);
+
+            leaves
+                .into_iter()
+                .map(|leaf| leaf.key)
+                .collect::<std::collections::HashSet<_>>()
+        };
+
+        let target = find_node_mut(node, key).expect("selected node exists");
+        let refinement_bounds = node_bounds(target);
+        let mut splits = Vec::new();
+
         split_node(
             target,
-            changes,
+            &mut splits,
             planet_entity,
             planet_position,
             terrain_config,
             terrain_edits,
         );
+
+        for _ in 1..SPLITS_PER_REPLACEMENT {
+            let Some((key, true)) =
+                next_lod_change_reserved(node, camera_pos, lod_strength, reserved, repair_balance)
+            else {
+                break;
+            };
+
+            let target = find_node_mut(node, key).unwrap();
+            let bounds = node_bounds(target);
+            // Do not make the nearby region wait for unrelated terrain in this atomic batch.
+            if !bounds.min.cmpge(refinement_bounds.min).all()
+                || !bounds.max.cmple(refinement_bounds.max).all()
+            {
+                break;
+            }
+
+            split_node(
+                target,
+                &mut splits,
+                planet_entity,
+                planet_position,
+                terrain_config,
+                terrain_edits,
+            );
+        }
+
+        let mut removals = Vec::new();
+        let mut requests = Vec::new();
+        let mut transitions = Vec::new();
+
+        for change in splits {
+            let OctreeChanges::ReplaceMeshes {
+                transition_key,
+                keys_to_remove,
+                requests: new_requests,
+                ..
+            } = change
+            else {
+                unreachable!();
+            };
+
+            removals.extend(keys_to_remove);
+            requests.extend(new_requests);
+            transitions.push((transition_key, NodeState::Internal));
+        }
+
+        requests.retain(|request| {
+            find_node_mut(node, request.node_key)
+                .is_some_and(|node| node.children.is_none() && node.may_contain_surface)
+        });
+
+        let mut seen = std::collections::HashSet::new();
+        requests.retain(|request| seen.insert(request.node_key));
+
+        let mut seen = std::collections::HashSet::new();
+
+        removals.retain(|key| original_leaves.contains(key) && seen.insert(*key));
+
+        let (transition_key, completed_state) = transitions.remove(0);
+
+        changes.push(OctreeChanges::ReplaceMeshes {
+            planet_entity,
+            transition_key,
+            completed_state,
+            additional_transitions: transitions,
+            keys_to_remove: removals,
+            requests,
+        });
     } else {
+        let target = find_node_mut(node, key).expect("selected node exists");
         let mut merges = Vec::new();
         merge_node(target, &mut merges, planet_entity, planet_position);
         // Plan against the evolving topology, but expose all merges in one GPU swap.
         for _ in 1..8 {
-            let Some((key, false)) = next_lod_change(node, camera_pos, lod_strength) else {
+            let Some((key, false)) =
+                next_lod_change_reserved(node, camera_pos, lod_strength, reserved, repair_balance)
+            else {
                 break;
             };
             merge_node(
@@ -1179,6 +1342,20 @@ pub fn traverse_octree(
     }
 }
 
+/// Apply only acknowledged proofs to live leaves. Edits use the normal range refresh.
+pub fn apply_uniform_proofs(root: &mut OctreeNode, keys: &[NodeKey], edits: &PlanetTerrainEdits) {
+    if !edits.modified_chunks.is_empty() {
+        return;
+    }
+    for &key in keys {
+        if let Some(node) = find_node_mut(root, key) {
+            if node.children.is_none() {
+                node.may_contain_surface = false;
+            }
+        }
+    }
+}
+
 pub fn find_node_mut(node: &mut OctreeNode, key: NodeKey) -> Option<&mut OctreeNode> {
     if node.key == key {
         return Some(node);
@@ -1190,6 +1367,22 @@ pub fn find_node_mut(node: &mut OctreeNode, key: NodeKey) -> Option<&mut OctreeN
 }
 
 pub fn next_lod_change(root: &OctreeNode, camera: Vec3, strength: f32) -> Option<(NodeKey, bool)> {
+    next_lod_change_reserved(root, camera, strength, &[], true)
+}
+
+fn next_lod_change_reserved(
+    root: &OctreeNode,
+    camera: Vec3,
+    strength: f32,
+    reserved: &[Aabb],
+    repair_balance: bool,
+) -> Option<(NodeKey, bool)> {
+    let available = |node: &OctreeNode| {
+        reserved.is_empty()
+            || !transition_footprint(root, node)
+                .iter()
+                .any(|a| reserved.iter().any(|b| touches(a, b)))
+    };
     engine::profile_scope!("terrain.octree.select_lod");
     fn gather<'a>(
         node: &'a OctreeNode,
@@ -1231,12 +1424,20 @@ pub fn next_lod_change(root: &OctreeNode, camera: Vec3, strength: f32) -> Option
             let mut neighbors = Vec::new();
             collect_face_neighbor_leaves(root, node.min, node.size, &mut neighbors);
             // A merged leaf must not touch leaves more than one level finer.
-            if neighbors.iter().all(|n| n.size >= node.size * 0.5) {
+            if neighbors.iter().all(|n| n.size >= node.size * 0.5) && available(node) {
                 return Some((node.key, false));
             }
         } else {
-            return Some((balanced_split_target(root, node).key, true));
+            let target = balanced_split_target(root, node);
+            if available(target) {
+                return Some((target.key, true));
+            }
         }
+    }
+    // Once validated, local split/merge checks preserve balance. Camera motion
+    // and density edits do not themselves change the topology.
+    if !repair_balance {
+        return None;
     }
     // Repair legacy gaps only after useful camera-driven work. Previously this
     // scanned every face before every merge and forced refinement while retreating.
@@ -1247,7 +1448,10 @@ pub fn next_lod_change(root: &OctreeNode, camera: Vec3, strength: f32) -> Option
         let mut neighbors = Vec::new();
         collect_face_neighbor_leaves(root, leaf.min, leaf.size, &mut neighbors);
         if let Some(coarse) = neighbors.into_iter().find(|n| n.size > leaf.size * 2.0) {
-            return Some((balanced_split_target(root, coarse).key, true));
+            let target = balanced_split_target(root, coarse);
+            if available(target) {
+                return Some((target.key, true));
+            }
         }
     }
     None
@@ -1407,6 +1611,240 @@ mod tests {
             ))
         }));
         node.state = NodeState::Internal;
+    }
+
+    #[test]
+    fn uniform_feedback_stops_refinement_until_an_edit_refreshes_the_leaf() {
+        let mut root = test_leaf(Vec3::new(200.0, 0.0, 0.0), 64.0, 0);
+        let key = root.key;
+        let mut edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        apply_uniform_proofs(&mut root, &[key], &edits);
+        assert!(!should_split(&root, root.min, 32.0, 1.0));
+        let mut config =
+            crate::systems::universe::planet_system::earth_like_planet_terrain_config();
+        config.radius = 100.0;
+        config.field_graph.as_mut().unwrap().layers.clear();
+        let brick = TerrainBrickKey {
+            x: 6,
+            y: 0,
+            z: 0,
+            level: 0,
+        };
+        edits.modified_chunks.insert(
+            brick,
+            std::sync::Arc::new(vec![vec![vec![-200.0; 2]; 2]; 2]),
+        );
+        edits
+            .modified_ranges
+            .insert(brick, DensityRange::new(-200.0, 0.0));
+        refresh_density_ranges_in_bounds(
+            &mut root,
+            Vec3::new(192.0, 0.0, 0.0),
+            Vec3::new(224.0, 32.0, 32.0),
+            Vec3::ZERO,
+            &config,
+            &edits,
+        );
+        assert!(root.may_contain_surface);
+        apply_uniform_proofs(&mut root, &[key], &edits);
+        assert!(
+            root.may_contain_surface,
+            "an old worker proof cannot override edits"
+        );
+        assert!(should_split(&root, root.min, 32.0, 1.0));
+    }
+
+    #[test]
+    fn independent_replacements_preserve_balance_in_either_completion_order() {
+        fn run(reverse: bool) -> std::collections::HashSet<NodeKey> {
+            let mut root = test_leaf(Vec3::splat(-512.0), 1024.0, 0);
+            test_split(&mut root);
+            for child in root.children.as_mut().unwrap() {
+                test_split(child);
+                for child in child.children.as_mut().unwrap() {
+                    test_split(child);
+                }
+            }
+            let mut config = default_planet_terrain_config();
+            config.radius = 400.0;
+            let edits = PlanetTerrainEdits {
+                modified_chunks: HashMap::new(),
+                modified_ranges: HashMap::new(),
+            };
+            let mut pending: Vec<(OctreeChanges, Vec<Aabb>)> = Vec::new();
+            let mut leaves = Vec::new();
+            collect_leaf_nodes(&root, &mut leaves);
+            let mut rendered: std::collections::HashSet<_> = leaves.iter().map(|n| n.key).collect();
+            let mut concurrent = false;
+            for _ in 0..300 {
+                let reserved: Vec<_> = pending
+                    .iter()
+                    .flat_map(|(_, regions)| regions.iter().copied())
+                    .collect();
+                if pending.len() < 4 {
+                    let mut changes = Vec::new();
+                    update_reserved(
+                        &mut root,
+                        Vec3::new(400.0, 0.0, 0.0),
+                        Entity::PLACEHOLDER,
+                        Vec3::ZERO,
+                        &config,
+                        0.5,
+                        &mut changes,
+                        &edits,
+                        &reserved,
+                        true,
+                    );
+                    for change in changes {
+                        let footprint = replacement_footprint(&root, &change);
+                        assert!(
+                            !footprint
+                                .iter()
+                                .any(|a| reserved.iter().any(|b| touches(a, b)))
+                        );
+                        pending.push((change, footprint));
+                    }
+                }
+                concurrent |= pending.len() > 1;
+                if pending.is_empty() {
+                    break;
+                }
+                // Give the planner a chance to fill independent slots before completing work.
+                if pending.len() < 4
+                    && next_lod_change_reserved(
+                        &root,
+                        Vec3::new(400.0, 0.0, 0.0),
+                        0.5,
+                        &pending
+                            .iter()
+                            .flat_map(|(_, regions)| regions.iter().copied())
+                            .collect::<Vec<_>>(),
+                        true,
+                    )
+                    .is_some()
+                {
+                    continue;
+                }
+                let index = if reverse { pending.len() - 1 } else { 0 };
+                let (change, _) = pending.remove(index);
+                let OctreeChanges::ReplaceMeshes {
+                    transition_key,
+                    completed_state,
+                    additional_transitions,
+                    keys_to_remove,
+                    requests,
+                    ..
+                } = change
+                else {
+                    unreachable!()
+                };
+                if matches!(completed_state, NodeState::Internal) {
+                    assert_eq!(
+                        keys_to_remove.len(),
+                        1,
+                        "a refinement batch must not wait for unrelated regions"
+                    );
+                }
+                for key in keys_to_remove {
+                    rendered.remove(&key);
+                }
+                for request in requests {
+                    assert!(
+                        find_node_mut(&mut root, request.node_key)
+                            .unwrap()
+                            .children
+                            .is_none()
+                    );
+                    rendered.insert(request.node_key);
+                }
+                for (key, state) in
+                    std::iter::once((transition_key, completed_state)).chain(additional_transitions)
+                {
+                    find_node_mut(&mut root, key).unwrap().state = state;
+                }
+                assert_eq!(rendered_overlap(&root, &rendered), None);
+                let mut leaves = Vec::new();
+                collect_leaf_nodes(&root, &mut leaves);
+                for leaf in leaves {
+                    let mut neighbors = Vec::new();
+                    collect_face_neighbor_leaves(&root, leaf.min, leaf.size, &mut neighbors);
+                    assert!(
+                        neighbors
+                            .iter()
+                            .all(|n| (n.key.level - leaf.key.level).abs() <= 1)
+                    );
+                }
+            }
+            assert!(
+                concurrent,
+                "independent regions should generate concurrently"
+            );
+            assert!(pending.is_empty(), "stationary camera must converge");
+            assert!(next_lod_change(&root, Vec3::new(400.0, 0.0, 0.0), 0.5).is_none());
+            rendered
+        }
+        assert_eq!(run(false), run(true));
+    }
+
+    #[test]
+    fn validated_tree_skips_legacy_repair_but_still_selects_lod_changes() {
+        let mut root = test_leaf(Vec3::ZERO, 512.0, 0);
+        test_split(&mut root);
+        let camera = Vec3::splat(250.0);
+        assert_eq!(
+            next_lod_change_reserved(&root, camera, 1.0, &[], false),
+            next_lod_change_reserved(&root, camera, 1.0, &[], true)
+        );
+        // An imported, unbalanced tree needs validation. Ordinary updates preserve
+        // this invariant and can skip the fallback once validation has completed.
+        test_split(&mut root.children.as_mut().unwrap()[0]);
+        test_split(
+            &mut root.children.as_mut().unwrap()[0]
+                .children
+                .as_mut()
+                .unwrap()[1],
+        );
+        fn disable_surface(node: &mut OctreeNode) {
+            node.may_contain_surface = false;
+            if let Some(children) = &mut node.children {
+                for child in children {
+                    disable_surface(child);
+                }
+            }
+        }
+        disable_surface(&mut root);
+        assert!(next_lod_change_reserved(&root, camera, 10000.0, &[], true).is_some());
+        assert!(next_lod_change_reserved(&root, camera, 10000.0, &[], false).is_none());
+    }
+
+    #[test]
+    #[ignore = "manual idle balance-scan benchmark"]
+    fn measure_validated_idle_selection() {
+        fn populate(node: &mut OctreeNode, depth: usize) {
+            node.may_contain_surface = false;
+            if depth == 0 {
+                return;
+            }
+            test_split(node);
+            for child in node.children.as_mut().unwrap() {
+                populate(child, depth - 1);
+            }
+        }
+        let mut root = test_leaf(Vec3::ZERO, 1024.0, 0);
+        populate(&mut root, 4); // 4096 balanced leaves, no LOD work.
+        for repair in [true, false] {
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                assert!(
+                    next_lod_change_reserved(&root, Vec3::splat(512.0), 10000.0, &[], repair)
+                        .is_none()
+                );
+            }
+            println!("repair={repair} mean={:?}", start.elapsed() / 20);
+        }
     }
 
     #[test]
@@ -1688,10 +2126,11 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .all(|request| request.node_key.level == node.key.level + 1),
-            "each replacement should refine just one level"
+                .all(|request| request.node_key.level > node.key.level
+                    && request.node_key.level <= node.key.level + SPLITS_PER_REPLACEMENT as i8),
+            "refinement depth is bounded by the split budget"
         );
-        assert!(requests.len() <= 8);
+        assert!(requests.len() <= 1 + 7 * SPLITS_PER_REPLACEMENT);
 
         changes.clear();
         update(

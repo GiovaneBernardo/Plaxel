@@ -24,7 +24,7 @@ pub fn generate_planet_node_mesh(
     terrain_config: Arc<PlanetTerrainConfig>,
     edits: Arc<PlanetTerrainEdits>,
     cache: &DensityCache,
-) -> GeneratedMesh {
+) -> (GeneratedMesh, Option<cache::UniformRegion>) {
     let terrain = PlanetTerrainSamplerContext {
         config: &cache.config,
         edits: &edits,
@@ -34,6 +34,21 @@ pub fn generate_planet_node_mesh(
     // Include the positive ghost cells used to join neighboring chunks.
     let size = CHUNK_CELL_COUNT + 2;
     let local_min = request.node_min_corner.as_dvec3() - request.planet_position.as_dvec3();
+    if let Some(kind) = cache.uniform_region(request, &edits) {
+        return (
+            GeneratedMesh {
+                generation: 0,
+                planet_entity: request.planet_entity,
+                key: request.node_key,
+                node_origin_planet: [local_min.x as i32, local_min.y as i32, local_min.z as i32],
+                version: 0,
+                urgent: false,
+                vertices: Vec::new(),
+                indices: Vec::new(),
+            },
+            Some(kind),
+        );
+    }
     let (base, has_edits) = cache.grid(request, &edits);
     let mut grid = Arc::clone(&base);
     if has_edits {
@@ -71,7 +86,7 @@ pub fn generate_planet_node_mesh(
         vertices,
         indices,
     };
-    generated_mesh
+    (generated_mesh, None)
 }
 
 // Cook it into a physical collider

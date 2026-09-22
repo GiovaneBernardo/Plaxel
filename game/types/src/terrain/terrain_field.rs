@@ -294,8 +294,8 @@ impl TerrainFieldGraph {
         let mut channels = [TerrainValueRange::ZERO; TERRAIN_CHANNEL_COUNT];
         for layer in self.layers.iter().filter(|layer| layer.enabled) {
             let mut value = layer.source.range(&channels);
-            if layer.mask.is_some() {
-                value = value.multiply(TerrainValueRange::UNIT);
+            if let Some(mask) = &layer.mask {
+                value = value.multiply(mask.range(&channels));
             }
             let target = channels[layer.target.index()];
             channels[layer.target.index()] = match layer.operation {
@@ -444,7 +444,7 @@ impl TerrainFieldSource {
         }
     }
 
-    fn range(&self, _channels: &[TerrainValueRange; TERRAIN_CHANNEL_COUNT]) -> TerrainValueRange {
+    fn range(&self, channels: &[TerrainValueRange; TERRAIN_CHANNEL_COUNT]) -> TerrainValueRange {
         match self {
             Self::Constant { value } => TerrainValueRange::new(*value, *value),
             Self::Latitude {
@@ -460,10 +460,22 @@ impl TerrainFieldSource {
                 input.scale(*amplitude).offset(*bias)
             }
             Self::Channel {
+                channel,
+                input_min,
+                input_max,
                 output_min,
                 output_max,
-                ..
-            } => TerrainValueRange::new(*output_min, *output_max),
+                smooth,
+            } => {
+                // Clamped remapping is monotone, including reversed output ranges.
+                let remap = |value| {
+                    let t = remap01(value, *input_min, *input_max);
+                    let t = if *smooth { smootherstep(t) } else { t };
+                    output_min + (output_max - output_min) * t
+                };
+                let input = channels[channel.index()];
+                TerrainValueRange::new(remap(input.minimum), remap(input.maximum))
+            }
             Self::Noise(node) => node.range(),
         }
     }
@@ -972,6 +984,43 @@ fn cellular_noise(seed: u64, salt: u64, p: DVec3) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_remap_bounds_follow_input_including_clamping_and_reversal() {
+        for smooth in [false, true] {
+            for (out_min, out_max) in [(0.0, 100.0), (100.0, -100.0)] {
+                let source = TerrainFieldSource::Channel {
+                    channel: TerrainFieldChannel::Height,
+                    input_min: 0.0,
+                    input_max: 1.0,
+                    output_min: out_min,
+                    output_max: out_max,
+                    smooth,
+                };
+                for (lo, hi) in [(-2.0, -1.0), (0.2, 0.3), (2.0, 3.0)] {
+                    let mut channels = [TerrainValueRange::ZERO; TERRAIN_CHANNEL_COUNT];
+                    channels[TerrainFieldChannel::Height.index()] = TerrainValueRange::new(lo, hi);
+                    let range = source.range(&channels);
+                    assert!(range.maximum - range.minimum < (out_max - out_min).abs());
+                    for i in 0..=100 {
+                        let mut values = [0.0; TERRAIN_CHANNEL_COUNT];
+                        values[TerrainFieldChannel::Height.index()] =
+                            lo + (hi - lo) * i as f64 / 100.0;
+                        let value = source.evaluate(
+                            0,
+                            TerrainFieldContext {
+                                direction: DVec3::Y,
+                                position: DVec3::Y,
+                                radius: 1.0,
+                            },
+                            &values,
+                        );
+                        assert!(value >= range.minimum - 1e-12 && value <= range.maximum + 1e-12);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn default_graph_is_valid_and_deterministic() {

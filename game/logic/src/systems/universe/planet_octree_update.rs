@@ -65,23 +65,44 @@ pub fn planet_octree_update(
         planets_query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
             active_planets.insert(entity);
             let change_start = changes.len();
-            if update_octree
-                && !generation
-                    .replacements
-                    .values()
-                    .any(|r| r.planet_entity == entity)
-            {
-                profile_scope!("terrain.planet.update_octree");
-                octree::update(
-                    &mut planet.octree_root,
-                    camera_pos,
-                    entity,
-                    planet.position,
-                    terrain_config.as_ref(),
-                    lod_strength,
-                    &mut changes,
-                    terrain_edits,
-                );
+            let pending = generation
+                .replacements
+                .values()
+                .filter(|r| r.planet_entity == entity)
+                .count();
+            let mut reserved: Vec<_> = generation
+                .replacements
+                .values()
+                .filter(|r| r.planet_entity == entity)
+                .flat_map(|r| r.reserved_regions.iter().copied())
+                .collect();
+            if update_octree {
+                for _ in pending..4 {
+                    let start = changes.len();
+                    octree::update_reserved(
+                        &mut planet.octree_root,
+                        camera_pos,
+                        entity,
+                        planet.position,
+                        terrain_config.as_ref(),
+                        lod_strength,
+                        &mut changes,
+                        terrain_edits,
+                        &reserved,
+                        !generation.balanced_planets.contains(&entity),
+                    );
+                    if changes.len() == start {
+                        // No active locks: the fallback inspected the whole tree, not
+                        // merely the currently available regions.
+                        if pending == 0 && start == change_start {
+                            generation.balanced_planets.insert(entity);
+                        }
+                        break;
+                    }
+                    for change in &changes[start..] {
+                        reserved.extend(octree::replacement_footprint(&planet.octree_root, change));
+                    }
+                }
             }
 
             if changes.len() == change_start {
@@ -91,14 +112,26 @@ pub fn planet_octree_update(
             let edits = Arc::new(terrain_edits.clone());
             let planet_changes: Vec<_> = changes.drain(change_start..).collect();
             for mut change in planet_changes {
-                if let OctreeChanges::ReplaceMeshes { requests, .. } = &mut change {
+                if let OctreeChanges::ReplaceMeshes {
+                    requests,
+                    transition_key,
+                    additional_transitions,
+                    ..
+                } = &mut change
+                {
                     // Existing neighbors also need new seam ownership after a split/merge.
                     let mut neighbors = Vec::new();
-                    for request in requests.iter() {
+                    // Include transitions with no surface requests: their neighbors still change ownership.
+                    for key in std::iter::once(&*transition_key)
+                        .chain(additional_transitions.iter().map(|(key, _)| key))
+                    {
+                        let min = vec3(key.x as f32, key.y as f32, key.z as f32);
+                        let size = planet.octree_root.size
+                            / 2.0_f32.powi(i32::from(key.level - planet.octree_root.key.level));
                         octree::collect_face_neighbor_leaves(
                             &planet.octree_root,
-                            request.node_min_corner,
-                            request.node_size,
+                            min,
+                            size,
                             &mut neighbors,
                         );
                     }
@@ -149,8 +182,11 @@ pub fn planet_octree_update(
                         let size =
                             planet.octree_root.size / 2.0_f32.powi(i32::from(transition_key.level));
 
+                        let reserved_regions =
+                            octree::replacement_footprint(&planet.octree_root, &change);
                         submit_replacement(
                             change,
+                            reserved_regions,
                             &mut generation,
                             &globals.job_system,
                             terrain_config,
@@ -201,6 +237,9 @@ pub fn planet_octree_update(
         });
     }
 
+    generation
+        .balanced_planets
+        .retain(|entity| active_planets.contains(entity));
     generation
         .density_caches
         .retain(|entity, _| active_planets.contains(entity));
@@ -307,6 +346,7 @@ pub fn apply_terrain_graph_changes(
         *config = Arc::new(updated);
         planet.octree_root = root;
         generation.density_caches.remove(&request.target);
+        generation.balanced_planets.remove(&request.target);
         generation
             .debug_nodes
             .retain(|(entity, _), _| *entity != request.target);
@@ -348,6 +388,7 @@ fn fresh_terrain_root(
 
 fn submit_replacement(
     change: OctreeChanges,
+    reserved_regions: Vec<octree::Aabb>,
     generation: &mut PlanetMeshGeneration,
     job_system: &JobSystem,
     terrain_config: &Arc<PlanetTerrainConfig>,
@@ -377,6 +418,8 @@ fn submit_replacement(
             additional_transitions,
             keys_to_remove,
             submitted: false,
+            reserved_regions,
+            uniform_proofs: Vec::new(),
 
             expected_meshes: requests.len(),
             meshes: Vec::with_capacity(requests.len()),
@@ -401,11 +444,13 @@ fn submit_replacement(
 
         job_system
             .spawn_prioritized_named("planet.mesh.generate", 100, move || {
-                let mesh = generate_planet_node_mesh(&request, terrain_config, edits, &cache);
+                let (mesh, uniform) =
+                    generate_planet_node_mesh(&request, terrain_config, edits, &cache);
 
                 let _ = tx.send(CompletedMesh {
                     replacement_id,
                     mesh,
+                    uniform,
                 });
             })
             .unwrap();
@@ -418,7 +463,7 @@ pub fn drain_completed_requests(
     mut generation: ResMut<PlanetMeshGeneration>,
     queue: Res<PlanetTerrainRenderQueue>,
     events: Res<PlanetTerrainEvents>,
-    mut planets: Query<(&mut Planet,)>,
+    mut planets: Query<(&mut Planet, &PlanetTerrainEdits)>,
 ) {
     for event in events.try_iter() {
         match event {
@@ -428,7 +473,7 @@ pub fn drain_completed_requests(
                 ..
             } => {
                 if let Some(replacement) = generation.replacements.remove(&id) {
-                    if let Some((planet,)) = planets.get(replacement.planet_entity) {
+                    if let Some((planet, edits)) = planets.get(replacement.planet_entity) {
                         finish_transition(
                             &mut planet.octree_root,
                             replacement.transition_key,
@@ -437,6 +482,11 @@ pub fn drain_completed_requests(
                         for (key, state) in replacement.additional_transitions {
                             finish_transition(&mut planet.octree_root, key, state);
                         }
+                        octree::apply_uniform_proofs(
+                            &mut planet.octree_root,
+                            &replacement.uniform_proofs,
+                            edits,
+                        );
                         let rendered: HashSet<_> = rendered_keys.into_iter().collect();
                         if let Some((ancestor, descendant)) =
                             octree::rendered_overlap(&planet.octree_root, &rendered)
@@ -447,7 +497,14 @@ pub fn drain_completed_requests(
                         }
                         let mut leaves = Vec::new();
                         octree::collect_leaf_nodes(&planet.octree_root, &mut leaves);
-                        let valid: HashSet<_> = leaves.iter().map(|node| node.key).collect();
+                        let mut valid: HashSet<_> = leaves.iter().map(|node| node.key).collect();
+                        for pending in generation
+                            .replacements
+                            .values()
+                            .filter(|r| r.planet_entity == replacement.planet_entity)
+                        {
+                            valid.extend(pending.keys_to_remove.iter().copied());
+                        }
                         if let Some(stale) = rendered.difference(&valid).next() {
                             engine::game_error!(
                                 "Rendered terrain chunk is not a current leaf: {stale:?}"
@@ -468,6 +525,9 @@ pub fn drain_completed_requests(
             continue;
         };
 
+        if completed.uniform.is_some() {
+            replacement.uniform_proofs.push(completed.mesh.key);
+        }
         replacement.meshes.push(completed.mesh);
     }
 
@@ -481,7 +541,7 @@ pub fn drain_completed_requests(
                 None
             }
         })
-        .take(1) // One small atomic GPU upload batch per frame.
+        .take(4) // Bound command submission; each replacement remains atomic.
         .collect();
 
     for replacement_id in completed_replacements {
@@ -550,12 +610,16 @@ pub struct PendingReplacement {
     pub additional_transitions: Vec<(NodeKey, NodeState)>,
     pub keys_to_remove: Vec<NodeKey>,
     pub submitted: bool,
+    #[reflect(ignore)]
+    pub reserved_regions: Vec<octree::Aabb>,
+    pub uniform_proofs: Vec<NodeKey>,
 
     pub expected_meshes: usize,
     pub meshes: Vec<GeneratedMesh>,
 }
 
 pub struct CompletedMesh {
+    pub uniform: Option<super::planet_mesher::cache::UniformRegion>,
     pub replacement_id: u64,
     pub mesh: GeneratedMesh,
 }
@@ -568,6 +632,9 @@ pub struct PlanetMeshGeneration {
 
     #[reflect(ignore)]
     density_caches: HashMap<Entity, Arc<DensityCache>>,
+
+    #[reflect(ignore)]
+    balanced_planets: HashSet<Entity>,
 
     pub replacements: HashMap<u64, PendingReplacement>,
 
@@ -586,6 +653,7 @@ impl Default for PlanetMeshGeneration {
         Self {
             next_replacement_id: 0,
             density_caches: HashMap::new(),
+            balanced_planets: HashSet::new(),
             replacements: HashMap::new(),
             completed_tx,
             completed_rx,
