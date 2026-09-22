@@ -34,9 +34,9 @@ pub fn generate_planet_node_mesh(
     // Include the positive ghost cells used to join neighboring chunks.
     let size = CHUNK_CELL_COUNT + 2;
     let local_min = request.node_min_corner.as_dvec3() - request.planet_position.as_dvec3();
-    let base = cache.grid(request, &edits);
+    let (base, has_edits) = cache.grid(request, &edits);
     let mut grid = Arc::clone(&base);
-    if !edits.modified_chunks.is_empty() {
+    if has_edits {
         for (i, density) in Arc::make_mut(&mut grid).iter_mut().enumerate() {
             let position = local_min
                 + dvec3(
@@ -58,6 +58,7 @@ pub fn generate_planet_node_mesh(
             edits: &edits,
             planet_position: request.planet_position,
         },
+        cache.compiled.as_ref(),
         &request.face_neighbors,
     );
     let generated_mesh = GeneratedMesh {

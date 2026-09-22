@@ -4,7 +4,9 @@ use engine::math::{DVec3, Vec3, dvec3, vec3};
 use game_types::{
     octree::{FaceNeighbor, FaceNeighborKind, OctreeNode},
     planet::{Planet, PlanetTerrainEdits, PlanetVertex},
-    terrain::{PlanetTerrainConfig, terrain_materials},
+    terrain::{
+        PlanetTerrainConfig, terrain_field::compiled::CompiledTerrainField, terrain_materials,
+    },
 };
 
 use crate::{
@@ -22,6 +24,7 @@ pub trait PlanetExt {
         offset: Vec3,
         resolution: f32,
         terrain: &PlanetTerrainSamplerContext<'_>,
+        compiled: Option<&CompiledTerrainField>,
         face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>);
     fn create_octree(
@@ -33,6 +36,12 @@ pub trait PlanetExt {
         terrain_edits: &PlanetTerrainEdits,
     ) -> OctreeNode;
     fn collect_leaf_nodes(node: &OctreeNode, current_depth: u32, out: &mut Vec<(Vec3, f32, u32)>);
+}
+
+// Zero belongs to the outside, consistently for cells, edges and LOD seams.
+#[inline]
+fn crosses_surface(a: f32, b: f32) -> bool {
+    (a < 0.0) != (b < 0.0)
 }
 
 type CellVertexGrid = Vec<Vec<Vec<Option<u32>>>>;
@@ -113,7 +122,7 @@ fn contour_cell_from_corners(
     terrain_config: &PlanetTerrainConfig,
 ) -> Option<PlanetVertex> {
     let has_negative = corners.iter().any(|&density| density < 0.0);
-    let has_positive = corners.iter().any(|&density| density > 0.0);
+    let has_positive = corners.iter().any(|&density| density >= 0.0);
     if !(has_negative && has_positive) {
         return None;
     }
@@ -135,7 +144,7 @@ fn contour_cell_from_corners(
         let first_density = corners[first];
         let second_density = corners[second];
         let denominator = first_density - second_density;
-        if denominator.abs() < 1e-6 || first_density * second_density >= 0.0 {
+        if !crosses_surface(first_density, second_density) {
             continue;
         }
 
@@ -271,7 +280,7 @@ fn append_x_edge_indices(
                     continue;
                 }
                 let start_density = density(grid, x, y, z);
-                if start_density * density(grid, x + 1, y, z) >= 0.0 {
+                if !crosses_surface(start_density, density(grid, x + 1, y, z)) {
                     continue;
                 }
 
@@ -282,7 +291,7 @@ fn append_x_edge_indices(
                     cell_vertex[x][y - 1][z - 1],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    append_quad(indices, [v0, v1, v2, v3], start_density > 0.0);
+                    append_quad(indices, [v0, v1, v2, v3], start_density >= 0.0);
                 }
             }
         }
@@ -309,7 +318,7 @@ fn append_y_edge_indices(
                     continue;
                 }
                 let start_density = density(grid, x, y, z);
-                if start_density * density(grid, x, y + 1, z) >= 0.0 {
+                if !crosses_surface(start_density, density(grid, x, y + 1, z)) {
                     continue;
                 }
 
@@ -347,7 +356,7 @@ fn append_z_edge_indices(
                     continue;
                 }
                 let start_density = density(grid, x, y, z);
-                if start_density * density(grid, x, y, z + 1) >= 0.0 {
+                if !crosses_surface(start_density, density(grid, x, y, z + 1)) {
                     continue;
                 }
 
@@ -358,7 +367,7 @@ fn append_z_edge_indices(
                     cell_vertex[x - 1][y - 1][z],
                 ];
                 if let [Some(v0), Some(v1), Some(v2), Some(v3)] = vertices {
-                    append_quad(indices, [v0, v1, v2, v3], start_density > 0.0);
+                    append_quad(indices, [v0, v1, v2, v3], start_density >= 0.0);
                 }
             }
         }
@@ -396,6 +405,26 @@ fn with_axis(mut value: DVec3, axis: usize, component: f64) -> DVec3 {
     value
 }
 
+fn sample_transition_corners(
+    positions: [DVec3; 8],
+    terrain: &PlanetTerrainSamplerContext<'_>,
+    compiled: Option<&CompiledTerrainField>,
+) -> [f32; 8] {
+    if let Some(compiled) = compiled {
+        let mut values = [0.0; 8];
+        compiled.densities(&positions, f64::from(terrain.config.radius), &mut values);
+        if !terrain.edits.modified_chunks.is_empty() {
+            for (value, position) in values.iter_mut().zip(positions) {
+                *value +=
+                    terrain_sampler::sample_terrain_edits_density_planet_local(terrain, position);
+            }
+        }
+        values
+    } else {
+        positions.map(|p| terrain_sampler::sample_final_density_planet_local(terrain, p))
+    }
+}
+
 fn transition_cell_vertex(
     probe: DVec3,
     face: usize,
@@ -407,6 +436,7 @@ fn transition_cell_vertex(
     cache: &mut HashMap<TransitionCellKey, Option<u32>>,
     vertices: &mut Vec<PlanetVertex>,
     terrain: &PlanetTerrainSamplerContext<'_>,
+    compiled: Option<&CompiledTerrainField>,
 ) -> Option<u32> {
     let normal_axis = face / 2;
     let positive_face = face % 2 == 1;
@@ -440,7 +470,7 @@ fn transition_cell_vertex(
         return *index;
     }
 
-    let corners = [
+    let positions = [
         aligned,
         aligned + dvec3(spacing, 0.0, 0.0),
         aligned + dvec3(0.0, spacing, 0.0),
@@ -449,8 +479,8 @@ fn transition_cell_vertex(
         aligned + dvec3(spacing, 0.0, spacing),
         aligned + dvec3(0.0, spacing, spacing),
         aligned + dvec3(spacing, spacing, spacing),
-    ]
-    .map(|position| terrain_sampler::sample_final_density_planet_local(terrain, position));
+    ];
+    let corners = sample_transition_corners(positions, terrain, compiled);
     let aligned_fine_local = (aligned - fine_min_planet).as_vec3();
     let index = contour_cell_from_corners(
         corners,
@@ -484,6 +514,7 @@ fn append_transition_edge(
     vertices: &mut Vec<PlanetVertex>,
     indices: &mut Vec<u32>,
     terrain: &PlanetTerrainSamplerContext<'_>,
+    compiled: Option<&CompiledTerrainField>,
 ) {
     let edge_key = TransitionEdgeKey {
         start: [start.x.to_bits(), start.y.to_bits(), start.z.to_bits()],
@@ -527,6 +558,7 @@ fn append_transition_edge(
             cache,
             vertices,
             terrain,
+            compiled,
         );
     }
 
@@ -549,7 +581,7 @@ fn append_transition_edge(
     }
 
     let flip = match edge_axis {
-        0 | 2 => density_at_start > 0.0,
+        0 | 2 => density_at_start >= 0.0,
         _ => density_at_start < 0.0,
     };
     if flip {
@@ -570,6 +602,7 @@ fn append_transition_faces(
     vertices: &mut Vec<PlanetVertex>,
     indices: &mut Vec<u32>,
     terrain: &PlanetTerrainSamplerContext<'_>,
+    compiled: Option<&CompiledTerrainField>,
 ) {
     let cell_count = CHUNK_CELL_COUNT;
     let planet_position = terrain.planet_position.as_dvec3();
@@ -610,7 +643,7 @@ fn append_transition_faces(
                     end_sample[edge_axis] += 1;
                     let density_at_start = density(grid, sample[0], sample[1], sample[2]);
                     let density_at_end = density(grid, end_sample[0], end_sample[1], end_sample[2]);
-                    if density_at_start * density_at_end >= 0.0 {
+                    if !crosses_surface(density_at_start, density_at_end) {
                         continue;
                     }
 
@@ -635,6 +668,7 @@ fn append_transition_faces(
                         vertices,
                         indices,
                         terrain,
+                        compiled,
                     );
                 }
             }
@@ -648,6 +682,7 @@ impl PlanetExt for Planet {
         offset: Vec3,
         resolution: f32,
         terrain: &PlanetTerrainSamplerContext<'_>,
+        compiled: Option<&CompiledTerrainField>,
         face_neighbors: &[FaceNeighbor; 6],
     ) -> (Vec<PlanetVertex>, Vec<u32>) {
         engine::profile_scope!("terrain.contour.total");
@@ -709,6 +744,7 @@ impl PlanetExt for Planet {
                 &mut vertices,
                 &mut indices,
                 terrain,
+                compiled,
             );
         }
 
@@ -766,6 +802,92 @@ impl PlanetExt for Planet {
 mod tests {
     use super::*;
     use crate::systems::universe::planet_system::default_planet_terrain_config;
+
+    #[test]
+    fn compiled_seam_samples_match_scalar_with_edits() {
+        let config = crate::systems::universe::planet_system::earth_like_planet_terrain_config();
+        let compiled = config.field_graph.as_ref().unwrap().compile_density();
+        let mut edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        let origin = DVec3::new(f64::from(config.radius), 0.0, 0.0);
+        let brick = (origin.as_vec3() / crate::sdf::TERRAIN_EDIT_BRICK_SIZE)
+            .floor()
+            .as_ivec3();
+        let positions = std::array::from_fn(|i| {
+            origin + DVec3::new((i & 1) as f64, ((i >> 1) & 1) as f64, ((i >> 2) & 1) as f64)
+        });
+        for edited in [false, true] {
+            if edited {
+                edits.modified_chunks.insert(
+                    game_types::planet::TerrainBrickKey {
+                        level: 0,
+                        x: brick.x,
+                        y: brick.y,
+                        z: brick.z,
+                    },
+                    std::sync::Arc::new(vec![vec![vec![7.0; 2]; 2]; 2]),
+                );
+            }
+            let terrain = PlanetTerrainSamplerContext {
+                config: &config,
+                edits: &edits,
+                planet_position: Vec3::ZERO,
+            };
+            let scalar = sample_transition_corners(positions, &terrain, None);
+            let simd = sample_transition_corners(positions, &terrain, Some(&compiled));
+            for (a, b) in scalar.into_iter().zip(simd) {
+                assert!(
+                    (a - b).abs() <= 1e-4 * a.abs().max(1.0),
+                    "scalar={a} SIMD={b} edited={edited}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grid_aligned_surface_has_no_missing_quads() {
+        let config = default_planet_terrain_config();
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        let terrain = PlanetTerrainSamplerContext {
+            config: &config,
+            edits: &edits,
+            planet_position: Vec3::ZERO,
+        };
+        for axis in 0..3 {
+            for scale in [1.0_f32, -1.0, 1.0e-12, -1.0e-12] {
+                let n = DENSITY_GRID_SIZE;
+                let grid = (0..n * n * n)
+                    .map(|i| {
+                        let p = [i / (n * n), i / n % n, i % n];
+                        (p[axis] as f32 - 16.0) * scale
+                    })
+                    .collect();
+                let (vertices, indices) = Planet::dual_contour_grid(
+                    &grid,
+                    Vec3::ZERO,
+                    1.0,
+                    &terrain,
+                    None,
+                    &[FaceNeighbor::SAME_OR_ABSENT; 6],
+                );
+                assert_eq!(
+                    indices.len(),
+                    CHUNK_CELL_COUNT * CHUNK_CELL_COUNT * 6,
+                    "axis={axis} scale={scale}"
+                );
+                assert!(
+                    vertices
+                        .iter()
+                        .all(|v| (v.position[axis] - 16.0).abs() < 1e-5)
+                );
+            }
+        }
+    }
 
     #[test]
     fn material_below_sea_level_is_water() {
