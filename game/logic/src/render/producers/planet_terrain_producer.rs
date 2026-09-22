@@ -354,6 +354,8 @@ impl PlanetTerrainProducer {
     fn create_terrain_palette(
         renderer: &mut engine::renderer::Renderer,
     ) -> [GpuPlanetTerrainMaterial; MATERIAL_COUNT] {
+        const SEA_ROCK_TERRAIN_TEXTURE_INDEX: u32 = 502;
+        const SEA_ROCK_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 503;
         const WATER_TERRAIN_TEXTURE_INDEX: u32 = 504;
         const WATER_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 505;
         const SNOW_TERRAIN_TEXTURE_INDEX: u32 = 506;
@@ -415,6 +417,18 @@ impl PlanetTerrainProducer {
             "terrain_snow_normal",
             SNOW_TERRAIN_NORMAL_TEXTURE_INDEX,
         );
+        PlanetTerrainProducer::load_terrain_diffuse_texture(
+            renderer,
+            "Sea_Rock_001_BaseColor.jpg",
+            "terrain_snow_diffuse",
+            SEA_ROCK_TERRAIN_TEXTURE_INDEX,
+        );
+        PlanetTerrainProducer::load_terrain_normal_texture(
+            renderer,
+            "Sea_Rock_001_Normal.jpg",
+            "terrain_snow_normal",
+            SEA_ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
+        );
 
         // PlanetVertex material IDs address this palette directly. The order is
         // defined by game_types::terrain::terrain_materials.
@@ -452,6 +466,16 @@ impl PlanetTerrainProducer {
             GpuPlanetTerrainMaterial {
                 diffuse_texture_index: SNOW_TERRAIN_TEXTURE_INDEX,
                 normal_texture_index: SNOW_TERRAIN_NORMAL_TEXTURE_INDEX,
+                displacement_texture_index: 0,
+                roughness_texture_index: 0,
+                texture_scale: 1.0,
+                displacement_scale: 0.0,
+                roughness_factor: 0.85,
+                flags: 0,
+            },
+            GpuPlanetTerrainMaterial {
+                diffuse_texture_index: SEA_ROCK_TERRAIN_TEXTURE_INDEX,
+                normal_texture_index: SEA_ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
                 displacement_texture_index: 0,
                 roughness_texture_index: 0,
                 texture_scale: 1.0,

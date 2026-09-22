@@ -1189,6 +1189,61 @@ fn refine_new_subtree(
     node.children = Some(children);
 }
 
+/// Prepare an entire replacement without generating intermediate LOD meshes.
+pub fn prepare_terrain_replacement(
+    root: &mut OctreeNode,
+    camera: Vec3,
+    strength: f32,
+    entity: Entity,
+    position: Vec3,
+    config: &PlanetTerrainConfig,
+    edits: &PlanetTerrainEdits,
+) -> Vec<PlanetMeshRequest> {
+    // The normal LOD policy always splits a surface-bearing root once.
+    if root.may_contain_surface {
+        let mut children = create_children(root, position, config, edits);
+        for child in &mut children {
+            refine_new_subtree(child, camera, 32.0, strength, position, config, edits);
+        }
+        root.children = Some(children);
+        root.state = NodeState::Internal;
+    }
+
+    // Density pruning can leave coarse empty neighbors beside fine surface
+    // leaves. Balance those too before assigning mesh seam ownership.
+    loop {
+        let mut leaves = Vec::new();
+        collect_leaf_nodes(root, &mut leaves);
+        let mut split = std::collections::HashSet::new();
+        for leaf in leaves {
+            let mut neighbors = Vec::new();
+            collect_face_neighbor_leaves(root, leaf.min, leaf.size, &mut neighbors);
+            for neighbor in neighbors {
+                if neighbor.size > leaf.size * 2.0 {
+                    split.insert(neighbor.key);
+                }
+            }
+        }
+        if split.is_empty() {
+            break;
+        }
+        for key in split {
+            let node = find_node_mut(root, key).unwrap();
+            node.children = Some(create_children(node, position, config, edits));
+            node.state = NodeState::Internal;
+        }
+    }
+
+    let mut requests = Vec::new();
+    if let Some(children) = &root.children {
+        collect_surface_leaf_requests(children, entity, position, &mut requests);
+    }
+    for request in &mut requests {
+        annotate_mesh_request(root, request);
+    }
+    requests
+}
+
 fn collect_surface_leaf_requests(
     children: &[Box<OctreeNode>; 8],
     planet_entity: Entity,

@@ -288,8 +288,11 @@ pub fn planet_octree_update(
 pub fn apply_terrain_graph_changes(
     mut generation: ResMut<PlanetMeshGeneration>,
     mut apply_queue: ResMut<TerrainGraphApplyQueue>,
-    queue: Res<PlanetTerrainRenderQueue>,
     game_state: Res<GameState>,
+    camera: Res<GameCamera>,
+    lod_settings: Res<PlanetLodSettings>,
+    mut transforms: Query<(&TransformComponent,)>,
+    globals: Globals,
     mut planets: Query<(
         &mut Planet,
         &PlanetTerrainEdits,
@@ -300,6 +303,10 @@ pub fn apply_terrain_graph_changes(
     if !game_state.update_octree {
         return;
     }
+    let Some((camera_transform,)) = transforms.get(camera.entity) else {
+        return;
+    };
+    let camera_pos = camera_transform.position;
     let mut latest = HashMap::new();
     for request in std::mem::take(&mut apply_queue.requests) {
         latest.insert(request.target, request);
@@ -325,24 +332,30 @@ pub fn apply_terrain_graph_changes(
         updated.radius = request.graph.radius as f32;
         updated.sea_level = request.graph.sea_level as f32;
         updated.field_graph = Some(request.graph);
-        let Some(root) = fresh_terrain_root(planet.position, &updated, edits) else {
+        let Some(mut root) = fresh_terrain_root(planet.position, &updated, edits) else {
             engine::game_error!("Apply terrain graph failed: planet bounds exceed supported size");
             continue;
         };
-        // All previous jobs/uploads for this planet have been acknowledged.
-        if queue
-            .send(PlanetTerrainCommand::ReplaceChunks {
-                planet: request.target,
-                replacement_id: None,
-                remove_all: true,
-                remove: Vec::new(),
-                insert: Vec::new(),
-            })
-            .is_err()
-        {
-            engine::game_error!("Apply terrain graph failed: terrain renderer disconnected");
-            continue;
-        }
+        let requests = octree::prepare_terrain_replacement(
+            &mut root,
+            camera_pos,
+            lod_settings.strength,
+            request.target,
+            planet.position,
+            &updated,
+            edits,
+        );
+        let completed_state = root.state;
+        let change = OctreeChanges::ReplaceMeshes {
+            planet_entity: request.target,
+            transition_key: root.key,
+            completed_state,
+            additional_transitions: Vec::new(),
+            keys_to_remove: Vec::new(),
+            requests,
+        };
+        let reserved = vec![octree::node_bounds(&root)];
+        root.state = NodeState::Splitting;
         *config = Arc::new(updated);
         planet.octree_root = root;
         generation.density_caches.remove(&request.target);
@@ -350,6 +363,22 @@ pub fn apply_terrain_graph_changes(
         generation
             .debug_nodes
             .retain(|(entity, _), _| *entity != request.target);
+        let replacement_id = generation.next_replacement_id;
+        submit_replacement(
+            change,
+            reserved,
+            &mut generation,
+            &globals.job_system,
+            config,
+            &Arc::new(edits.clone()),
+        );
+        // Preserve all old GPU chunks until the final leaf meshes are ready,
+        // including chunks outside the new root when the graph shrinks bounds.
+        generation
+            .replacements
+            .get_mut(&replacement_id)
+            .unwrap()
+            .remove_all = true;
     }
 }
 
@@ -418,6 +447,7 @@ fn submit_replacement(
             additional_transitions,
             keys_to_remove,
             submitted: false,
+            remove_all: false,
             reserved_regions,
             uniform_proofs: Vec::new(),
 
@@ -576,7 +606,7 @@ pub fn drain_completed_requests(
             .send(PlanetTerrainCommand::ReplaceChunks {
                 planet: replacement.planet_entity,
                 replacement_id: Some(replacement_id),
-                remove_all: false,
+                remove_all: replacement.remove_all,
                 remove: replacement.keys_to_remove.clone(), //remove: replacement.keys_to_remove,
                 insert,
             })
@@ -610,6 +640,7 @@ pub struct PendingReplacement {
     pub additional_transitions: Vec<(NodeKey, NodeState)>,
     pub keys_to_remove: Vec<NodeKey>,
     pub submitted: bool,
+    pub remove_all: bool,
     #[reflect(ignore)]
     pub reserved_regions: Vec<octree::Aabb>,
     pub uniform_proofs: Vec<NodeKey>,
@@ -696,22 +727,35 @@ mod apply_tests {
                 .cmple(root.min + Vec3::splat(root.size))
                 .all()
         );
-        let mut changes = Vec::new();
-        octree::update(
+        let camera = position + Vec3::X * 4010.0;
+        let requests = octree::prepare_terrain_replacement(
             &mut root,
-            position + Vec3::X * 4010.0,
+            camera,
+            1.0,
             Entity::PLACEHOLDER,
             position,
             &config,
-            1.0,
-            &mut changes,
             &edits,
         );
-        let [OctreeChanges::ReplaceMeshes { requests, .. }] = changes.as_slice() else {
-            panic!("reset root must start rebuilding through the normal replacement path");
-        };
         assert!(!requests.is_empty());
-        assert!(root.children.is_some() && matches!(root.state, NodeState::Splitting));
+        assert!(root.children.is_some() && matches!(root.state, NodeState::Internal));
+        let mut leaves = Vec::new();
+        octree::collect_leaf_nodes(&root, &mut leaves);
+        assert_eq!(
+            requests.len(),
+            leaves.iter().filter(|n| n.may_contain_surface).count()
+        );
+        assert!(requests.iter().any(|r| r.node_size == 32.0));
+        for leaf in leaves {
+            assert!(!octree::should_split(leaf, camera, 32.0, 1.0));
+            let mut neighbors = Vec::new();
+            octree::collect_face_neighbor_leaves(&root, leaf.min, leaf.size, &mut neighbors);
+            assert!(neighbors.iter().all(|n| n.size <= leaf.size * 2.0));
+        }
+        for request in requests {
+            let node = octree::find_node_mut(&mut root, request.node_key).unwrap();
+            assert!(node.children.is_none() && node.may_contain_surface);
+        }
     }
 
     #[test]

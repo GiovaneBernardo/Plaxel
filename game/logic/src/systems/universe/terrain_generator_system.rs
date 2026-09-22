@@ -218,7 +218,11 @@ fn select_surface_materials(
 ) -> (u16, u16, u8) {
     let altitude = radial_position.length() as f32 - config.radius;
     if altitude <= config.sea_level {
-        return (terrain_materials::WATER.0, terrain_materials::WATER.0, 0);
+        return (
+            terrain_materials::SEA_ROCK.0,
+            terrain_materials::SEA_ROCK.0,
+            0,
+        );
     }
 
     let slope = normal.dot(up).clamp(-1.0, 1.0);
