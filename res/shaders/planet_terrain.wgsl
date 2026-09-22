@@ -1,5 +1,5 @@
 // Set to false and hot reload to restore normal terrain shading.
-const DEBUG_LOD: bool = true;
+const DEBUG_LOD: bool = false;
 
 const LOD_COLORS = array<vec3<f32>, 8>(
     vec3<f32>(1.0, 0.15, 0.15), // 0: red
@@ -355,7 +355,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let light_dir = normalize(shadow.light_direction);
     let diffuse = max(dot(mapped_normal, light_dir), 0.0);
     let visibility = 1.0;//shadow_visibility(in.shadow_position);
-    let lighting = 0.35 + 0.95 * diffuse * visibility;
+    let ambient = 0.05;
+    let lighting = ambient + (1.0 - ambient) * diffuse * visibility;
 
     let distance = length(in.world_position - in.camera_position);
     let start = 5000.0;
