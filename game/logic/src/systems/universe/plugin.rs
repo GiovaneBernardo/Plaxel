@@ -1,7 +1,11 @@
 use crate::{
-    render::producers::planet_terrain_producer::PlanetTerrainProducerPlugin,
+    render::producers::{
+        planet_ocean_producer::PlanetOceanProducerPlugin,
+        planet_terrain_producer::PlanetTerrainProducerPlugin,
+    },
     systems::{
-        self, planet_octree_update::PlanetMeshGeneration, universe::star_system::create_star_system,
+        self, planet_ocean_update::PlanetOceanMeshGeneration,
+        planet_octree_update::PlanetMeshGeneration, universe::star_system::create_star_system,
     },
 };
 use engine::prelude::*;
@@ -11,7 +15,9 @@ pub struct UniversePlugin;
 impl Plugin for UniversePlugin {
     fn build(&self, app: &mut engine::App) {
         app.add_plugin(PlanetTerrainProducerPlugin)
+            .add_plugin(PlanetOceanProducerPlugin)
             .init_resource::<PlanetMeshGeneration>()
+            .init_resource::<PlanetOceanMeshGeneration>()
             .init_resource::<TerrainGraphApplyQueue>()
             .add_system(CoreSchedule::Startup, create_star_system)
             .add_system(
@@ -24,11 +30,19 @@ impl Plugin for UniversePlugin {
             )
             .add_system(
                 CoreSchedule::Update,
+                systems::planet_ocean_update::drain_completed_requests,
+            )
+            .add_system(
+                CoreSchedule::Update,
                 systems::planet_octree_update::apply_terrain_graph_changes,
             )
             .add_system(
                 CoreSchedule::Update,
                 systems::planet_octree_update::planet_octree_update,
+            )
+            .add_system(
+                CoreSchedule::Update,
+                systems::planet_ocean_update::planet_ocean_octree_update,
             );
     }
 }

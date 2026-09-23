@@ -70,7 +70,8 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub position: [f32; 3],
     // WGSL aligns vec3<f32> to 16 bytes, so we need padding to match the shader layout
-    pub _padding: f32,
+    // time was _padding before, I'll keep the warning so I hopefully don't forget to align vec3 to 16 bytes
+    pub time: f32,
 }
 
 impl CameraUniform {
@@ -78,13 +79,17 @@ impl CameraUniform {
         Self {
             view_proj: crate::math::Mat4::IDENTITY.to_cols_array_2d(),
             position: [0.0, 0.0, 0.0],
-            _padding: 0.0,
+            time: 0.0,
         }
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera) {
         self.view_proj = camera.build_view_projection_matrix().to_cols_array_2d();
         self.position = camera.position.into();
+    }
+
+    pub fn update_time(&mut self, time: f32) {
+        self.time = time;
     }
 }
 

@@ -15,6 +15,7 @@ const LOD_COLORS = array<vec3<f32>, 8>(
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
+    time: f32,
 };
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;

@@ -728,7 +728,7 @@ pub fn deform(
 
             query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
                 let Some((planet_entry_distance, planet_exit_distance)) =
-                    octree::ray_intersects(&planet.octree_root, ray_origin, ray_direction)
+                    octree::ray_intersects(&planet.surface_octree_root, ray_origin, ray_direction)
                 else {
                     return;
                 };
@@ -891,7 +891,7 @@ pub fn deform(
                     }
 
                     octree::refresh_density_ranges_in_bounds(
-                        &mut planet.octree_root,
+                        &mut planet.surface_octree_root,
                         dirty_bounds_min,
                         dirty_bounds_max,
                         planet.position,
@@ -899,7 +899,7 @@ pub fn deform(
                         terrain_edits,
                     );
                     collect_dirty_mesh_requests(
-                        &planet.octree_root,
+                        &planet.surface_octree_root,
                         hit_entity,
                         planet.position,
                         dirty_bounds_min,
@@ -924,7 +924,7 @@ pub fn deform(
                     for dirty in dirty_snapshot {
                         let mut neighbors = Vec::new();
                         octree::collect_face_neighbor_leaves(
-                            &planet.octree_root,
+                            &planet.surface_octree_root,
                             dirty.node_min_corner,
                             dirty.node_size,
                             &mut neighbors,
@@ -953,7 +953,7 @@ pub fn deform(
                         }
                     }
                     for request in &mut dirty_mesh_requests {
-                        octree::annotate_mesh_request(&planet.octree_root, request);
+                        octree::annotate_mesh_request(&planet.surface_octree_root, request);
                     }
                 });
                 drop(query);

@@ -18,7 +18,7 @@ pub fn sync_planet_debug(
 
     let mut out = Vec::<(Vec3, f32, u32)>::new();
 
-    octree::collect_octree_nodes(&planet.octree_root, 0, &mut out);
+    octree::collect_octree_nodes(&planet.surface_octree_root, 0, &mut out);
     for (center, size, depth) in out.iter() {
         debug_pass_node.add_wire_cube(*center, *size, depth_color(*depth));
         debug_pass_node.add_cube(

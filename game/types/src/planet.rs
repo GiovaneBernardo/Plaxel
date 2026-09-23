@@ -16,7 +16,9 @@ pub struct Planet {
     pub name: String,
     pub position: Vec3,
     #[reflect(ignore)]
-    pub octree_root: OctreeNode,
+    pub surface_octree_root: OctreeNode,
+    #[reflect(ignore)]
+    pub ocean_octree_root: OctreeNode,
     pub solar_system: Entity,
 }
 

@@ -40,7 +40,7 @@ use web_time::{Duration, Instant};
 use crate::{
     CHUNK_CELL_COUNT, GameCamera, GameState, octree,
     render::producers::planet_terrain_producer::{
-        PendingTerrainChunk, PlanetTerrainCommand, PlanetTerrainRenderQueue,
+        PendingChunkMesh, PlanetGenerationCommand, PlanetTerrainRenderQueue,
     },
     systems::{
         terrain::terrain_sampler::{self, PlanetTerrainSamplerContext, PlanetTerrainSnapshot},
@@ -321,8 +321,20 @@ pub fn create_planet(
     }
     let lod_strength = lod_settings.strength;
 
-    let octree = {
+    let surface_octree = {
         profile_scope!("terrain.planet.initial_octree");
+        Planet::create_octree(
+            planet_position,
+            &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
+            terrain_config.as_ref(),
+            chunk_size,
+            lod_strength,
+            &terrain_edits,
+        )
+    };
+
+    let ocean_octree = {
+        profile_scope!("terrain.planet.initial_ocean_octree");
         Planet::create_octree(
             planet_position,
             &vec3(camera_pos.x, camera_pos.y, camera_pos.z),
@@ -337,7 +349,8 @@ pub fn create_planet(
         id: new_planet.index() as u64,
         name: format!("Planet {planet_index}"),
         position: planet_position,
-        octree_root: octree,
+        surface_octree_root: surface_octree,
+        ocean_octree_root: ocean_octree,
         solar_system,
     };
 

@@ -19,33 +19,32 @@ use engine::{
 use game_types::{
     octree::NodeKey,
     planet::{GpuPlanetTerrainMaterial, PlanetVertex},
-    terrain::terrain_materials::MATERIAL_COUNT,
 };
 
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::GpuPlanetFrame;
 
-pub const PLANET_TERRAIN_PRODUCER: RenderProducerId =
-    RenderProducerId::new("game.planet_terrain_producer");
-const MAX_TERRAIN_CHUNKS_PER_PLANET: u32 = 65_536;
-const MAX_TERRAIN_DRAWS: u32 = 65_536;
+pub const PLANET_OCEAN_PRODUCER: RenderProducerId =
+    RenderProducerId::new("game.planet_ocean_producer");
+const MAX_OCEAN_CHUNKS_PER_PLANET: u32 = 65_536;
+const MAX_OCEAN_DRAWS: u32 = 65_536;
 
-pub struct PlanetTerrainProducer {
+pub struct PlanetOceanProducer {
     routes: Vec<RenderRoute>,
     commands: Receiver<PlanetGenerationCommand>,
-    events: Sender<PlanetTerrainEvent>,
+    events: Sender<PlanetOceanEvent>,
     commands_processed: RuntimeCounter,
     events_emitted: RuntimeCounter,
     _material: Material,
     pipelines: PlanetPipelines,
-    terrain_layout: BindGroupLayoutHandle,
+    ocean_layout: BindGroupLayoutHandle,
     material_palette: BufferHandle,
     chunk_indices_buffer: BufferHandle,
     planets: HashMap<Entity, PlanetGpuState>,
     indirect: IndirectBuffer,
-    forward_batches: Vec<PreparedTerrainBatch>,
-    shadow_batches: Vec<PreparedTerrainBatch>,
+    forward_batches: Vec<PreparedOceanBatch>,
+    shadow_batches: Vec<PreparedOceanBatch>,
     batches_dirty: bool,
 }
 
@@ -58,7 +57,7 @@ struct PlanetGpuState {
     frame_buffer: BufferHandle,
     chunks_buffer: BufferHandle,
     bind_group: BindGroupHandle,
-    terrain_chunks: HashMap<NodeKey, ChunkGpuState>,
+    ocean_chunks: HashMap<NodeKey, ChunkGpuState>,
 }
 
 struct ChunkGpuState {
@@ -72,7 +71,7 @@ struct IndirectBuffer {
 }
 
 #[derive(Clone, Copy)]
-struct PreparedTerrainBatch {
+struct PreparedOceanBatch {
     bind_group: BindGroupHandle,
     vertex_buffer: BufferHandle,
     index_buffer: BufferHandle,
@@ -97,12 +96,12 @@ struct GpuPlanetChunk {
     level: i32,
 }
 
-fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Commands) {
-    engine::profile_scope!("terrain.render.init");
+fn planet_ocean_producer_init(ctx: &mut SystemContext, _commands: &mut Commands) {
+    engine::profile_scope!("ocean.render.init");
     if ctx
         .globals
         .renderer
-        .producer_mut::<PlanetTerrainProducer>(PLANET_TERRAIN_PRODUCER)
+        .producer_mut::<PlanetOceanProducer>(PLANET_OCEAN_PRODUCER)
         .is_some()
     {
         return;
@@ -114,7 +113,7 @@ fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Command
     let commands_processed = RuntimeCounter::default();
     let events_emitted = RuntimeCounter::default();
 
-    let producer = PlanetTerrainProducer::create(
+    let producer = PlanetOceanProducer::create(
         &mut ctx.globals.renderer,
         command_receiver,
         event_sender,
@@ -122,12 +121,12 @@ fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Command
         events_emitted.clone(),
     );
 
-    ctx.world.insert_resource(PlanetTerrainRenderQueue {
+    ctx.world.insert_resource(PlanetOceanRenderQueue {
         sender: command_sender,
         commands_sent,
         commands_processed,
     });
-    ctx.world.insert_resource(PlanetTerrainEvents {
+    ctx.world.insert_resource(PlanetOceanEvents {
         receiver: event_receiver,
         events_emitted,
     });
@@ -135,12 +134,12 @@ fn planet_terrain_producer_init(ctx: &mut SystemContext, _commands: &mut Command
     ctx.globals
         .renderer
         .register_producer(producer)
-        .expect("planet terrain producer must only be registered once");
+        .expect("planet ocean producer must only be registered once");
 }
 
-fn planet_terrain_producer_update(ctx: &mut SystemContext, _commands: &mut Commands) {
-    engine::profile_scope!("terrain.render.queue_frames");
-    let Some(queue) = ctx.world.get_resource::<PlanetTerrainRenderQueue>() else {
+fn planet_ocean_producer_update(ctx: &mut SystemContext, _commands: &mut Commands) {
+    engine::profile_scope!("ocean.render.queue_frames");
+    let Some(queue) = ctx.world.get_resource::<PlanetOceanRenderQueue>() else {
         return;
     };
     let queue = queue.clone();
@@ -165,12 +164,12 @@ fn planet_terrain_producer_update(ctx: &mut SystemContext, _commands: &mut Comma
     for (planet, frame) in frames {
         queue
             .send(PlanetGenerationCommand::EnsurePlanet { planet, frame })
-            .expect("planet terrain producer command channel must remain connected");
+            .expect("planet ocean producer command channel must remain connected");
     }
 }
 
-impl PlanetTerrainProducer {
-    fn emit_event(&self, event: PlanetTerrainEvent) {
+impl PlanetOceanProducer {
+    fn emit_event(&self, event: PlanetOceanEvent) {
         if self.events.send(event).is_ok() {
             self.events_emitted.increment();
         }
@@ -191,18 +190,19 @@ impl PlanetTerrainProducer {
     fn create(
         renderer: &mut engine::renderer::Renderer,
         commands: Receiver<PlanetGenerationCommand>,
-        events: Sender<PlanetTerrainEvent>,
+        events: Sender<PlanetOceanEvent>,
         commands_processed: RuntimeCounter,
         events_emitted: RuntimeCounter,
     ) -> Self {
         use engine::{assets::material::Material, model::Vertex, renderer::*};
         use game_types::planet::PlanetVertex;
 
-        let mut material = Material::new("shaders/planet_terrain.wgsl".into())
+        let mut material = Material::new("shaders/planet_ocean.wgsl".into())
             .with_vertex_layouts(vec![
                 PlanetVertex::layout(),
-                PlanetTerrainProducer::chunk_index_layout(),
+                PlanetOceanProducer::chunk_index_layout(),
             ])
+            .with_blend(BlendMode::Alpha)
             .with_cull(CullMode::Back);
 
         material.configure_pass(material_passes::SHADOW, |pass| {
@@ -220,24 +220,24 @@ impl PlanetTerrainProducer {
             .render_graph
             .get_node_mut::<GeometryPassNode>(graph_passes::GEOMETRY)
             .and_then(|node| node.camera_bind_group_layout)
-            .expect("geometry pass must be compiled before terrain initialization");
+            .expect("geometry pass must be compiled before ocean initialization");
 
         let frame = renderer
             .render_resources
             .get_labeled::<FrameBindings>("frame_bindings")
-            .expect("frame bindings must exist before terrain initialization");
+            .expect("frame bindings must exist before ocean initialization");
         let textures_layout = frame.textures_layout;
 
         let shadow = *renderer
             .render_resources
             .get_labeled::<ShadowBindings>("shadow_bindings")
-            .expect("shadow bindings must exist before terrain initialization");
+            .expect("shadow bindings must exist before ocean initialization");
 
-        let terrain_layout =
+        let ocean_layout =
             renderer
                 .renderer_api
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: "planet_terrain_layout".into(),
+                    label: "planet_ocean_layout".into(),
                     entries: vec![
                         BindGroupLayoutEntry {
                             binding: 0,
@@ -260,9 +260,9 @@ impl PlanetTerrainProducer {
                     ],
                 });
 
-        let palette = PlanetTerrainProducer::create_terrain_palette(renderer);
+        let palette = PlanetOceanProducer::create_ocean_palette(renderer);
         let material_palette = renderer.renderer_api.create_buffer(&BufferDescriptor {
-            label: "planet_terrain_palette".into(),
+            label: "planet_ocean_palette".into(),
             size: std::mem::size_of_val(&palette) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
@@ -280,7 +280,7 @@ impl PlanetTerrainProducer {
             &[
                 camera_layout,
                 textures_layout,
-                terrain_layout,
+                ocean_layout,
                 shadow.sampling_layout,
             ],
             &geometry_target,
@@ -293,22 +293,22 @@ impl PlanetTerrainProducer {
         let shadow_pipeline = renderer.renderer_api.create_pipeline(
             &material,
             material_passes::SHADOW,
-            &[shadow.view_layout, textures_layout, terrain_layout],
+            &[shadow.view_layout, textures_layout, ocean_layout],
             &shadow_target,
         );
 
-        let indirect_capacity = MAX_TERRAIN_DRAWS;
+        let indirect_capacity = MAX_OCEAN_DRAWS;
         let indirect_buffer = renderer.renderer_api.create_buffer(&BufferDescriptor {
-            label: "planet_terrain_indirect".into(),
+            label: "planet_ocean_indirect".into(),
             size: indirect_capacity as u64 * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64,
             usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
         });
         let chunk_indices_buffer = renderer.renderer_api.create_buffer(&BufferDescriptor {
-            label: "planet_terrain_chunk_indices".into(),
-            size: u64::from(MAX_TERRAIN_CHUNKS_PER_PLANET) * std::mem::size_of::<u32>() as u64,
+            label: "planet_ocean_chunk_indices".into(),
+            size: u64::from(MAX_OCEAN_CHUNKS_PER_PLANET) * std::mem::size_of::<u32>() as u64,
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         });
-        let chunk_indices: Vec<u32> = (0..MAX_TERRAIN_CHUNKS_PER_PLANET).collect();
+        let chunk_indices: Vec<u32> = (0..MAX_OCEAN_CHUNKS_PER_PLANET).collect();
         renderer
             .renderer_api
             .write_buffer(chunk_indices_buffer, bytemuck::cast_slice(&chunk_indices));
@@ -337,7 +337,7 @@ impl PlanetTerrainProducer {
                 forward,
                 shadow: shadow_pipeline,
             },
-            terrain_layout,
+            ocean_layout,
             material_palette,
             chunk_indices_buffer,
             planets: HashMap::new(),
@@ -351,144 +351,40 @@ impl PlanetTerrainProducer {
         }
     }
 
-    fn create_terrain_palette(
+    fn create_ocean_palette(
         renderer: &mut engine::renderer::Renderer,
-    ) -> [GpuPlanetTerrainMaterial; MATERIAL_COUNT] {
-        const SEA_ROCK_TERRAIN_TEXTURE_INDEX: u32 = 502;
-        const SEA_ROCK_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 503;
-        const WATER_TERRAIN_TEXTURE_INDEX: u32 = 504;
-        const WATER_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 505;
-        const SNOW_TERRAIN_TEXTURE_INDEX: u32 = 506;
-        const SNOW_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 507;
-        const GRASS_TERRAIN_TEXTURE_INDEX: u32 = 508;
-        const GRASS_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 509;
-        const ROCK_TERRAIN_TEXTURE_INDEX: u32 = 510;
-        const ROCK_TERRAIN_NORMAL_TEXTURE_INDEX: u32 = 511;
-
-        PlanetTerrainProducer::load_terrain_diffuse_texture(
-            renderer,
-            "Grass001_2K-JPG_Color.jpg",
-            "terrain_grass_diffuse",
-            GRASS_TERRAIN_TEXTURE_INDEX,
-        );
-
-        PlanetTerrainProducer::load_terrain_normal_texture(
-            renderer,
-            "Grass001_2K-JPG_NormalDX.jpg",
-            "terrain_grass_normal",
-            GRASS_TERRAIN_NORMAL_TEXTURE_INDEX,
-        );
-
-        PlanetTerrainProducer::load_terrain_diffuse_texture(
-            renderer,
-            "Rock061_2K-JPG_Color.jpg",
-            "terrain_rock_diffuse",
-            ROCK_TERRAIN_TEXTURE_INDEX,
-        );
-
-        PlanetTerrainProducer::load_terrain_normal_texture(
-            renderer,
-            "Rock061_2K-JPG_NormalDX.jpg",
-            "terrain_rock_normal",
-            ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
-        );
-
-        PlanetTerrainProducer::load_terrain_diffuse_texture(
+    ) -> [GpuPlanetTerrainMaterial; 1] {
+        PlanetOceanProducer::load_ocean_diffuse_texture(
             renderer,
             "blue_plaster_wall_2k/textures/blue_plaster_wall_diff_2k.jpg",
-            "terrain_water_diffuse",
-            WATER_TERRAIN_TEXTURE_INDEX,
+            "ocean_water_diffuse",
+            500,
         );
-        PlanetTerrainProducer::load_terrain_normal_texture(
+
+        PlanetOceanProducer::load_ocean_normal_texture(
             renderer,
             "Ice002_2K-JPG_NormalDX.jpg",
             "terrain_water_normal",
-            WATER_TERRAIN_NORMAL_TEXTURE_INDEX,
-        );
-        PlanetTerrainProducer::load_terrain_diffuse_texture(
-            renderer,
-            "Snow014_2K-JPG_Color.jpg",
-            "terrain_snow_diffuse",
-            SNOW_TERRAIN_TEXTURE_INDEX,
-        );
-        PlanetTerrainProducer::load_terrain_normal_texture(
-            renderer,
-            "Snow014_2K-JPG_NormalDX.jpg",
-            "terrain_snow_normal",
-            SNOW_TERRAIN_NORMAL_TEXTURE_INDEX,
-        );
-        PlanetTerrainProducer::load_terrain_diffuse_texture(
-            renderer,
-            "Sea_Rock_001_BaseColor.jpg",
-            "terrain_snow_diffuse",
-            SEA_ROCK_TERRAIN_TEXTURE_INDEX,
-        );
-        PlanetTerrainProducer::load_terrain_normal_texture(
-            renderer,
-            "Sea_Rock_001_Normal.jpg",
-            "terrain_snow_normal",
-            SEA_ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
+            501,
         );
 
         // PlanetVertex material IDs address this palette directly. The order is
-        // defined by game_types::terrain::terrain_materials.
-        let terrain_materials = [
-            GpuPlanetTerrainMaterial {
-                diffuse_texture_index: GRASS_TERRAIN_TEXTURE_INDEX,
-                normal_texture_index: GRASS_TERRAIN_NORMAL_TEXTURE_INDEX,
-                displacement_texture_index: 0,
-                roughness_texture_index: 0,
-                texture_scale: 1.0,
-                displacement_scale: 0.0,
-                roughness_factor: 0.9,
-                flags: 0,
-            },
-            GpuPlanetTerrainMaterial {
-                diffuse_texture_index: ROCK_TERRAIN_TEXTURE_INDEX,
-                normal_texture_index: ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
-                displacement_texture_index: 0,
-                roughness_texture_index: 0,
-                texture_scale: 1.0,
-                displacement_scale: 0.0,
-                roughness_factor: 0.75,
-                flags: 0,
-            },
-            GpuPlanetTerrainMaterial {
-                diffuse_texture_index: WATER_TERRAIN_TEXTURE_INDEX,
-                normal_texture_index: WATER_TERRAIN_NORMAL_TEXTURE_INDEX,
-                displacement_texture_index: 0,
-                roughness_texture_index: 0,
-                texture_scale: 1.0,
-                displacement_scale: 0.0,
-                roughness_factor: 0.15,
-                flags: 0,
-            },
-            GpuPlanetTerrainMaterial {
-                diffuse_texture_index: SNOW_TERRAIN_TEXTURE_INDEX,
-                normal_texture_index: SNOW_TERRAIN_NORMAL_TEXTURE_INDEX,
-                displacement_texture_index: 0,
-                roughness_texture_index: 0,
-                texture_scale: 1.0,
-                displacement_scale: 0.0,
-                roughness_factor: 0.85,
-                flags: 0,
-            },
-            GpuPlanetTerrainMaterial {
-                diffuse_texture_index: SEA_ROCK_TERRAIN_TEXTURE_INDEX,
-                normal_texture_index: SEA_ROCK_TERRAIN_NORMAL_TEXTURE_INDEX,
-                displacement_texture_index: 0,
-                roughness_texture_index: 0,
-                texture_scale: 1.0,
-                displacement_scale: 0.0,
-                roughness_factor: 0.85,
-                flags: 0,
-            },
-        ];
+        // defined by game_types::ocean::ocean_materials.
+        let ocean_materials = [GpuPlanetTerrainMaterial {
+            diffuse_texture_index: 500,
+            normal_texture_index: 501,
+            displacement_texture_index: 0,
+            roughness_texture_index: 0,
+            texture_scale: 1.0,
+            displacement_scale: 0.0,
+            roughness_factor: 0.9,
+            flags: 0,
+        }];
 
-        terrain_materials
+        ocean_materials
     }
 
-    fn load_terrain_diffuse_texture(
+    fn load_ocean_diffuse_texture(
         renderer: &mut engine::renderer::Renderer,
         relative_path: &str,
         label: &str,
@@ -515,7 +411,7 @@ impl PlanetTerrainProducer {
         );
     }
 
-    fn load_terrain_normal_texture(
+    fn load_ocean_normal_texture(
         renderer: &mut engine::renderer::Renderer,
         relative_path: &str,
         label: &str,
@@ -549,22 +445,22 @@ impl PlanetTerrainProducer {
         }
 
         let frame_buffer = api.create_buffer(&BufferDescriptor {
-            label: format!("planet_terrain_frame_{planet:?}"),
+            label: format!("planet_ocean_frame_{planet:?}"),
             size: std::mem::size_of::<GpuPlanetFrame>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
         api.write_buffer(frame_buffer, bytemuck::bytes_of(&frame));
 
         let chunks_buffer = api.create_buffer(&BufferDescriptor {
-            label: format!("planet_terrain_chunks_{planet:?}"),
-            size: u64::from(MAX_TERRAIN_CHUNKS_PER_PLANET)
+            label: format!("planet_ocean_chunks_{planet:?}"),
+            size: u64::from(MAX_OCEAN_CHUNKS_PER_PLANET)
                 * std::mem::size_of::<GpuPlanetChunk>() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
         let bind_group = api.create_bind_group(&BindGroupDescriptor {
-            label: format!("planet_terrain_bindings_{planet:?}"),
-            layout: self.terrain_layout,
+            label: format!("planet_ocean_bindings_{planet:?}"),
+            layout: self.ocean_layout,
             entries: vec![
                 (0, BindGroupEntry::Buffer(self.material_palette)),
                 (1, BindGroupEntry::Buffer(frame_buffer)),
@@ -578,7 +474,7 @@ impl PlanetTerrainProducer {
                 frame_buffer,
                 chunks_buffer,
                 bind_group,
-                terrain_chunks: HashMap::new(),
+                ocean_chunks: HashMap::new(),
             },
         );
     }
@@ -588,7 +484,7 @@ impl PlanetTerrainProducer {
         chunk: &PendingChunkMesh,
     ) -> Result<GpuMeshHandle, MeshUploadError> {
         api.upload_mesh(MeshUpload {
-            label: "planet_terrain_chunk",
+            label: "planet_ocean_chunk",
             vertices: bytemuck::cast_slice(&chunk.vertices),
             indices: &chunk.indices,
             vertex_layout: &PlanetVertex::layout(),
@@ -604,9 +500,9 @@ impl PlanetTerrainProducer {
         remove: Vec<NodeKey>,
         insert: Vec<PendingChunkMesh>,
     ) {
-        engine::profile_scope!("terrain.render.replace_chunks");
+        engine::profile_scope!("ocean.render.replace_chunks");
         if !self.planets.contains_key(&planet) {
-            self.emit_event(PlanetTerrainEvent::ReplacementFailed {
+            self.emit_event(PlanetOceanEvent::ReplacementFailed {
                 planet,
                 reason: "planet was not initialized".into(),
             });
@@ -614,19 +510,19 @@ impl PlanetTerrainProducer {
         }
 
         let uploaded = {
-            engine::profile_scope!("terrain.render.upload_meshes");
+            engine::profile_scope!("ocean.render.upload_meshes");
             let mut uploaded = Vec::with_capacity(insert.len());
             for chunk in &insert {
                 if chunk.indices.is_empty() {
                     continue;
                 }
-                match PlanetTerrainProducer::upload_chunk(api, chunk) {
+                match PlanetOceanProducer::upload_chunk(api, chunk) {
                     Ok(mesh) => uploaded.push((chunk.key, chunk.node_origin_planet, mesh)),
                     Err(error) => {
                         for (_, _, mesh) in uploaded {
                             api.remove_mesh(mesh);
                         }
-                        self.emit_event(PlanetTerrainEvent::ReplacementFailed {
+                        self.emit_event(PlanetOceanEvent::ReplacementFailed {
                             planet,
                             reason: error.to_string(),
                         });
@@ -639,7 +535,7 @@ impl PlanetTerrainProducer {
 
         let state = self.planets.get_mut(&planet).unwrap();
         if remove_all {
-            for old in state.terrain_chunks.drain().map(|(_, chunk)| chunk) {
+            for old in state.ocean_chunks.drain().map(|(_, chunk)| chunk) {
                 api.remove_mesh(old.mesh);
             }
         } else {
@@ -649,13 +545,13 @@ impl PlanetTerrainProducer {
             keys.dedup();
 
             for key in keys {
-                if let Some(old) = state.terrain_chunks.remove(&key) {
+                if let Some(old) = state.ocean_chunks.remove(&key) {
                     api.remove_mesh(old.mesh);
                 }
             }
         }
         for (key, node_origin_planet, mesh) in uploaded {
-            state.terrain_chunks.insert(
+            state.ocean_chunks.insert(
                 key,
                 ChunkGpuState {
                     mesh,
@@ -665,8 +561,8 @@ impl PlanetTerrainProducer {
         }
 
         self.batches_dirty = true;
-        let rendered_keys = state.terrain_chunks.keys().copied().collect();
-        self.emit_event(PlanetTerrainEvent::ReplacementApplied {
+        let rendered_keys = state.ocean_chunks.keys().copied().collect();
+        self.emit_event(PlanetOceanEvent::ReplacementApplied {
             planet,
             replacement_id,
             rendered_keys,
@@ -677,7 +573,7 @@ impl PlanetTerrainProducer {
         let Some(state) = self.planets.remove(&planet) else {
             return;
         };
-        for chunk in state.terrain_chunks.into_values() {
+        for chunk in state.ocean_chunks.into_values() {
             api.remove_mesh(chunk.mesh);
         }
         self.batches_dirty = true;
@@ -694,15 +590,15 @@ impl PlanetTerrainProducer {
     }
 
     fn rebuild_batches(&mut self, api: &mut dyn RendererAPI) {
-        engine::profile_scope!("terrain.render.rebuild_batches");
-        let mut grouped = HashMap::<TerrainBatchKey, Vec<DrawIndexedIndirectArgs>>::new();
+        engine::profile_scope!("ocean.render.rebuild_batches");
+        let mut grouped = HashMap::<OceanBatchKey, Vec<DrawIndexedIndirectArgs>>::new();
 
         for (&planet, state) in &self.planets {
             assert!(
-                state.terrain_chunks.len() <= MAX_TERRAIN_CHUNKS_PER_PLANET as usize,
-                "planet {planet:?} exceeds the terrain chunk metadata capacity"
+                state.ocean_chunks.len() <= MAX_OCEAN_CHUNKS_PER_PLANET as usize,
+                "planet {planet:?} exceeds the ocean chunk metadata capacity"
             );
-            let mut chunks: Vec<_> = state.terrain_chunks.iter().collect();
+            let mut chunks: Vec<_> = state.ocean_chunks.iter().collect();
             chunks.sort_unstable_by_key(|(key, _)| **key);
             let mut gpu_chunks = Vec::with_capacity(chunks.len());
 
@@ -716,13 +612,13 @@ impl PlanetTerrainProducer {
                     level: i32::from(key.level),
                 });
                 grouped
-                    .entry(TerrainBatchKey {
+                    .entry(OceanBatchKey {
                         planet,
                         vertex_buffer: binding.vertex_buffer,
                         index_buffer: binding.index_buffer,
                     })
                     .or_default()
-                    .push(PlanetTerrainProducer::indirect_args(binding, chunk_index));
+                    .push(PlanetOceanProducer::indirect_args(binding, chunk_index));
             }
 
             if !gpu_chunks.is_empty() {
@@ -733,7 +629,7 @@ impl PlanetTerrainProducer {
         let command_count: usize = grouped.values().map(Vec::len).sum();
         assert!(
             command_count <= self.indirect.capacity as usize,
-            "terrain draw count exceeds the indirect buffer capacity"
+            "ocean draw count exceeds the indirect buffer capacity"
         );
 
         let stride = std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
@@ -746,7 +642,7 @@ impl PlanetTerrainProducer {
             commands.extend(draws);
 
             let state = &self.planets[&key.planet];
-            batches.push(PreparedTerrainBatch {
+            batches.push(PreparedOceanBatch {
                 bind_group: state.bind_group,
                 vertex_buffer: key.vertex_buffer,
                 index_buffer: key.index_buffer,
@@ -763,9 +659,9 @@ impl PlanetTerrainProducer {
     }
 }
 
-impl RenderProducer for PlanetTerrainProducer {
+impl RenderProducer for PlanetOceanProducer {
     fn id(&self) -> RenderProducerId {
-        PLANET_TERRAIN_PRODUCER
+        PLANET_OCEAN_PRODUCER
     }
 
     fn routes(&self) -> &[RenderRoute] {
@@ -773,19 +669,19 @@ impl RenderProducer for PlanetTerrainProducer {
     }
 
     fn prepare_frame(&mut self, ctx: &mut ProducerPrepareContext<'_>) {
-        engine::profile_scope!("terrain.render.prepare_frame");
+        engine::profile_scope!("ocean.render.prepare_frame");
         let commands: Vec<_> = self.commands.try_iter().collect();
         self.commands_processed.add(commands.len());
 
         for command in &commands {
             match *command {
                 PlanetGenerationCommand::EnsurePlanet { planet, frame } => {
-                    engine::profile_scope!("terrain.render.prepare_frame.ensure_planet");
+                    engine::profile_scope!("ocean.render.prepare_frame.ensure_planet");
                     self.ensure_planet(ctx.api, planet, frame);
                 }
                 PlanetGenerationCommand::UpdatePlanetFrame { planet, frame } => {
                     if let Some(state) = self.planets.get(&planet) {
-                        engine::profile_scope!("terrain.render.prepare_frame.write_buffer");
+                        engine::profile_scope!("ocean.render.prepare_frame.write_buffer");
                         ctx.api
                             .write_buffer(state.frame_buffer, bytemuck::bytes_of(&frame));
                     }
@@ -799,28 +695,28 @@ impl RenderProducer for PlanetTerrainProducer {
         for command in commands {
             match command {
                 PlanetGenerationCommand::EnsurePlanet { .. }
-                | PlanetGenerationCommand::ReplaceOceanChunks { .. }
+                | PlanetGenerationCommand::ReplaceChunks { .. }
                 | PlanetGenerationCommand::UpdatePlanetFrame { .. } => {}
-                // Terrain
-                PlanetGenerationCommand::ReplaceChunks {
+                // Ocean
+                PlanetGenerationCommand::ReplaceOceanChunks {
                     planet,
                     replacement_id,
                     remove_all,
                     remove,
                     insert,
                 } => {
-                    engine::profile_scope!("terrain.render.prepare_frame.replace_chunks");
+                    engine::profile_scope!("ocean.render.prepare_frame.replace_chunks");
                     self.replace_chunks(ctx.api, planet, replacement_id, remove_all, remove, insert)
                 }
                 PlanetGenerationCommand::RemovePlanet { planet } => {
-                    engine::profile_scope!("terrain.render.prepare_frame.remove_planet");
+                    engine::profile_scope!("ocean.render.prepare_frame.remove_planet");
                     self.remove_planet(ctx.api, planet);
                 }
             }
         }
 
         if self.batches_dirty {
-            engine::profile_scope!("terrain.render.prepare_frame.rebuild_batches");
+            engine::profile_scope!("ocean.render.prepare_frame.rebuild_batches");
             self.rebuild_batches(ctx.api);
             self.batches_dirty = false;
         }
@@ -895,14 +791,14 @@ pub(crate) enum PlanetGenerationCommand {
 
 #[derive(Clone, plaxel_reflect::Reflect)]
 #[reflect(from_reflect = false)]
-pub(crate) struct PlanetTerrainRenderQueue {
+pub(crate) struct PlanetOceanRenderQueue {
     #[reflect(ignore)]
     sender: Sender<PlanetGenerationCommand>,
     commands_sent: RuntimeCounter,
     commands_processed: RuntimeCounter,
 }
 
-impl PlanetTerrainRenderQueue {
+impl PlanetOceanRenderQueue {
     pub(crate) fn send(
         &self,
         command: PlanetGenerationCommand,
@@ -915,7 +811,7 @@ impl PlanetTerrainRenderQueue {
     }
 }
 
-pub(crate) enum PlanetTerrainEvent {
+pub(crate) enum PlanetOceanEvent {
     ReplacementApplied {
         planet: Entity,
         replacement_id: Option<u64>,
@@ -929,37 +825,37 @@ pub(crate) enum PlanetTerrainEvent {
 
 #[derive(plaxel_reflect::Reflect)]
 #[reflect(from_reflect = false)]
-pub(crate) struct PlanetTerrainEvents {
+pub(crate) struct PlanetOceanEvents {
     #[reflect(ignore)]
-    receiver: crossbeam_channel::Receiver<PlanetTerrainEvent>,
+    receiver: crossbeam_channel::Receiver<PlanetOceanEvent>,
     events_emitted: RuntimeCounter,
 }
 
-impl PlanetTerrainEvents {
-    pub(crate) fn try_iter(&self) -> crossbeam_channel::TryIter<'_, PlanetTerrainEvent> {
+impl PlanetOceanEvents {
+    pub(crate) fn try_iter(&self) -> crossbeam_channel::TryIter<'_, PlanetOceanEvent> {
         self.receiver.try_iter()
     }
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct TerrainBatchKey {
+struct OceanBatchKey {
     planet: Entity,
     vertex_buffer: BufferHandle,
     index_buffer: BufferHandle,
 }
 
-pub struct PlanetTerrainProducerPlugin;
-impl Plugin for PlanetTerrainProducerPlugin {
+pub struct PlanetOceanProducerPlugin;
+impl Plugin for PlanetOceanProducerPlugin {
     fn build(&self, app: &mut engine::App) {
         app.add_named_legacy_system(
             CoreSchedule::Startup,
-            "game.terrain_producer_init",
-            planet_terrain_producer_init,
+            "game.ocean_producer_init",
+            planet_ocean_producer_init,
         )
         .add_named_legacy_system(
             CoreSchedule::RenderExtract,
-            "game.terrain_producer_update",
-            planet_terrain_producer_update,
+            "game.ocean_producer_update",
+            planet_ocean_producer_update,
         );
     }
 }

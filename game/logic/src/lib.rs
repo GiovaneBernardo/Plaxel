@@ -2,6 +2,7 @@ pub extern crate bevy_reflect as plaxel_reflect;
 
 use engine::core::components::core::{CameraComponent, TransformComponent};
 use engine::core::input::KeyCode;
+use engine::core::time::Time;
 use engine::core::window::{
     KeyboardInput, MouseButtonInput, MouseMotion, MouseWheel, WindowResized,
 };
@@ -131,7 +132,7 @@ fn handle_resize(mut events: EventReader<WindowResized>, camera: Option<ResMut<G
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct GpuTerrainFrame {
+pub(crate) struct GpuPlanetFrame {
     view_projection_rotation: [[f32; 4]; 4],
     camera_anchor_planet: [i32; 3],
     position_unit: f32,
@@ -141,7 +142,7 @@ pub(crate) struct GpuTerrainFrame {
     _planet_padding: f32,
 }
 
-impl GpuTerrainFrame {
+impl GpuPlanetFrame {
     fn new(
         view_projection_rotation: engine::math::Mat4,
         camera_world_position: engine::math::DVec3,
@@ -289,6 +290,7 @@ fn initialize_game_state(
 fn camera_update_system(
     mut camera: ResMut<GameCamera>,
     mut cameras: Query<(&CameraComponent, &TransformComponent)>,
+    mut time: Res<Time>,
 ) {
     let Some((camera_component, camera_transform)) = cameras.get(camera.entity) else {
         return;
@@ -308,6 +310,7 @@ fn camera_update_system(
     };
 
     camera.uniform.update_view_proj(&camera_copy);
+    camera.uniform.update_time(time.elapsed_seconds as f32);
 }
 
 fn sync_camera_to_renderer(camera: Res<GameCamera>, mut globals: GlobalsMut) {
