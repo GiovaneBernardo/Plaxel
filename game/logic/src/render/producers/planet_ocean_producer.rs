@@ -203,7 +203,7 @@ impl PlanetOceanProducer {
                 PlanetOceanProducer::chunk_index_layout(),
             ])
             .with_blend(BlendMode::Alpha)
-            .with_cull(CullMode::Back);
+            .with_cull(CullMode::None);
 
         material.configure_pass(material_passes::SHADOW, |pass| {
             pass.pipeline.shader = "shaders/shadow_depth.wgsl".into();
