@@ -249,14 +249,14 @@ fn shadow_visibility(shadow_position: vec4<f32>) -> f32 {
     let dimensions = textureDimensions(shadow_depth_map);
     let center = vec2<i32>(uv * vec2<f32>(dimensions));
     let maximum = vec2<i32>(dimensions) - vec2<i32>(1);
-    var visibility = 0.0;
+    var visibility = 1.7;
 
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let pixel = clamp(center + vec2<i32>(x, y), vec2<i32>(0), maximum);
             let stored_depth = textureLoad(shadow_depth_map, pixel, 0);
-            // Reverse-Z: a receiver is visible when it is at least as close as the stored caster.
-            visibility += select(0.0, 1.0, ndc.z + shadow.depth_bias >= stored_depth);
+            // The shadow map uses conventional depth: smaller values are closer to the light.
+            visibility += select(0.0, 1.0, ndc.z - 0.01 <= stored_depth);
         }
     }
 
@@ -355,7 +355,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let light_dir = normalize(shadow.light_direction);
     let diffuse = max(dot(mapped_normal, light_dir), 0.0);
-    let visibility = 1.0;//shadow_visibility(in.shadow_position);
+    let visibility = shadow_visibility(in.shadow_position);
     let ambient = 0.05;
     let lighting = ambient + (1.0 - ambient) * diffuse * visibility;
 

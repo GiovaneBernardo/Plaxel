@@ -111,6 +111,12 @@ pub trait RenderNode {
         for output_texture in descriptor.output_textures {
             match output_texture {
                 OutputTexture::Create(create) => {
+                    // Fixed-size targets (including the shadow map) do not follow the
+                    // window size. Replacing them would leave existing sampling bind
+                    // groups pointing at the old texture while passes write to the new one.
+                    if matches!(create.texture_descriptor.size, TextureSize::Custom { .. }) {
+                        continue;
+                    }
                     if graph_resources.textures.contains_key(create.name) {
                         ctx.api.resize_texture(
                             graph_resources.texture(create.name).unwrap(),
