@@ -250,13 +250,14 @@ fn shadow_visibility(shadow_position: vec4<f32>) -> f32 {
     let center = vec2<i32>(uv * vec2<f32>(dimensions));
     let maximum = vec2<i32>(dimensions) - vec2<i32>(1);
     var visibility = 1.7;
+    var bias = 0.01; // shadow.depth_bias
 
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let pixel = clamp(center + vec2<i32>(x, y), vec2<i32>(0), maximum);
             let stored_depth = textureLoad(shadow_depth_map, pixel, 0);
             // The shadow map uses conventional depth: smaller values are closer to the light.
-            visibility += select(0.0, 1.0, ndc.z - 0.01 <= stored_depth);
+            visibility += select(0.0, 1.0, ndc.z - bias <= stored_depth);
         }
     }
 

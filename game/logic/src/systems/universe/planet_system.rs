@@ -108,7 +108,21 @@ pub fn default_planet_terrain_config() -> PlanetTerrainConfig {
 }
 
 pub fn earth_like_planet_terrain_config() -> PlanetTerrainConfig {
-    let graph = TerrainFieldGraph::default();
+    terrain_config_from_graph(TerrainFieldGraph::default())
+}
+
+fn startup_planet_terrain_config() -> PlanetTerrainConfig {
+    // Embed the startup preset so launching from another directory or on the web
+    // uses the same graph before camera placement and initial octree generation.
+    let graph = ron::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../planet_refined2.plxterrain"
+    )))
+    .expect("bundled planet_refined2.plxterrain must be a valid terrain graph");
+    terrain_config_from_graph(graph)
+}
+
+fn terrain_config_from_graph(graph: TerrainFieldGraph) -> PlanetTerrainConfig {
     let mut config = default_planet_terrain_config();
     config.seed = graph.seed;
     config.radius = graph.radius as f32;
@@ -265,7 +279,7 @@ pub fn create_planet(
     let mut camera_pos = camera_transforms.get(camera_entity)?.0.position;
 
     let terrain_config = Arc::new(if game_state.start_with_earth_like_terrain {
-        earth_like_planet_terrain_config()
+        startup_planet_terrain_config()
     } else {
         default_planet_terrain_config()
     });
@@ -304,6 +318,8 @@ pub fn create_planet(
         camera_pos = planet_position
             + spawn_direction
                 * (surface_radius * INITIAL_CAMERA_DISTANCE_MULTIPLIER + INITIAL_CAMERA_ALTITUDE);
+
+        camera_pos = vec3(1287700.88, 6242394.00, 136645.75);
         let spawn_orientation = engine::camera::Camera::look_at(
             vec3(0.01, -1.0, 0.0).normalize(),
             vec3(0.0, 0.0, -1.0),

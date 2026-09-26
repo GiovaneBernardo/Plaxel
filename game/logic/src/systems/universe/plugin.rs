@@ -14,23 +14,25 @@ use game_types::terrain::terrain_field::TerrainGraphApplyQueue;
 pub struct UniversePlugin;
 impl Plugin for UniversePlugin {
     fn build(&self, app: &mut engine::App) {
-        app.add_plugin(PlanetTerrainProducerPlugin)
-            .add_plugin(PlanetOceanProducerPlugin)
-            .init_resource::<PlanetMeshGeneration>()
-            .init_resource::<PlanetOceanMeshGeneration>()
-            .init_resource::<TerrainGraphApplyQueue>()
+        app.add_plugin(TerrainPlugin)
+            //.add_plugin(WaterPlugin)
             .add_system(CoreSchedule::Startup, create_star_system)
             .add_system(
                 CoreSchedule::Update,
                 systems::universe::planet_system_update,
-            )
+            );
+    }
+}
+
+pub struct TerrainPlugin;
+impl Plugin for TerrainPlugin {
+    fn build(&self, app: &mut engine::App) {
+        app.add_plugin(PlanetTerrainProducerPlugin)
+            .init_resource::<PlanetMeshGeneration>()
+            .init_resource::<TerrainGraphApplyQueue>()
             .add_system(
                 CoreSchedule::Update,
                 systems::planet_octree_update::drain_completed_requests,
-            )
-            .add_system(
-                CoreSchedule::Update,
-                systems::planet_ocean_update::drain_completed_requests,
             )
             .add_system(
                 CoreSchedule::Update,
@@ -39,6 +41,18 @@ impl Plugin for UniversePlugin {
             .add_system(
                 CoreSchedule::Update,
                 systems::planet_octree_update::planet_octree_update,
+            );
+    }
+}
+
+pub struct WaterPlugin;
+impl Plugin for WaterPlugin {
+    fn build(&self, app: &mut engine::App) {
+        app.add_plugin(PlanetOceanProducerPlugin)
+            .init_resource::<PlanetOceanMeshGeneration>()
+            .add_system(
+                CoreSchedule::Update,
+                systems::planet_ocean_update::drain_completed_requests,
             )
             .add_system(
                 CoreSchedule::Update,

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::assets::material::Material;
 use crate::assets::material::{TextureAsset, TextureMip};
 use crate::prelude::*;
-use crate::renderer::FullscreenPassNode;
+use crate::renderer::{FullscreenPassNode, SunDirection};
 
 pub struct AtmospherePassNode {
     fullscreen: FullscreenPassNode,
@@ -255,6 +255,7 @@ impl RenderNode for AtmospherePassNode {
             return;
         };
         let surface_size = api.get_surface_size();
+        let sun = resources.get::<SunDirection>().copied().unwrap_or_default().0;
 
         let planet_radius = self.settings.planet_radius.max(1.0);
         let atmosphere_radius =
@@ -267,12 +268,7 @@ impl RenderNode for AtmospherePassNode {
                 camera_data.uniform.position[2],
                 0.0,
             ],
-            sun_direction: [
-                self.settings.sun_direction[0],
-                self.settings.sun_direction[1],
-                self.settings.sun_direction[2],
-                0.0,
-            ],
+            sun_direction: [sun.x, sun.y, sun.z, 0.0],
             planet_center: [
                 self.settings.planet_center[0],
                 self.settings.planet_center[1],

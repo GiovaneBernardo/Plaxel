@@ -4,8 +4,11 @@ use std::{
 };
 
 use engine::{
-    game_info, multithreading::job_system::JobSystem, prelude::*, profile_scope,
-    renderer::DebugPassNode,
+    game_info,
+    multithreading::job_system::JobSystem,
+    prelude::*,
+    profile_scope,
+    renderer::{AtmospherePassNode, DebugPassNode},
 };
 use game_types::{
     octree::{
@@ -53,6 +56,8 @@ pub fn planet_octree_update(
 
     let mut changes = Vec::new();
     let mut active_planets = HashSet::new();
+    let mut atmosphere_planet = None;
+    let mut atmosphere_distance = f64::INFINITY;
     let lod_strength = lod_settings.strength;
     let mut debug_pass = globals
         .renderer
@@ -63,6 +68,14 @@ pub fn planet_octree_update(
     }
 
     planets_query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
+        // Lighting also updates while LOD is unchanged or octree updates are paused.
+        let distance = camera
+            .world_position
+            .distance_squared(planet.position.as_dvec3());
+        if distance < atmosphere_distance {
+            atmosphere_distance = distance;
+            atmosphere_planet = Some((planet.position, terrain_config.radius, planet.solar_system));
+        }
         active_planets.insert(entity);
         let change_start = changes.len();
         let pending = generation
@@ -249,25 +262,26 @@ pub fn planet_octree_update(
         }
     }
 
-    // TODO: Reenable this (not sure what it does, might be to sync the sun direction when planet moves)
-    //if atmosphere_planet.is_some() {
-    //    let (plan, planet_radius) = atmosphere_planet.unwrap();
-    //    let planet_position = plan.position;
-    //    let sun_position = transforms.get(plan.solar_system).unwrap().0.position;
-    //
-    //    let settings = &mut ctx
-    //        .globals
-    //        .renderer
-    //        .render_graph
-    //        .get_node_mut::<AtmospherePassNode>(engine::renderer::ids::graph_passes::ATMOSPHERE)
-    //        .unwrap()
-    //        .settings;
-    //    settings.set_planet(planet_position.into(), planet_radius);
-    //    settings.sun_direction = (vec3(sun_position.x, sun_position.y, sun_position.z)
-    //        - vec3(planet_position.x, planet_position.y, planet_position.z))
-    //    .normalize()
-    //    .into();
-    //}
+    if let Some((planet_position, planet_radius, solar_system)) = atmosphere_planet {
+        if let Some(atmosphere) = globals
+            .renderer
+            .render_graph
+            .get_node_mut::<AtmospherePassNode>(engine::renderer::ids::graph_passes::ATMOSPHERE)
+        {
+            atmosphere
+                .settings
+                .set_planet(planet_position.to_array(), planet_radius);
+            if let Some((sun_transform,)) = transforms.get(solar_system) {
+                // Preserve the last valid direction when the star and planet coincide.
+                if let Some(direction) = (sun_transform.position.as_dvec3()
+                    - planet_position.as_dvec3())
+                    .try_normalize()
+                {
+                    atmosphere.settings.sun_direction = direction.as_vec3().to_array();
+                }
+            }
+        }
+    }
 }
 
 pub fn apply_terrain_graph_changes(

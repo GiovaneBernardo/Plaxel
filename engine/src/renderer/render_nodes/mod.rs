@@ -7,4 +7,4 @@ pub use atmosphere_pass_node::{AtmospherePassNode, AtmosphereSettings};
 pub use debug_pass_node::DebugPassNode;
 pub use fullscreen_pass_node::FullscreenPassNode;
 pub use geometry_pass_node::GeometryPassNode;
-pub use shadow_pass_node::{ShadowBindings, ShadowPassNode, ShadowUniform};
+pub use shadow_pass_node::{ShadowBindings, ShadowPassNode, ShadowUniform, SunDirection};

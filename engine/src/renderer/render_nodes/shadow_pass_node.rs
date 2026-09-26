@@ -9,6 +9,15 @@ use crate::{
 };
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
+/// Frame-wide direction from the scene toward the sun, shared by all lighting passes.
+#[derive(Clone, Copy)]
+pub struct SunDirection(pub Vec3);
+
+impl Default for SunDirection {
+    fn default() -> Self {
+        Self(Vec3::new(0.3, 0.6, 0.4).normalize())
+    }
+}
 // Keep the single local shadow map around the player. In particular, do not include the
 // opposite side of a planet in the caster volume.
 const SHADOW_MAX_DISTANCE: f32 = 1_000.0;
@@ -78,10 +87,10 @@ impl ShadowPassNode {
         }
     }
 
-    fn uniform(camera_position: Vec3) -> ShadowUniform {
+    fn uniform(camera_position: Vec3, sun: SunDirection) -> ShadowUniform {
         // This direction matches the terrain's directional light. It points from the world
         // toward the light, so the shadow camera sits along it and looks back at the scene.
-        let light_direction = Vec3::new(0.3, 0.6, 0.4).normalize();
+        let light_direction = sun.0;
         let texel_world_size = (SHADOW_HALF_EXTENT * 2.0) / SHADOW_MAP_SIZE as f32;
         let center = Vec3::new(
             (camera_position.x / texel_world_size).round() * texel_world_size,
@@ -132,7 +141,7 @@ impl RenderNode for ShadowPassNode {
 
     fn compile(&mut self, ctx: &mut NodeCompileContext) {
         let depth_texture = ctx.output_texture("shadow_depth_map");
-        let initial_uniform = Self::uniform(Vec3::ZERO);
+        let initial_uniform = Self::uniform(Vec3::ZERO, SunDirection::default());
         let uniform_buffer = ctx.api.create_buffer(&BufferDescriptor {
             label: "shadow_uniform".into(),
             size: std::mem::size_of::<ShadowUniform>() as u64,
@@ -210,7 +219,8 @@ impl RenderNode for ShadowPassNode {
             return;
         };
         let camera_position = Vec3::from_array(camera.uniform.position);
-        let uniform = Self::uniform(camera_position);
+        let sun = resources.get::<SunDirection>().copied().unwrap_or_default();
+        let uniform = Self::uniform(camera_position, sun);
         let buffer = resources
             .get_labeled::<ShadowBindings>("shadow_bindings")
             .expect("shadow bindings must be compiled before preparing shadows")
@@ -240,7 +250,7 @@ mod tests {
     #[test]
     fn shadow_projection_uses_standard_depth_and_faces_the_light() {
         let camera_position = Vec3::new(120.0, 8_500.0, -75.0);
-        let uniform = ShadowPassNode::uniform(camera_position);
+        let uniform = ShadowPassNode::uniform(camera_position, SunDirection::default());
         let view_proj = Mat4::from_cols_array_2d(&uniform.view_proj);
         let light_direction = Vec3::from_array(uniform.light_direction);
 
@@ -254,10 +264,48 @@ mod tests {
     }
 
     #[test]
+    fn moving_sun_rotates_shadow_projection_and_lighting_together() {
+        let camera_position = Vec3::new(120.0, 8_500.0, -75.0);
+        let mut previous_matrix = None;
+        for direction in [Vec3::X, Vec3::Y, Vec3::NEG_Y, Vec3::Z] {
+            let uniform = ShadowPassNode::uniform(camera_position, SunDirection(direction));
+            assert_eq!(uniform.light_direction, direction.to_array());
+            let matrix = Mat4::from_cols_array_2d(&uniform.view_proj);
+            assert!(matrix.is_finite());
+            let toward_sun = matrix.project_point3(direction * 500.0);
+            let away_from_sun = matrix.project_point3(-direction * 500.0);
+            assert!((toward_sun.z - 0.25).abs() < 0.001);
+            assert!((away_from_sun.z - 0.75).abs() < 0.001);
+            if let Some(previous) = previous_matrix {
+                assert_ne!(matrix, previous);
+            }
+            previous_matrix = Some(matrix);
+        }
+    }
+
+    #[test]
+    fn shadow_volume_stays_centered_on_camera_after_movement() {
+        let texel_world_size = SHADOW_HALF_EXTENT * 2.0 / SHADOW_MAP_SIZE as f32;
+        for direction in [SunDirection::default().0, Vec3::X, Vec3::Y, Vec3::NEG_Y] {
+            for camera_position in [
+                Vec3::ZERO,
+                Vec3::new(123.4, 8_573.7, -921.1),
+                Vec3::new(-40_000.2, 1_235.3, 98_765.4),
+            ] {
+                let uniform = ShadowPassNode::uniform(camera_position, SunDirection(direction));
+                let matrix = Mat4::from_cols_array_2d(&uniform.view_proj);
+                // The shaders supply camera-relative positions, so the camera is zero.
+                let center_relative = matrix.inverse().project_point3(Vec3::new(0.0, 0.0, 0.5));
+                assert!(center_relative.length() < texel_world_size);
+            }
+        }
+    }
+
+    #[test]
     fn starting_terrain_is_inside_the_local_shadow_volume() {
         let camera_position = Vec3::new(0.0, 8_573.0, 0.0);
         let terrain_position = Vec3::new(0.0, 8_192.0, 0.0);
-        let uniform = ShadowPassNode::uniform(camera_position);
+        let uniform = ShadowPassNode::uniform(camera_position, SunDirection::default());
         let ndc = Mat4::from_cols_array_2d(&uniform.view_proj)
             .project_point3(terrain_position - camera_position);
 

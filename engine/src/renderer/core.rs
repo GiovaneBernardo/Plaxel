@@ -242,11 +242,14 @@ impl Renderer {
         self.render_graph = RenderGraph::default_render_graph(default_meshes);
         self.render_graph
             .compile(&mut self.render_resources, self.renderer_api.as_mut());
-        let shadow = *self
-            .render_resources
+        Self::sync_shadow_view(&mut self.view_registry, &self.render_resources);
+    }
+
+    fn sync_shadow_view(views: &mut RenderViewRegistry, resources: &RenderResources) {
+        let shadow = resources
             .get_labeled::<ShadowBindings>("shadow_bindings")
             .expect("the default shadow pass must compile its bindings");
-        self.view_registry.set_views(
+        views.set_views(
             graph_passes::SHADOWS,
             vec![RenderView {
                 id: RenderViewId::new("engine.shadow_cascade.0"),
@@ -269,6 +272,21 @@ impl Renderer {
 
     pub fn prepare(&mut self) {
         crate::profile_scope!("renderer.prepare");
+        // The editor recompiles the graph after renderer initialization. Refresh the
+        // cached view before producers can rebind an obsolete shadow uniform buffer.
+        Self::sync_shadow_view(&mut self.view_registry, &self.render_resources);
+        // Snapshot lighting before any pass prepares: shadows run before atmosphere.
+        let sun = self
+            .render_graph
+            .get_node_mut::<AtmospherePassNode>(graph_passes::ATMOSPHERE)
+            .map(|atmosphere| {
+                SunDirection(
+                    crate::math::Vec3::from_array(atmosphere.settings.sun_direction)
+                        .normalize_or(SunDirection::default().0),
+                )
+            })
+            .unwrap_or_default();
+        self.render_resources.insert(sun);
         let camera_upload = self
             .render_resources
             .get_labeled::<FrameBindings>("frame_bindings")
@@ -583,5 +601,54 @@ impl CameraData {
             inverse_projection: inverse_projection.to_cols_array_2d(),
             inverse_view: inverse_view.to_cols_array_2d(),
         }
+    }
+}
+
+#[cfg(test)]
+mod shadow_view_tests {
+    use super::*;
+
+    #[test]
+    fn graph_recompile_refreshes_the_shadow_view_used_by_producers() {
+        let mut resources = RenderResources::new();
+        let mut views = RenderViewRegistry::default();
+        let original = ShadowBindings {
+            uniform_buffer: BufferHandle(1),
+            view_layout: BindGroupLayoutHandle(2),
+            view_bind_group: BindGroupHandle(3),
+            sampling_layout: BindGroupLayoutHandle(4),
+            sampling_bind_group: BindGroupHandle(5),
+            depth_texture: TextureHandle(6),
+        };
+        resources.insert_labeled("shadow_bindings", original);
+        Renderer::sync_shadow_view(&mut views, &resources);
+
+        // Model the editor's second graph compile: all shadow resources are replaced,
+        // while the registry still contains the view created during renderer init.
+        let replacement = ShadowBindings {
+            uniform_buffer: BufferHandle(11),
+            view_layout: BindGroupLayoutHandle(12),
+            view_bind_group: BindGroupHandle(13),
+            sampling_layout: BindGroupLayoutHandle(14),
+            sampling_bind_group: BindGroupHandle(15),
+            depth_texture: TextureHandle(16),
+        };
+        resources.insert_labeled("shadow_bindings", replacement);
+        assert_eq!(
+            views.views_for(graph_passes::SHADOWS)[0].view_bind_group,
+            Some(original.view_bind_group),
+        );
+
+        Renderer::sync_shadow_view(&mut views, &resources);
+        let shadow_views = views.views_for(graph_passes::SHADOWS);
+        assert_eq!(shadow_views.len(), 1);
+        assert_eq!(
+            shadow_views[0].view_bind_group,
+            Some(replacement.view_bind_group),
+        );
+        assert_eq!(
+            shadow_views[0].kind,
+            RenderViewKind::ShadowCascade { cascade: 0 },
+        );
     }
 }
