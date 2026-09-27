@@ -22,6 +22,7 @@ use engine::{
     math::{Quat, Vec3, vec3},
 };
 use game_types::{
+    clouds::CloudsComponent,
     octree::{
         FaceNeighbor, GeneratedMesh, GeneratedReplacement, NodeKey, NodeState, OctreeChanges,
         OctreeNode, PlanetLodSettings, PlanetMeshRequest,
@@ -370,6 +371,11 @@ pub fn create_planet(
         solar_system,
     };
 
+    let clouds = CloudsComponent {
+        min_height: 500.0,
+        max_height: 50000.0,
+    };
+
     commands.entity(new_planet).insert_bundle((
         TransformComponent {
             position: planet_position,
@@ -380,6 +386,7 @@ pub fn create_planet(
         planet,
         terrain_edits,
         terrain_config,
+        clouds,
     ));
 
     //pending_mesh_requests.requests.extend(mesh_requests);

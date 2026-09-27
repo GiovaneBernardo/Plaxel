@@ -2,6 +2,7 @@
 
 pub mod assembly;
 pub mod block;
+pub mod clouds;
 pub mod game_mode;
 pub mod octree;
 pub mod planet;

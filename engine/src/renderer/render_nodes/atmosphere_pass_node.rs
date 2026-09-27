@@ -37,6 +37,7 @@ impl AtmospherePassNode {
         }
     }
 
+    // Deprecated: Atmosphere shader no more uses a skybox texture, I'll keep this code though, as it can be an example on how to load textures for shaders
     fn load_skybox_texture() -> TextureAsset {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -75,6 +76,8 @@ impl AtmospherePassNode {
                         name: Self::SKYBOX_PATH.to_string(),
                         width,
                         height,
+                        layers: 1,
+                        dimension: TextureDimension::D2,
                         format: TextureFormat::Rgba16Float,
                         mip_levels: vec![TextureMip {
                             width,
@@ -100,6 +103,8 @@ impl AtmospherePassNode {
             name: "fallback_skybox".to_string(),
             width: 1,
             height: 1,
+            layers: 1,
+            dimension: TextureDimension::D2,
             format: TextureFormat::Rgba16Float,
             mip_levels: vec![TextureMip {
                 width: 1,
@@ -114,7 +119,7 @@ impl AtmospherePassNode {
         ctx: &mut NodeCompileContext,
         scene_color: TextureHandle,
         scene_depth: TextureHandle,
-        skybox_texture: TextureHandle,
+        //skybox_texture: TextureHandle,
     ) -> BindGroupHandle {
         let layout = self
             .bind_group_layout
@@ -134,7 +139,7 @@ impl AtmospherePassNode {
                 (1, BindGroupEntry::Texture(scene_depth)),
                 (2, BindGroupEntry::Texture(scene_color)),
                 (3, BindGroupEntry::Sampler(ctx.api.get_default_sampler())),
-                (4, BindGroupEntry::Texture(skybox_texture)),
+                //(4, BindGroupEntry::Texture(skybox_texture)),
             ],
         });
 
@@ -143,16 +148,31 @@ impl AtmospherePassNode {
     }
 
     pub fn pass_descriptor() -> RenderNodeDescriptor {
+        const MAIN_COLOR_USAGE: TextureUsages = TextureUsages::RENDER_ATTACHMENT
+            .union(TextureUsages::COPY_SRC)
+            .union(TextureUsages::TEXTURE_BINDING);
+
         RenderNodeDescriptor {
             name: "atmosphere",
             color_attachments: vec![ColorAttachmentDescriptor {
-                name: "swapchain_image",
+                name: "atmosphere_image",
                 load_op: AttachmentLoadOp::ClearColor([0.0, 0.0, 0.0, 1.0]),
                 store: true,
             }],
             depth_attachment: None,
             input_textures: vec!["main_color", "main_depth"],
-            output_textures: vec![OutputTexture::WriteTo("swapchain_image")],
+            output_textures: vec![OutputTexture::Create(TextureSlot {
+                name: "atmosphere_image",
+                texture_descriptor: TextureDescriptor {
+                    label: "atmosphere_image".to_string(),
+                    size: TextureSize::FullRes,
+                    format: TextureFormat::Bgra8UnormSrgb,
+                    dimension: TextureDimension::D2,
+                    usage: MAIN_COLOR_USAGE,
+                    mip_levels: 1,
+                    sample_count: 1,
+                },
+            })],
             input_buffers: Vec::new(),
             output_buffers: Vec::new(),
         }
@@ -218,36 +238,28 @@ impl RenderNode for AtmospherePassNode {
                     entry_type: BindingType::Sampler,
                     count: None,
                 },
-                BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: ShaderStages::Fragment,
-                    entry_type: BindingType::Texture {
-                        dimension: TextureDimension::D2,
-                        sample_type: TextureSampleType::FloatFilterable,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
             ],
         });
 
-        let skybox_texture = self.skybox_texture.unwrap_or_else(|| {
-            let texture = Self::load_skybox_texture();
-            let handle = ctx.api.create_texture_asset(&texture);
-            self.skybox_texture = Some(handle);
-            handle
-        });
+        //let skybox_texture = self.skybox_texture.unwrap_or_else(|| {
+        //    let texture = Self::load_skybox_texture();
+        //    let handle = ctx.api.create_texture_asset(&texture);
+        //    self.skybox_texture = Some(handle);
+        //    handle
+        //});
         let scene_color = ctx.input_texture("main_color");
         self.uniform_buffer = Some(uniform_buffer);
         self.bind_group_layout = Some(layout);
         let scene_depth = ctx.input_texture("main_depth");
-        self.rebuild_bind_group(ctx, scene_color, scene_depth, skybox_texture);
+        self.rebuild_bind_group(ctx, scene_color, scene_depth);
 
         self.fullscreen.bind_group_layouts = vec![layout];
         self.fullscreen.compile(ctx);
     }
 
     fn prepare(&mut self, resources: &mut RenderResources, api: &mut dyn RendererAPI) {
+        // The following cloud pass uses the same active planet as the sky.
+        resources.insert(self.settings);
         let Some(buffer) = self.uniform_buffer else {
             return;
         };
@@ -255,7 +267,11 @@ impl RenderNode for AtmospherePassNode {
             return;
         };
         let surface_size = api.get_surface_size();
-        let sun = resources.get::<SunDirection>().copied().unwrap_or_default().0;
+        let sun = resources
+            .get::<SunDirection>()
+            .copied()
+            .unwrap_or_default()
+            .0;
 
         let planet_radius = self.settings.planet_radius.max(1.0);
         let atmosphere_radius =
@@ -308,12 +324,23 @@ impl RenderNode for AtmospherePassNode {
         _width: u32,
         _height: u32,
     ) {
-        if let (Some(scene_color), Some(scene_depth), Some(skybox_texture)) = (
+        // This override also owns resizing the offscreen output. The clouds
+        // pass refreshes its binding to this texture later in graph order.
+        for output in Self::pass_descriptor().output_textures {
+            if let OutputTexture::Create(slot) = output {
+                if let Some(texture) = graph_resources.texture(slot.name) {
+                    ctx.api.resize_texture(texture, &slot.texture_descriptor);
+                }
+            }
+        }
+
+        // Resizing replaces the texture views, so refresh the sampled inputs even
+        // when the optional skybox is not loaded.
+        if let (Some(scene_color), Some(scene_depth)) = (
             graph_resources.texture("main_color").copied(),
             graph_resources.texture("main_depth").copied(),
-            self.skybox_texture,
         ) {
-            self.rebuild_bind_group(ctx, scene_color, scene_depth, skybox_texture);
+            self.rebuild_bind_group(ctx, scene_color, scene_depth);
         }
     }
 

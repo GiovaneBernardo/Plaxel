@@ -319,6 +319,8 @@ pub struct TextureAsset {
     pub name: String,
     pub width: u32,
     pub height: u32,
+    pub layers: u32,
+    pub dimension: TextureDimension,
     pub format: TextureFormat,
     pub mip_levels: Vec<TextureMip>,
 }

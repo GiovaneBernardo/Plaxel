@@ -7,6 +7,8 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [dependencies]
+noise = "0.9.0"
+
 anyhow = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
@@ -35,7 +37,6 @@ num_cpus = { workspace = true }
 parking_lot = { workspace = true }
 subsecond = { workspace = true }
 web-time = { workspace = true }
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 renderdoc = { workspace = true }
 libloading = { workspace = true }

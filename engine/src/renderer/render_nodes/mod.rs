@@ -1,4 +1,5 @@
 pub mod atmosphere_pass_node;
+pub mod clouds_pass_node;
 pub mod debug_pass_node;
 pub mod fullscreen_pass_node;
 pub mod geometry_pass_node;

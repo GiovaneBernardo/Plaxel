@@ -2480,11 +2480,11 @@ impl WgpuBackend {
             size: wgpu::Extent3d {
                 width: texture.width,
                 height: texture.height,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: texture.layers.max(1),
             },
             mip_level_count: texture.mip_levels.len().max(1) as u32,
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+            dimension: texture.dimension.into(),
             format,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
@@ -2506,7 +2506,7 @@ impl WgpuBackend {
             wgpu::Extent3d {
                 width: mip.width,
                 height: mip.height,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: texture.layers.max(1),
             },
         );
 

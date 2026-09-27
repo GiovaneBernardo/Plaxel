@@ -84,7 +84,7 @@ impl Plugin for GamePlugin {
             "game.initialize_state",
             initialize_game_state,
         )
-        .add_system(CoreSchedule::Startup, preload_build_block_assets)
+        //.add_system(CoreSchedule::Startup, preload_build_block_assets)
         .add_named_legacy_system(
             CoreSchedule::Startup,
             "game.planet_init",
@@ -248,7 +248,7 @@ fn initialize_game_state(
     world.insert(
         camera_entity,
         CameraComponent {
-            speed: 35000.0,
+            speed: 1.0,
             fov: 75.0,
             far_plane: 15000.0,
             near_plane: 0.001,

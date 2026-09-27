@@ -5,7 +5,7 @@ use crate::{
     prelude::*,
     renderer::{
         AtmospherePassNode, DebugPassNode, DefaultMeshes, GeometryPassNode, ShadowPassNode,
-        TakenRenderNode,
+        TakenRenderNode, clouds_pass_node::CloudsPassNode,
     },
 };
 
@@ -91,6 +91,11 @@ impl RenderGraph {
         graph.nodes.push((
             crate::renderer::ids::graph_passes::ATMOSPHERE,
             Box::new(AtmospherePassNode::new()),
+        ));
+
+        graph.nodes.push((
+            crate::renderer::ids::graph_passes::CLOUDS,
+            Box::new(CloudsPassNode::new()),
         ));
 
         RenderGraph::default_debug_nodes(&mut graph, default_meshes);

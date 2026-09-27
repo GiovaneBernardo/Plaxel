@@ -183,6 +183,8 @@ impl ObjImporter {
             format: descriptor.format,
             width,
             height,
+            layers: 1,
+            dimension: TextureDimension::D2,
             mip_levels: vec![TextureMip {
                 width,
                 height,

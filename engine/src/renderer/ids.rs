@@ -105,6 +105,7 @@ pub mod graph_passes {
     pub const SHADOWS: GraphPassId = GraphPassId::new("shadow_cascades");
     pub const WATER: GraphPassId = GraphPassId::new("water");
     pub const ATMOSPHERE: GraphPassId = GraphPassId::new("atmosphere");
+    pub const CLOUDS: GraphPassId = GraphPassId::new("clouds");
     pub const DEBUG: GraphPassId = GraphPassId::new("debug");
     pub const EGUI: GraphPassId = GraphPassId::new("egui");
 }
