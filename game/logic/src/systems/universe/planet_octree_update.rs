@@ -12,7 +12,8 @@ use engine::{
 };
 use game_types::{
     octree::{
-        GeneratedMesh, NodeKey, NodeState, OctreeChanges, PlanetLodSettings, PlanetMeshRequest,
+        FaceNeighbor, GeneratedMesh, NodeKey, NodeState, OctreeChanges, OctreeNode,
+        PlanetLodSettings, PlanetMeshRequest,
     },
     planet::{Planet, PlanetTerrainEdits},
     terrain::{self, PlanetTerrainConfig, terrain_field::TerrainGraphApplyQueue},
@@ -83,6 +84,40 @@ pub fn planet_octree_update(
             .values()
             .filter(|r| r.planet_entity == entity)
             .count();
+        // Let old LOD/edit snapshots finish before selecting the current leaves.
+        // While an edit is queued, do not schedule more LOD work ahead of it.
+        if generation.dirty_terrain.contains_key(&entity) {
+            if pending == 0 {
+                let bounds = generation.dirty_terrain.remove(&entity).unwrap();
+                octree::refresh_density_ranges_in_bounds(
+                    &mut planet.surface_octree_root,
+                    bounds.min,
+                    bounds.max,
+                    planet.position,
+                    terrain_config,
+                    terrain_edits,
+                );
+                let requests = terrain_edit_requests(planet, entity, bounds);
+                let change = OctreeChanges::ReplaceMeshes {
+                    planet_entity: entity,
+                    transition_key: planet.surface_octree_root.key,
+                    completed_state: planet.surface_octree_root.state,
+                    additional_transitions: Vec::new(),
+                    // Empty generated meshes must also remove the old geometry.
+                    keys_to_remove: requests.iter().map(|r| r.node_key).collect(),
+                    requests,
+                };
+                submit_replacement(
+                    change,
+                    vec![octree::node_bounds(&planet.surface_octree_root)],
+                    &mut generation,
+                    &globals.job_system,
+                    terrain_config,
+                    &Arc::new(terrain_edits.clone()),
+                );
+            }
+            return;
+        }
         let mut reserved: Vec<_> = generation
             .replacements
             .values()
@@ -236,6 +271,9 @@ pub fn planet_octree_update(
     });
 
     generation
+        .dirty_terrain
+        .retain(|entity, _| active_planets.contains(entity));
+    generation
         .balanced_planets
         .retain(|entity| active_planets.contains(entity));
     generation
@@ -273,9 +311,8 @@ pub fn planet_octree_update(
                 .set_planet(planet_position.to_array(), planet_radius);
             if let Some((sun_transform,)) = transforms.get(solar_system) {
                 // Preserve the last valid direction when the star and planet coincide.
-                if let Some(direction) = (sun_transform.position.as_dvec3()
-                    - planet_position.as_dvec3())
-                    .try_normalize()
+                if let Some(direction) =
+                    (sun_transform.position.as_dvec3() - planet_position.as_dvec3()).try_normalize()
                 {
                     atmosphere.settings.sun_direction = direction.as_vec3().to_array();
                 }
@@ -414,6 +451,103 @@ pub fn fresh_terrain_root(
     })
 }
 
+fn node_overlaps_bounds(node: &OctreeNode, bounds_min: Vec3, bounds_max: Vec3) -> bool {
+    let node_max = node.min + vec3(node.size, node.size, node.size);
+
+    node.min.x <= bounds_max.x
+        && node_max.x >= bounds_min.x
+        && node.min.y <= bounds_max.y
+        && node_max.y >= bounds_min.y
+        && node.min.z <= bounds_max.z
+        && node_max.z >= bounds_min.z
+}
+
+fn collect_dirty_mesh_requests(
+    node: &OctreeNode,
+    planet_entity: Entity,
+    planet_position: Vec3,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    requests: &mut Vec<PlanetMeshRequest>,
+) {
+    if !node_overlaps_bounds(node, bounds_min, bounds_max) {
+        return;
+    }
+
+    if let Some(children) = node.children.as_ref() {
+        for child in children {
+            collect_dirty_mesh_requests(
+                child,
+                planet_entity,
+                planet_position,
+                bounds_min,
+                bounds_max,
+                requests,
+            );
+        }
+        return;
+    }
+
+    requests.push(PlanetMeshRequest {
+        planet_entity,
+        node_key: node.key,
+        planet_position,
+        node_min_corner: node.min,
+        node_size: node.size,
+        face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+    });
+}
+
+fn terrain_edit_requests(
+    planet: &Planet,
+    entity: Entity,
+    bounds: octree::Aabb,
+) -> Vec<PlanetMeshRequest> {
+    let mut requests = Vec::new();
+    collect_dirty_mesh_requests(
+        &planet.surface_octree_root,
+        entity,
+        planet.position,
+        bounds.min,
+        bounds.max,
+        &mut requests,
+    );
+    let mut keys: HashSet<_> = requests.iter().map(|r| r.node_key).collect();
+    for dirty in requests.clone() {
+        let mut neighbors = Vec::new();
+        octree::collect_face_neighbor_leaves(
+            &planet.surface_octree_root,
+            dirty.node_min_corner,
+            dirty.node_size,
+            &mut neighbors,
+        );
+        for neighbor in neighbors {
+            if neighbor.size != dirty.node_size && keys.insert(neighbor.key) {
+                requests.push(PlanetMeshRequest {
+                    planet_entity: entity,
+                    node_key: neighbor.key,
+                    planet_position: planet.position,
+                    node_min_corner: neighbor.min,
+                    node_size: neighbor.size,
+                    face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
+                });
+            }
+        }
+    }
+    for request in &mut requests {
+        octree::annotate_mesh_request(&planet.surface_octree_root, request);
+    }
+    requests.sort_unstable_by(|a, b| {
+        let center = bounds.center();
+        (a.node_min_corner + Vec3::splat(a.node_size * 0.5) - center)
+            .length_squared()
+            .total_cmp(
+                &(b.node_min_corner + Vec3::splat(b.node_size * 0.5) - center).length_squared(),
+            )
+    });
+    requests
+}
+
 fn submit_replacement(
     change: OctreeChanges,
     reserved_regions: Vec<octree::Aabb>,
@@ -472,16 +606,20 @@ fn submit_replacement(
         let cache = Arc::clone(cache);
 
         job_system
-            .spawn_prioritized_named("planet.mesh.generate", 100, move || {
-                let (mesh, uniform) =
-                    generate_terrain_node_mesh(&request, terrain_config, edits, &cache);
+            .spawn_prioritized_named(
+                "planet.mesh.generate",
+                100_u32.saturating_sub((request.node_size / 32.0) as u32), // TODO: SEE IF IT MAKES ANY DIFFERENCE
+                move || {
+                    let (mesh, uniform) =
+                        generate_terrain_node_mesh(&request, terrain_config, edits, &cache);
 
-                let _ = tx.send(CompletedMesh {
-                    replacement_id,
-                    mesh,
-                    uniform,
-                });
-            })
+                    let _ = tx.send(CompletedMesh {
+                        replacement_id,
+                        mesh,
+                        uniform,
+                    });
+                },
+            )
             .unwrap();
     }
 }
@@ -661,6 +799,9 @@ pub struct PlanetMeshGeneration {
     pub next_replacement_id: u64,
 
     #[reflect(ignore)]
+    dirty_terrain: HashMap<Entity, octree::Aabb>,
+
+    #[reflect(ignore)]
     pub density_caches: HashMap<Entity, Arc<DensityCache>>,
 
     #[reflect(ignore)]
@@ -676,12 +817,26 @@ pub struct PlanetMeshGeneration {
     pub debug_nodes: HashMap<(Entity, NodeKey), PlanetMeshRequest>,
 }
 
+impl PlanetMeshGeneration {
+    pub fn queue_terrain_edit(&mut self, planet: Entity, min: Vec3, max: Vec3) {
+        self.dirty_terrain
+            .entry(planet)
+            .and_modify(|bounds| {
+                bounds.min = bounds.min.min(min);
+                bounds.max = bounds.max.max(max);
+            })
+            .or_insert(octree::Aabb { min, max });
+        self.balanced_planets.remove(&planet);
+    }
+}
+
 impl Default for PlanetMeshGeneration {
     fn default() -> Self {
         let (completed_tx, completed_rx) = crossbeam_channel::unbounded();
 
         Self {
             next_replacement_id: 0,
+            dirty_terrain: HashMap::new(),
             density_caches: HashMap::new(),
             balanced_planets: HashSet::new(),
             replacements: HashMap::new(),
@@ -755,6 +910,57 @@ mod apply_tests {
             let node = octree::find_node_mut(&mut root, request.node_key).unwrap();
             assert!(node.children.is_none() && node.may_contain_surface);
         }
+    }
+
+    #[test]
+    fn edit_remesh_includes_empty_leaves_on_shared_boundaries() {
+        let config = crate::systems::universe::planet_system::default_planet_terrain_config();
+        let edits = PlanetTerrainEdits {
+            modified_chunks: HashMap::new(),
+            modified_ranges: HashMap::new(),
+        };
+        let mut root = fresh_terrain_root(Vec3::ZERO, &config, &edits).unwrap();
+        root.min = Vec3::splat(-32.0);
+        root.size = 64.0;
+        root.children = Some(std::array::from_fn(|i| {
+            let min = root.min
+                + vec3((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32) * 32.0;
+            Box::new(OctreeNode {
+                key: NodeKey {
+                    level: 1,
+                    x: min.x as i32,
+                    y: min.y as i32,
+                    z: min.z as i32,
+                },
+                min,
+                size: 32.0,
+                children: None,
+                vertex: None,
+                density_range: game_types::octree::DensityRange::new(1.0, 2.0),
+                may_contain_surface: false,
+                state: NodeState::Leaf,
+            })
+        }));
+        let mut requests = Vec::new();
+        // Adding terrain can create a surface in a previously empty leaf.
+        // An edit at a shared corner must also rebuild all touching chunks.
+        collect_dirty_mesh_requests(
+            &root,
+            Entity::PLACEHOLDER,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ONE,
+            &mut requests,
+        );
+        assert_eq!(requests.len(), 8);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r.node_key)
+                .collect::<HashSet<_>>()
+                .len(),
+            8
+        );
     }
 
     #[test]

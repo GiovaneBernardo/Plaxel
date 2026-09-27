@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,7 +14,7 @@ use engine::global_resources::GlobalResources;
 use engine::model::{MeshAsset, TransformInstance, Vertex};
 use engine::renderer::DefaultMeshes;
 use game_types::assembly::Assembly;
-use game_types::octree::{DensityRange, FaceNeighbor, OctreeNode, PlanetMeshRequest};
+use game_types::octree::DensityRange;
 use game_types::planet::{Planet, PlanetTerrainEdits, TerrainBrickKey};
 use game_types::terrain::PlanetTerrainConfig;
 use rand::Rng;
@@ -289,53 +288,6 @@ fn trace_terrain_surface(
     }
 
     None
-}
-
-fn node_overlaps_bounds(node: &OctreeNode, bounds_min: Vec3, bounds_max: Vec3) -> bool {
-    let node_max = node.min + vec3(node.size, node.size, node.size);
-
-    node.min.x <= bounds_max.x
-        && node_max.x >= bounds_min.x
-        && node.min.y <= bounds_max.y
-        && node_max.y >= bounds_min.y
-        && node.min.z <= bounds_max.z
-        && node_max.z >= bounds_min.z
-}
-
-fn collect_dirty_mesh_requests(
-    node: &OctreeNode,
-    planet_entity: Entity,
-    planet_position: Vec3,
-    bounds_min: Vec3,
-    bounds_max: Vec3,
-    requests: &mut Vec<PlanetMeshRequest>,
-) {
-    if !node_overlaps_bounds(node, bounds_min, bounds_max) {
-        return;
-    }
-
-    if let Some(children) = node.children.as_ref() {
-        for child in children {
-            collect_dirty_mesh_requests(
-                child,
-                planet_entity,
-                planet_position,
-                bounds_min,
-                bounds_max,
-                requests,
-            );
-        }
-        return;
-    }
-
-    requests.push(PlanetMeshRequest {
-        planet_entity,
-        node_key: node.key,
-        planet_position,
-        node_min_corner: node.min,
-        node_size: node.size,
-        face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
-    });
 }
 
 // Keep terrain-edit temporaries out of the hotpatched walking-system frame.
@@ -844,12 +796,13 @@ pub fn deform(
                                             let normalized_distance =
                                                 distance_from_hit / brush_radius;
                                             let brush_influence = 1.0 - normalized_distance;
-                                            let smooth_influence = brush_influence
-                                                * brush_influence
-                                                * (2.2 - 2.0 * brush_influence);
+                                            let smooth_influence = brush_influence;
+                                            //* brush_influence
+                                            //* (2.2 - 2.0 * brush_influence);
 
-                                            brick[sample_x][sample_y][sample_z] +=
-                                                brush_strength * smooth_influence;
+                                            brick[sample_x][sample_y][sample_z] += (brush_strength
+                                                * smooth_influence)
+                                                .min(brush_strength);
                                         }
 
                                         let value = brick[sample_x][sample_y][sample_z];
@@ -880,98 +833,11 @@ pub fn deform(
                         (max_brick.y + 1) as f32 * brick_size,
                         (max_brick.z + 1) as f32 * brick_size,
                     );
-                let mut dirty_mesh_requests = Vec::new();
-                let mut query =
-                    Query::<(&mut Planet, &PlanetTerrainEdits, &Arc<PlanetTerrainConfig>)>::new(
-                        world,
-                    );
-                query.for_each(|entity, (planet, terrain_edits, terrain_config)| {
-                    if entity != hit_entity {
-                        return;
-                    }
-
-                    octree::refresh_density_ranges_in_bounds(
-                        &mut planet.surface_octree_root,
-                        dirty_bounds_min,
-                        dirty_bounds_max,
-                        planet.position,
-                        terrain_config.as_ref(),
-                        terrain_edits,
-                    );
-                    collect_dirty_mesh_requests(
-                        &planet.surface_octree_root,
-                        hit_entity,
-                        planet.position,
-                        dirty_bounds_min,
-                        dirty_bounds_max,
-                        &mut dirty_mesh_requests,
-                    );
-                    // A transition polygon contains dual vertices from both
-                    // sides of an LOD boundary. If deformation changes either
-                    // side, remesh the opposite-resolution leaves as well.
-                    let dirty_snapshot = dirty_mesh_requests.clone();
-                    let mut scheduled: HashSet<(i32, i32, i32, i32)> = dirty_mesh_requests
-                        .iter()
-                        .map(|request| {
-                            (
-                                request.node_min_corner.x as i32,
-                                request.node_min_corner.y as i32,
-                                request.node_min_corner.z as i32,
-                                request.node_size as i32,
-                            )
-                        })
-                        .collect();
-                    for dirty in dirty_snapshot {
-                        let mut neighbors = Vec::new();
-                        octree::collect_face_neighbor_leaves(
-                            &planet.surface_octree_root,
-                            dirty.node_min_corner,
-                            dirty.node_size,
-                            &mut neighbors,
-                        );
-                        for neighbor in neighbors {
-                            let key = (
-                                neighbor.min.x as i32,
-                                neighbor.min.y as i32,
-                                neighbor.min.z as i32,
-                                neighbor.size as i32,
-                            );
-                            if neighbor.size == dirty.node_size
-                                || !neighbor.may_contain_surface
-                                || !scheduled.insert(key)
-                            {
-                                continue;
-                            }
-                            dirty_mesh_requests.push(PlanetMeshRequest {
-                                planet_entity: hit_entity,
-                                node_key: neighbor.key,
-                                planet_position: planet.position,
-                                node_min_corner: neighbor.min,
-                                node_size: neighbor.size,
-                                face_neighbors: [FaceNeighbor::SAME_OR_ABSENT; 6],
-                            });
-                        }
-                    }
-                    for request in &mut dirty_mesh_requests {
-                        octree::annotate_mesh_request(&planet.surface_octree_root, request);
-                    }
-                });
-                drop(query);
-
-                dirty_mesh_requests.sort_unstable_by(|a, b| {
-                    let a_center =
-                        a.node_min_corner + vec3(a.node_size, a.node_size, a.node_size) * 0.5;
-                    let b_center =
-                        b.node_min_corner + vec3(b.node_size, b.node_size, b.node_size) * 0.5;
-                    (a_center - hit_world)
-                        .length_squared()
-                        .total_cmp(&(b_center - hit_world).length_squared())
-                });
-
                 commands.push(move |ctx| {
-                    for request in dirty_mesh_requests {
-                        // TODO: REENABLE DENSITY FIELD EDITS
-                        //submit_requested_mesh_urgent(ctx, request);
+                    if let Some(mut generation) = ctx.world.get_resource_mut::<
+                        crate::systems::universe::planet_octree_update::PlanetMeshGeneration,
+                    >() {
+                        generation.queue_terrain_edit(hit_entity, dirty_bounds_min, dirty_bounds_max);
                     }
                 });
             }
