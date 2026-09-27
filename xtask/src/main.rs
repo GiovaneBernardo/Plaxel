@@ -9,7 +9,8 @@ fn main() {
     match task.as_deref() {
         Some("play") => play(false),
         Some("play-renderdoc") => play(true),
-        Some("play-editor") => editor(),
+        Some("play-editor") => editor(true),
+        Some("play-editor-no-hot-reload") => editor(false),
         Some("play-wasm") => wasm().unwrap(),
         _ => {
             eprintln!("usage: cargo xtask <play|play-renderdoc|play-editor|play-wasm>");
@@ -26,8 +27,18 @@ fn play(renderdoc: bool) {
     run_dx(&args);
 }
 
-fn editor() {
-    run_dx(&["serve", "--hotpatch", "--package", "editor-runner"]);
+fn editor(use_hot_reload: bool) {
+    if use_hot_reload {
+        run_dx(&["serve", "--hotpatch", "--package", "editor-runner"]);
+    } else {
+        let status = Command::new("cargo")
+            .args(["run", "-p", "editor-runner", "--bin", "editor-runner-bin"])
+            .status()
+            .expect("spawn cargo for editor-runner");
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
 }
 
 fn run_dx(args: &[&str]) {
