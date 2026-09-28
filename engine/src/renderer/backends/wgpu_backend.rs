@@ -667,6 +667,7 @@ pub struct WgpuBackend {
     bind_groups: HashMap<BindGroupHandle, wgpu::BindGroup>,
     bind_group_layouts: HashMap<BindGroupLayoutHandle, wgpu::BindGroupLayout>,
     textures: HashMap<TextureHandle, wgpu::Texture>,
+    texture_labels: HashMap<TextureHandle, String>,
     texture_views: HashMap<TextureHandle, wgpu::TextureView>,
     textures_by_uuid: HashMap<Uuid, TextureHandle>,
     materials_by_uuid: HashMap<Uuid, u32>,
@@ -873,6 +874,8 @@ impl RendererAPI for WgpuBackend {
 
         let view = wgpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.textures.insert(*texture_handle, wgpu_texture);
+        self.texture_labels
+            .insert(*texture_handle, descriptor.label.clone());
         self.texture_views.insert(*texture_handle, view);
     }
 
@@ -1145,6 +1148,7 @@ impl RendererAPI for WgpuBackend {
         }
 
         let handle = self.add_texture(wgpu_texture);
+        self.texture_labels.insert(handle, descriptor.label.clone());
         self.upload_texture(&handle, index);
         handle
     }
@@ -1659,7 +1663,9 @@ impl RendererAPI for WgpuBackend {
             view_formats: &[],
         });
 
-        self.add_texture(wgpu_texture)
+        let handle = self.add_texture(wgpu_texture);
+        self.texture_labels.insert(handle, descriptor.label.clone());
+        handle
     }
 
     fn create_sampler(&mut self, descriptor: &SamplerDescriptor) -> SamplerHandle {
@@ -2065,6 +2071,7 @@ impl WgpuBackend {
                 bind_groups: HashMap::new(),
                 bind_group_layouts: HashMap::new(),
                 textures: HashMap::new(),
+                texture_labels: HashMap::new(),
                 texture_views: HashMap::new(),
                 textures_by_uuid: HashMap::new(),
                 materials_by_uuid: HashMap::new(),
@@ -2452,6 +2459,35 @@ impl WgpuBackend {
         handle
     }
 
+    /// Live backend allocations, including render targets and uploaded assets.
+    /// The swapchain and editor-owned textures are not part of this registry.
+    pub fn debug_textures(&self) -> Vec<(Option<TextureHandle>, String, wgpu::Texture)> {
+        let mut textures: Vec<_> = self
+            .textures
+            .iter()
+            .map(|(&handle, texture)| {
+                (
+                    Some(handle),
+                    self.texture_labels
+                        .get(&handle)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Texture {} (unlabelled)", handle.0)),
+                    texture.clone(),
+                )
+            })
+            .collect();
+        textures.push((
+            None,
+            "depth_texture (backend)".into(),
+            self.depth_texture.texture.clone(),
+        ));
+        textures.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.0.map(|h| h.0).cmp(&b.0.map(|h| h.0)))
+        });
+        textures
+    }
+
     pub fn add_sampler(&mut self, sampler: wgpu::Sampler) -> SamplerHandle {
         let handle = SamplerHandle(self.samplers.len() as u32);
         self.samplers.insert(handle, sampler);
@@ -2510,7 +2546,9 @@ impl WgpuBackend {
             },
         );
 
-        self.add_texture(wgpu_texture)
+        let handle = self.add_texture(wgpu_texture);
+        self.texture_labels.insert(handle, texture.name.clone());
+        handle
     }
 
     pub fn add_bind_group_layout(

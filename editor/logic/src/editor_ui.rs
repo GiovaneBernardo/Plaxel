@@ -74,6 +74,7 @@ impl EditorTab {
 }
 
 pub struct EditorUi {
+    pub gpu_textures_open: bool,
     dock_state: DockState<EditorTab>,
     selected_entity: Option<Entity>,
     selected_render_node: Option<GraphPassId>,
@@ -112,6 +113,7 @@ impl EditorUi {
         };
 
         Self {
+            gpu_textures_open: false,
             dock_state,
             selected_entity: None,
             selected_render_node: None,
@@ -245,6 +247,7 @@ impl EditorUi {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.toggle_value(&mut self.floating_profiler, "Performance");
+                        ui.toggle_value(&mut self.gpu_textures_open, "GPU Textures");
                         ui.toggle_value(&mut self.maximize_viewport, "Maximize");
                         if self.maximize_viewport {
                             ui.toggle_value(&mut self.floating_hierarchy, "Hierarchy");

@@ -22,6 +22,7 @@ pub struct EguiRenderNode {
     textures_delta: egui::TexturesDelta,
     screen_descriptor: egui_wgpu::ScreenDescriptor,
     editor_ui: EditorUi,
+    gpu_textures: crate::gpu_textures::GpuTextureExplorer,
     viewport_menu_open: bool,
     viewport_menu_pos: egui::Pos2,
 }
@@ -39,6 +40,7 @@ impl EguiRenderNode {
                 pixels_per_point: 1.0,
             },
             editor_ui: EditorUi::new(),
+            gpu_textures: crate::gpu_textures::GpuTextureExplorer::default(),
             viewport_menu_open: false,
             viewport_menu_pos: egui::Pos2::ZERO,
         }
@@ -98,6 +100,8 @@ impl EguiRenderNode {
                 {
                     engine::profile_scope!("editor.egui.ui");
                     self.editor_ui.show(ui, state);
+                    self.gpu_textures
+                        .show(&ctx, &mut self.editor_ui.gpu_textures_open);
                 }
 
                 if self.viewport_menu_open {
@@ -183,6 +187,7 @@ impl RenderNode for EguiRenderNode {
                 predictable_texture_filtering: true,
             },
         ));
+        self.gpu_textures.reset_renderer();
     }
 
     fn prepare(&mut self, _resources: &mut RenderResources, api: &mut dyn RendererAPI) {
@@ -192,6 +197,8 @@ impl RenderNode for EguiRenderNode {
             .expect("EguiRenderNode requires WgpuBackend");
 
         let renderer = self.egui_renderer.as_mut().unwrap();
+        self.gpu_textures
+            .prepare(backend, renderer, self.editor_ui.gpu_textures_open);
 
         // Upload egui textures
         for (id, delta) in &self.textures_delta.set {

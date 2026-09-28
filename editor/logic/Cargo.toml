@@ -37,3 +37,6 @@ egui-winit = "0.34.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 egui-winit = { version = "0.34.2", default-features = false }
+
+[dev-dependencies]
+pollster = { workspace = true }
